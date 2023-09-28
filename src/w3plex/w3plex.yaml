@@ -1,0 +1,5 @@
+chains: !include config/chains.yaml
+
+applications:
+  # test comment
+  balance: !include apps/balance/config.yaml

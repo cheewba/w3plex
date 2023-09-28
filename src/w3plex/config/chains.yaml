@@ -1,0 +1,39 @@
+ethereum:
+  chain_id: 1
+  currency: ETH
+  rpc: https://rpc.ankr.com/eth
+  scan: https://etherscan.io/
+  ## extra tokens can be added to each chain,
+  ## so they will be preloaded at init time
+  # erc20:
+  #   USDC: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+
+optimism:
+  chain_id: 10
+  currency: ETH
+  rpc: https://mainnet.optimism.io
+  scan: https://optimistic.etherscan.io/
+
+bnb_chain:
+  chain_id: 56
+  currency: BNB
+  rpc: https://bsc-dataseed.binance.org
+  scan: https://bscscan.com/
+
+polygon:
+  chain_id: 137
+  currency: MATIC
+  rpc: https://polygon-rpc.com
+  scan: https://polygonscan.com/
+
+arbitrum:
+  chain_id: 42161
+  currency: ETH
+  rpc: https://arb1.arbitrum.io/rpc
+  scan: https://arbiscan.io
+
+zksync_era:
+  chain_id: 324
+  currency: ETH
+  rpc: https://mainnet.era.zksync.io
+  scan: https://explorer.zksync.io

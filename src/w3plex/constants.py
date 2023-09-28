@@ -1,0 +1,3 @@
+CONTEXT_CHAINS_KEY = '_chains'
+CONTEXT_CONFIG_KEY = '_config'
+CONTEXT_EXTRAS_KEY = '_extras'

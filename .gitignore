@@ -1,0 +1,9 @@
+.env
+__pycache__
+.vscode
+build/
+dist/
+*.egg-info/
+wallets.txt
+.DS_store
+.pyproject.toml

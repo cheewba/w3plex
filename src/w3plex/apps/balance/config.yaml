@@ -1,0 +1,11 @@
+# python application
+application: w3plex.apps.balance:balance
+# path to the file with private keys
+wallets: ./wallets.txt
+# tokens in chains to load balances for
+balances_of:
+  bnb_chain:
+    - BNB
+    - 0x55d398326f99059ff775485246999027b3197955  # USDT
+  ethereum:
+    - ETH
