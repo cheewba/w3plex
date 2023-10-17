@@ -220,7 +220,7 @@ class Runner:
         return name, service
 
     async def _init_services(self):
-        services = self.cfg.get('services')
+        services = self.cfg.get('services') or {}
         return dict(await asyncio.gather(
             *(self._init_service(name, cfg)
               for name, cfg in services.items())
