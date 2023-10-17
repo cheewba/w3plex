@@ -1,4 +1,7 @@
-chains: !include config/chains.yaml
+# chains: !include config/chains.yaml
+chains: !include
+    file: config/chains.yaml
+    # items: ["ethereum"]
 
 applications:
   # test comment

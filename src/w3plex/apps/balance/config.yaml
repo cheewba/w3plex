@@ -1,11 +1,28 @@
 # python application
 application: w3plex.apps.balance:balance
 # path to the file with private keys
-wallets: ./wallets.txt
-# tokens in chains to load balances for
-balances_of:
-  bnb_chain:
-    - BNB
-    - 0x55d398326f99059ff775485246999027b3197955  # USDT
-  ethereum:
-    - ETH
+wallets:
+  file: ./wallets.txt  # take wallets from file
+  filter: "*"  # load only part of the requests, regexp expected
+actions:
+  onchain:
+    tokens:
+      # list of the tokens to show balance for
+      - "ethereum:ETH"
+      - "bnb_chain:BNB"
+      - "bnb_chain:0x55d398326f99059ff775485246999027b3197955"  # USDT
+  debank-total:
+    action: 'debank'
+    total: true
+    # proxy: 'proxy-service'  # in case of proxy usage
+    cache_only: true
+  debank:
+    total: false
+    # proxy: 'proxy-service'  # in case of proxy usage
+    threads: 1  # if cache_only=False, number of simultaneous requests per account
+    filter:
+      # - "56:0x55d398326f99059ff775485246999027b3197955 > 0.01"  # token with address on 56th chain, that has balance more than 0.01
+      # - "*:ETH > 0.01"  # ETH token on any chain, that has balance more than 0.1
+      # - "bnb_chain:* > $0.1"  # all tokens on BNB chain that cost more than $0.1
+      # - "bnb_chain:BNB"  # BNB on bnb_chain
+      - "*:*"
