@@ -4,8 +4,11 @@ from typing import Optional, Dict, TypeVar, Any, List, TYPE_CHECKING, Union
 from w3ext import Chain
 from lazyplex import get_context, CTX_APPLICATION
 
-from ..constants import CONTEXT_CHAINS_KEY, CONTEXT_CONFIG_KEY, CONTEXT_SERVICES_KEY
+from ..constants import (
+    CONTEXT_CHAINS_KEY, CONTEXT_CONFIG_KEY, CONTEXT_SERVICES_KEY,
+)
 if TYPE_CHECKING:
+    from ..core import Application
     from ..services import Service
 
 
@@ -28,8 +31,13 @@ def get_services(*name) -> Union[List["Service"], "Service"]:
     return filtered[0] if len(filtered := [services.get(key) for key in name]) == 1 else filtered
 
 
+def get_application() -> "Application":
+    """ Return current Application. """
+    return get_context().get(CTX_APPLICATION)
+
+
 def execute_on_complete(fn, *args, **kwargs):
-    app = get_context().get(CTX_APPLICATION)
+    app = get_application()
     if app:
         app.add_complete_tasks(fn, *args, **kwargs)
 

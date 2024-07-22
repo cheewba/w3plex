@@ -1,1 +1,1 @@
-from lazyplex.plugins import *
+from lazyplex.plugins import *  # noqa: F403

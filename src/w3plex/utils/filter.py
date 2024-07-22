@@ -1,10 +1,12 @@
 import asyncio
 import re
-from typing import Any, Optional, List, Callable, Tuple
+from typing import Any, Optional, List, Callable, Tuple, Generic, TypeVar
 
-from w3ext import CurrencyAmount, Chain, Currency, TokenAmount
+from w3ext import CurrencyAmount, Chain, Currency, TokenAmount, Contract
 
 WILDCARD = '*'
+
+T = TypeVar("T")
 
 
 def _filter(fn: Callable):
@@ -101,34 +103,53 @@ class ChainFilter(AmountFilter):
         'chain': _filter_chain,
     }
 
-
-class TokenLookup:
+class ChainTemplateLookup(Generic[T]):
     def __init__(self, template: str) -> None:
         self._template = template
 
-    async def __call__(self, chains: List[Chain]) -> List[Tuple[Currency, Chain]]:
-        chain_name, token_name = self._template.split(':')
-        if token_name == WILDCARD:
-            raise ValueError("wildcard for token lookup is not allowed")
-
+    async def __call__(self, chains: List[Chain]) -> List[Tuple[T, Chain]]:
+        chain_name, *route = self._template.split(':')
         allowed_chains = [chain for chain in chains
                           if _filter_chain(chain_name)(chain)]
         tokens = await asyncio.gather(*[
-            self._get_currency(chain, token_name) for chain in allowed_chains
+            self.get_item(chain, *route) for chain in allowed_chains
         ])
         return list(filter(None, tokens))
 
-    async def _get_currency(self, chain: Chain, token_name: str) -> Optional[Tuple[Currency, Chain]]:
+    async def get_item(self, chain, *route):
+        raise NotImplementedError
+
+
+class TokenLookup(ChainTemplateLookup[Currency]):
+    async def get_item(self, chain: Chain, token_name: str) -> Optional[Tuple[Currency, Chain]]:
+        if token_name == WILDCARD:
+            raise ValueError("wildcard for token lookup is not allowed")
+
         token = None
         if token_name.startswith('0x'):
             try:
                 token = await chain.load_token(token_name)
-            except:
+            except Exception:
                 pass
         else:
             token = getattr(chain, token_name, None)
 
         return None if not token else token, chain
+
+
+class ContractLookup(ChainTemplateLookup):
+    def __init__(self, template: str, abi: Optional[str]) -> None:
+        super().__init__(template)
+        self.abi = abi
+
+    async def get_item(self, chain: Chain, address: str) -> Optional[Tuple[Contract, Chain]]:
+        if address == WILDCARD:
+            raise ValueError("wildcard for contract lookup address is not allowed")
+        return chain.contract(address)
+
+
+class ContractMethodLookup(ContractLookup):
+    pass
 
 
 def join_filters(*filters) -> Callable[[CurrencyAmount, Optional[Chain]], bool]:

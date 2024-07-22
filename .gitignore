@@ -8,3 +8,4 @@ dist/
 wallets.txt
 .DS_store
 .pyproject.toml
+*.local

@@ -3,10 +3,10 @@ from contextlib import asynccontextmanager
 
 from loguru import logger
 
-from . import Service, ServiceConfig
+from ..core import Service, EntityConfig
 
 
-class ProxiesConfig(ServiceConfig):
+class ProxiesConfig(EntityConfig):
     proxies: str
 
 

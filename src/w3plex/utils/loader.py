@@ -1,20 +1,20 @@
-from typing import Any, TypedDict, Optional, Callable, NamedTuple, Union, TypeVar
+from typing import Optional, Callable, NamedTuple, Union, TypeVar, overload, Generic, Unpack
+
+from w3ext import Account
 
 from .filter import TemplateFilter
+from ..core import Loader, EntityConfig
 
 T = TypeVar("T")
 
-class FileLoaderConfig(TypedDict):
+class FileLoaderConfig(EntityConfig):
     file: str
     filter: Optional[str]
 
 
-class FileLoader:
-    def __init__(self, config: Union[FileLoaderConfig, str]) -> None:
-        if isinstance(config, str):
-            config = {'file': config}
-        self.config = config
-
+class FileLoader(Generic[T], Loader[T, FileLoaderConfig]):
+    @overload
+    async def process(self) -> str: ...
     async def process(self, fn: Optional[Callable[[Union[str, NamedTuple]], T]] = None) -> T:
         fn = fn or (lambda item: item)
 
@@ -28,5 +28,6 @@ class FileLoader:
     def process_line(self, line: str, fn: Callable[[Union[str, NamedTuple]], T]) -> T:
         return fn(line)
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self.process(*args, **kwargs)
+
+def accounts_loader(**kwargs: Unpack[FileLoaderConfig]):
+    return lambda: FileLoader(**kwargs)(lambda item: Account.from_key(item))

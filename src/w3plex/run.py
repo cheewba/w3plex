@@ -1,31 +1,30 @@
 #!/usr/bin/env python
-import asyncio
 import argparse
+import asyncio
 import logging
 import os
-import sys
 import signal
+import sys
 import textwrap
-import traceback
-from collections import namedtuple
 from contextlib import contextmanager
-from functools import partial, wraps
+from functools import partial
 from types import MethodType
-from typing import Dict, Any, Tuple, Optional, Dict
+from typing import Any, Dict, Optional, Tuple
 
+from lazyplex import Application as _Application
+from lazyplex import create_context
+from ptpython.repl import embed
 from rich import print
 from rich.text import Text
-from ruamel.yaml import load as yaml_load, dump as yaml_dump
-from lazyplex import Application as _Application, create_context
-from w3ext import Chain
-from ptpython.repl import embed
+from ruamel.yaml import (
+    dump as yaml_dump,
+    load as yaml_load,
+)
 
-from .utils import load_path
 from .constants import CONTEXT_CHAINS_KEY, CONTEXT_SERVICES_KEY
-from .services import Service, ServiceConfig
-from .utils import load_path, AttrDict
-from .yaml import Dumper, Loader, Include
-
+from .utils import AttrDict, load_path
+from .yaml import Dumper, Include, Loader
+from .core import config_loader, ConfigTree
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +69,18 @@ def process_args():
         return func(args)
 
 
+class _AppProxy:
+    def __init__(self, app, runner) -> None:
+        self.__app = app
+        self.__runner = runner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__app, name)
+
+    def __call__(self, *args, **kwargs):
+        return self.__runner.run_application(self.__app, *args, **kwargs)
+
+
 class Shell:
     def __init__(self, args, cfg) -> None:
         self.args = args
@@ -79,24 +90,6 @@ class Shell:
 
         self._active_tasks: set[asyncio.Future] = set()
         self._main_task = None
-
-    def _load_config_applications(self):
-        result = {}
-        def wrap_app(app):
-            @wraps(app)
-            def runner(*args, **kwargs):
-                return self.runner.run_application(app, *args, **kwargs)
-            return runner
-
-        for app_name, app_cfg in self.cfg.get(APPLICATIONS_CFG_KEY, {}).items():
-            if (app_module := app_cfg.get('application')) is None:
-                raise AttributeError(f"{app_name}: field `application` is required")
-            apps = load_applications(app_module)
-            if not len(apps):
-                raise ValueError(f"No applications found for path '{app_module}'")
-            result[app_name] = wrap_app(apps[0])
-
-        return namedtuple("app", result.keys())(*result.values())
 
     def _term_active_tasks(self):
         for task in self._active_tasks:
@@ -116,22 +109,23 @@ class Shell:
             self.loop.run_until_complete(self._main_task)
         except KeyboardInterrupt:
             pass
-        except Exception:
-            logger.exception()
+        except Exception as e:
+            logger.exception(e)
 
     async def _run_shell(self):
-        apps = self._load_config_applications()
+        apps = self.runner.tree.get_applications()
 
         width, _ = os.get_terminal_size()
         banner = textwrap.dedent(f"""
             {"=" * (width)}
             W3plex interactive shell
             The following variables are available:
-                - `app`: contains all available applications from the config file.
-                {{ {", ".join(set(apps._fields))} }}
+                - `apps`: all applications found in the config file.
+                {{ {", ".join(set(apps.keys()))} }}
                 - `cfg`: config loaded from the file {self.args.config}
                 - `services`: dictionary of loaded from config services
                 - `chains`: dictionary of loaded from config chains
+                - `tree`: resolved objects tree loaded from the config
             {"=" * width}
         """).strip()
         print(banner)
@@ -139,8 +133,9 @@ class Shell:
         globals = {
             'app': apps,
             'cfg': dict(self.cfg),
-            'services': AttrDict(self.runner.services),
-            'chains': AttrDict(self.runner.chains),
+            'services': AttrDict(self.runner.tree.get_services()),
+            'chains': AttrDict(self.runner.tree.get_chains()),
+            'tree': await config_loader.parse(self.cfg)
         }
 
         async def eval_async(repl, text):
@@ -168,8 +163,8 @@ class Shell:
 
 class Runner:
     cfg: Optional[Dict] = None
-    chains: Optional[Dict[str, Chain]] = None
-    services: Optional[Dict[str, Service]] = None
+
+    _tree: Optional[ConfigTree] = None
 
     def __init__(self, loop=None) -> None:
         self.loop: asyncio.AbstractEventLoop = loop or asyncio.get_event_loop()
@@ -177,6 +172,10 @@ class Runner:
     @property
     def is_initialized(self) -> bool:
         return self.cfg is not None
+
+    @property
+    def tree(self) -> ConfigTree:
+        return self._tree
 
     def blocking_call(self, coro):
         if self.loop.is_running():
@@ -192,58 +191,37 @@ class Runner:
         with self._app_context(app):
             await app(*args, **kwargs)
 
+    async def init_application(self, cfg: Dict, path: str):
+        def wrap_app(app):
+            return _AppProxy(app, self)
+
+        app_name = path.rsplit('.', 1)[-1]
+        if (app_module := cfg.get('__init__')) is None:
+            raise AttributeError(f"{app_name}: field `application` is required")
+        apps = load_applications(app_module)
+        if not len(apps):
+            raise ValueError(f"No applications found for path '{app_module}'")
+        (app := apps[0]).name = app_name
+        return wrap_app(app)
+
     async def init(self, cfg):
         assert self.cfg is None, "Already initialized. Finalize first."
 
+        # TODO: if there're more that one runner, will be conflict
+        config_loader.add_node(
+            r"^applications\.[^.]+$", 'applications'
+        )(self.init_application)
+
+        self._tree = await config_loader.parse(cfg)
         self.cfg = cfg
-        self.services = await self._init_services()
-        self.chains = await self._load_chains()
 
     async def finalize(self):
         assert self.cfg is not None, "Not initialized, to be finilized"
 
         self.cfg = None
         await asyncio.gather(*[
-            service.finalize() for service in self.services.values()
+            service.finalize() for service in self._tree.get_services().values()
         ])
-        self.services = None
-        self.chains = None
-
-    async def _init_service(
-        self,
-        name: str,
-        config: ServiceConfig,
-    ) -> Dict[str, "Service"]:
-        service: Service = load_path(config['service'])(config)
-        await service.init()
-
-        return name, service
-
-    async def _init_services(self):
-        services = self.cfg.get('services') or {}
-        return dict(await asyncio.gather(
-            *(self._init_service(name, cfg)
-              for name, cfg in services.items())
-        ))
-
-    async def _load_chain(
-        self,
-        name: str,
-        *,
-        erc20: Optional[dict] = None,
-        **chain_info
-    ) -> Dict[str, "Chain"]:
-        chain = await Chain.connect(name=name, **chain_info)
-        if (erc20):
-            await asyncio.gather(*[chain.load_token(token, cache_as=key)
-                                   for key, token in erc20.items()])
-        return name, chain
-
-    async def _load_chains(self):
-        chains = self.cfg.get('chains') or {}
-        return dict(await asyncio.gather(
-            *(self._load_chain(name, **info) for name, info in chains.items())
-        ))
 
     @contextmanager
     def _app_context(self, app: _Application):
@@ -256,8 +234,8 @@ class Runner:
         with create_context({
             CONTEXT_CONFIG_KEY: dict(app_cfg),
             CONTEXT_EXTRAS_KEY: dict(cfg),
-            CONTEXT_CHAINS_KEY: dict(self.chains),
-            CONTEXT_SERVICES_KEY: dict(self.services),
+            CONTEXT_CHAINS_KEY: dict(self.tree.get_chains()),
+            CONTEXT_SERVICES_KEY: dict(self.tree.get_services()),
         }):
             self._extend_app_actions(app, app_cfg)
             yield app
@@ -278,15 +256,6 @@ def run_shell_cmd(args, *, cfg):
 
 
 def run_app_cmd(args, *, name, cfg):
-    app_cfg = cfg.get(APPLICATIONS_CFG_KEY).get(name)
-    if (app_module := app_cfg.get('application')) is None:
-        raise AttributeError(f"{name}: field `application` is required")
-
-    apps = load_applications(app_module)
-    if not apps:
-        raise ValueError(f'{name}: can\'t load application "{app_module}"')
-
-    (app := apps[0]).name = name
     app_args, app_kwargs = [], {}
     for item in getattr(args, 'args', []):
         parts = item.split("=", 1)
@@ -302,6 +271,9 @@ def run_app_cmd(args, *, name, cfg):
     coro = None
     async def command():
         await runner.init(cfg)
+        app = runner.tree.get(APPLICATIONS_CFG_KEY).get(name)
+        if app is None:
+            raise AttributeError(f"Application {name} not found")
 
         nonlocal coro
         coro = asyncio.ensure_future(

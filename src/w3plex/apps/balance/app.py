@@ -94,7 +94,7 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
             duplicates.add(str(account))
 
         title = Text()
-        title.append(str(account),
+        title.append(f"{i}. {account}",
                      style=Style(bold=True, color="green" if not is_duplicate else "red",
                                  link=Debank.account_link(account)))
         if account_total:
@@ -114,7 +114,7 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
     def format_all():
         total, rows = 0, []
         for i, item in enumerate(result):
-            row, row_total = format_row(accounts[i], item, i)
+            row, row_total = format_row(accounts[i], item, i + 1)
             total += row_total
             rows.append(row)
 
@@ -153,15 +153,26 @@ async def balance(action, input):
 @balance.input
 async def get_input():
     config = get_config()
-    return await FileLoader(config['wallets'])(
+    return await FileLoader(file=config['wallets'])(
         lambda item: item if is_erc_address(item) else Account.from_key(item).address
     )
 
 
 @balance.action('onchain', default=True)
 async def onchain_balance(account, config):
+    threads = threads if (threads := config.get('threads', empty)) is not empty else 1
+    semaphore = asyncio.Semaphore(threads)
     async def balance(chain, tokens):
-        return chain, await balance_of(account, chain, *tokens)
+        async with semaphore:
+            attempts = config.get('attempts') or 1
+            while attempts > 0:
+                try:
+                    return chain, await balance_of(account, chain, *tokens)
+                except Exception as err:
+                    attempts -= 1
+                    if attempts == 0:
+                        raise err
+                    await asyncio.sleep(1)
 
     chains = get_chains()
     found_tokens = itertools.chain(
