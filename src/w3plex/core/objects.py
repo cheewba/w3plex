@@ -1,4 +1,4 @@
-from typing import Generic, TypeVar, Unpack, TypedDict, Callable, overload
+from typing import Generic, TypeVar, Unpack, TypedDict, Callable, overload, Any
 
 from lazyplex import Application, application as _application
 

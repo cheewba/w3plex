@@ -33,7 +33,9 @@ class Loader(yaml.RoundTripLoader):
             # For a file include
             filename = os.path.join(self._root, self.construct_scalar(node))
             with open(filename, 'r') as f:
-                return yaml.YAML(typ='rt').load(f)
+                output = yaml.YAML(typ='rt').load(f)
+                setattr(output, '__include_path__', os.path.abspath(filename))
+                return output
         elif isinstance(node, yaml.MappingNode):
             # If specific parts of the file are to be included
             # Here we are creating a new CommentsMap, which is compatible with ruamel's requirements
@@ -47,9 +49,11 @@ class Loader(yaml.RoundTripLoader):
 
             if parts is not None:
                 # Assuming parts need to be returned as a dict
-                return {part: full_content[part] for part in parts if part in full_content}
+                output = {part: full_content[part] for part in parts if part in full_content}
+                setattr(output, '__include_path__', os.path.abspath(filename))
             else:
                 # If no specific parts are specified, return the full content
+                setattr(full_content, '__include_path__', os.path.abspath(filename))
                 return full_content
         else:
             raise ValueError("Unrecognized node type in !include directive")

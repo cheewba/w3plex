@@ -132,7 +132,8 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
 
 
 @application(return_exceptions=False)
-async def balance(action, input):
+async def balance(action, **config):
+    input = config.get('wallets')
     if isinstance(input, str):
         # in case of input provided via cmd line,
         # check there's a string and wrap it to the iterable
@@ -150,16 +151,16 @@ async def balance(action, input):
         print(_format_output(input, result, ctx['result_filter']))
 
 
-@balance.input
-async def get_input():
-    config = get_config()
-    return await FileLoader(file=config['wallets'])(
-        lambda item: item if is_erc_address(item) else Account.from_key(item).address
-    )
+# @balance.input
+# async def get_input(value):
+#     config = get_config()
+#     return await FileLoader(file=config['wallets'])(
+#         lambda item: item if is_erc_address(item) else Account.from_key(item).address
+#     )
 
 
 @balance.action('onchain', default=True)
-async def onchain_balance(account, config):
+async def onchain_balance(account, **config):
     threads = threads if (threads := config.get('threads', empty)) is not empty else 1
     semaphore = asyncio.Semaphore(threads)
     async def balance(chain, tokens):
@@ -191,7 +192,7 @@ async def onchain_balance(account, config):
 
 
 @balance.action('debank')
-async def debank_balance(account, config, *, debank: Debank = None):
+async def debank_balance(account, *, debank: Debank = None, **config):
     ctx = get_context()
     if not ctx.get('result_filter'):
         filters = [AmountFilter(flt) for flt in config.get('filter') or []]

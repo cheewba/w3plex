@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from collections import defaultdict
 from inspect import isclass
@@ -26,6 +27,36 @@ COLLECTIONS = (
 
 IMPORT_KEY = '__init__'
 IMPORT_SIGN = '$'
+
+
+def validate_relative_path(path, root=None):
+    if not root or not isinstance(path, str):
+        return path
+
+    if not os.path.isabs(path):
+        joined_path = os.path.join(root, path)
+        if os.path.exists(joined_path):
+            return joined_path
+    return path
+
+
+def validate_relative_import(path, root=None):
+    if (not root
+            or not isinstance(path, str)
+            or not path.startswith('.')):
+        return path
+
+    level_up = len(path) - len(path.lstrip('.')) - 1
+    base_components = root.split('/')
+    if level_up <= len(base_components):
+        base_components = base_components[:len(base_components) - level_up]
+    else:
+        raise ValueError(f"Too many leading dots in '{path}' "
+                         f"for the given base path '{root}'")
+
+    relative_import = path[level_up + 1:]
+    full_import = '.'.join(base_components + relative_import.split('.'))
+    return full_import.rstrip('.')
 
 
 class SkipNode(Exception):
@@ -84,7 +115,8 @@ class _ConfigLoader:
         return _filter
 
     async def _get_node(
-        self, cfg: Dict, path: str, collections: Optional[defaultdict]
+        self, cfg: Dict, path: str, collections: Optional[defaultdict],
+        relative_path: Optional[str] = None
     ) -> Optional[Callable[['EntityConfig', str], 'Entity']]:
         for flt, node, collection in self._filters[::-1]:
             # check filters as LIFO
@@ -100,24 +132,35 @@ class _ConfigLoader:
                     continue
         return cfg
 
-    async def parse(self, cfg: Dict) -> "ConfigTree":
+    async def parse(self, cfg: Dict, cfg_path: str) -> "ConfigTree":
         unresolved_states = []
+
+        def get_node_rel_path(node, root_path: str) -> str:
+            child = getattr(node, '__include_path__', None)
+            return os.path.relpath(os.path.dirname(child), root_path) if child else None
 
         def _resolve(collection, value, key, state):
             def callback(val):
                 collection[key] = val
                 state['unresolved'] -= 1
+
             if isinstance(value, str) and value.startswith(IMPORT_SIGN):
                 state['unresolved'] += 1
                 resolver.resolve_once_ready(value[1:], callback)
 
         async def _parse_cfg(cfg: Dict, path: str = "",
-                             collections: Optional[defaultdict] = None):
+                             collections: Optional[defaultdict] = None,
+                             relative_path: Optional[str] = None) -> Optional[Dict]:
+            if collections is None:
+                collections = defaultdict(list)
             state = {'parsed': (parsed := AttrDict()), 'unresolved': 0, 'path': path}
             for key, value in cfg.items():
                 if isinstance(value, dict):
                     value_path = ".".join([path, key]) if path else key
-                    entity = await _parse_cfg(value, value_path, collections)
+                    entity = await _parse_cfg(
+                        value, value_path, collections,
+                        get_node_rel_path(value, relative_path) or relative_path
+                    )
                     if entity:
                         if not isinstance(entity, dict):
                             resolver.register(value_path, entity)
@@ -128,16 +171,19 @@ class _ConfigLoader:
                 elif isinstance(value, str):
                     _resolve(parsed, value, key, state)
                 if key not in parsed:
+                    value = validate_relative_path(value, relative_path)
+                    value = validate_relative_import(value, relative_path)
                     parsed[key] = value
 
             if state["unresolved"] == 0:
-                return await self._get_node(parsed, path, collections)
+                return await self._get_node(parsed, path, collections, relative_path)
 
             unresolved_states.append(state)
             return None
 
         resolver = _Resolver()
-        parsed = await _parse_cfg(cfg, "", collections := defaultdict(AttrDict))
+        parsed = await _parse_cfg(cfg, "", collections := defaultdict(AttrDict),
+                                  get_node_rel_path(cfg, os.path.dirname(cfg_path)))
 
         unresolved = resolver.get_unresolved()
         while True:
@@ -173,8 +219,7 @@ class ConfigTree(AttrDict):
     def __getattr__(self, name: str) -> Any:
         if name.startswith('get_'):
             collection = self._collections.get(name[4:])
-            if collection is not None:
-                return lambda: collection
+            return lambda: collection
         return super().__getattr__(name)
 
     async def close(self):

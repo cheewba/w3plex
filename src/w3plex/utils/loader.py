@@ -3,7 +3,7 @@ from typing import Optional, Callable, NamedTuple, Union, TypeVar, overload, Gen
 from w3ext import Account
 
 from .filter import TemplateFilter
-from ..core import Loader, EntityConfig
+from ..core import Loader, EntityConfig, CallableEntity
 
 T = TypeVar("T")
 

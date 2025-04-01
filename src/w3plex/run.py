@@ -8,6 +8,7 @@ import sys
 import textwrap
 from contextlib import contextmanager
 from functools import partial
+from inspect import iscoroutinefunction, isfunction, iscoroutine
 from types import MethodType
 from typing import Any, Dict, Optional, Tuple
 
@@ -46,7 +47,8 @@ def process_args():
     cfg_parser.add_argument('kwargs', nargs="*")
     cfg_args, _ = cfg_parser.parse_known_args()
 
-    cfg = load_config(cfg_args.config) if os.path.exists(cfg_args.config) else None
+    cfg_path = os.path.abspath(cfg_args.config)
+    cfg = load_config(cfg_path) if os.path.exists(cfg_path) else None
 
     parser = _get_base_args_parse()
     actions = parser.add_subparsers(title="w3plex actions", required=False)
@@ -55,12 +57,13 @@ def process_args():
 
     if cfg is not None:
         shell = actions.add_parser('shell', description="Start w3ext shell for the current config")
-        shell.set_defaults(func=partial(run_shell_cmd, cfg=cfg))
+        shell.set_defaults(func=partial(run_shell_cmd, cfg=cfg, cfg_path=cfg_path))
 
         for app_name in cfg.get(APPLICATIONS_CFG_KEY, {}).keys():
             cmd = actions.add_parser(app_name, description=f"Run `{app_name}` application")
             cmd.add_argument("args", nargs='*', default=[], help="Single value or Key-value pairs separated by a comma. (e.g., value1 key2=value2)")
-            cmd.set_defaults(func=partial(run_app_cmd, name=app_name, cfg=cfg))
+            cmd.set_defaults(func=partial(run_app_cmd, name=app_name, cfg=cfg,
+                                          cfg_path=cfg_path))
 
     args = parser.parse_args(" ".join(sys.argv[1:]).split(" "))
 
@@ -70,21 +73,38 @@ def process_args():
 
 
 class _AppProxy:
-    def __init__(self, app, runner) -> None:
+    def __init__(self, app, runner, cfg) -> None:
         self.__app = app
         self.__runner = runner
+        self.__cfg = cfg
+
+    @property
+    def tree(self) -> Dict:
+        return dict(self.__cfg)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.__app, name)
 
     def __call__(self, *args, **kwargs):
-        return self.__runner.run_application(self.__app, *args, **kwargs)
+        def filter_key(key):
+            return (
+                not key.startswith('__')
+                and key not in [APPLICATIONS_CFG_KEY, ACTIONS_CFG_KEY]
+            )
+
+        a, kw = self.__app.update_args(
+            [],
+            {key: value for key, value in self.__cfg.items() if filter_key(key)},
+            *args, **kwargs
+        )
+        return self.__runner.run_application(self.__app, *a, **kw)
 
 
 class Shell:
-    def __init__(self, args, cfg) -> None:
+    def __init__(self, args, cfg, cfg_path) -> None:
         self.args = args
         self.cfg = cfg
+        self.cfg_path = cfg_path
         self.loop = asyncio.get_event_loop()
         self.runner = Runner(self.loop)
 
@@ -97,7 +117,7 @@ class Shell:
 
     def __call__(self) -> Any:
         async def task():
-            await self.runner.init(self.cfg)
+            await self.runner.init(self.cfg, self.cfg_path)
             try:
                 await self._run_shell()
             finally:
@@ -125,17 +145,17 @@ class Shell:
                 - `cfg`: config loaded from the file {self.args.config}
                 - `services`: dictionary of loaded from config services
                 - `chains`: dictionary of loaded from config chains
-                - `tree`: resolved objects tree loaded from the config
+                - `root`: resolved objects tree loaded from the config
             {"=" * width}
         """).strip()
         print(banner)
 
         globals = {
-            'app': apps,
             'cfg': dict(self.cfg),
+            'apps': apps,
             'services': AttrDict(self.runner.tree.get_services()),
             'chains': AttrDict(self.runner.tree.get_chains()),
-            'tree': await config_loader.parse(self.cfg)
+            'root': self.runner.tree,
         }
 
         async def eval_async(repl, text):
@@ -163,6 +183,7 @@ class Shell:
 
 class Runner:
     cfg: Optional[Dict] = None
+    cfg_path: Optional[str] = None
 
     _tree: Optional[ConfigTree] = None
 
@@ -177,6 +198,19 @@ class Runner:
     def tree(self) -> ConfigTree:
         return self._tree
 
+    async def resolve_value(self, value) -> Any:
+        if iscoroutinefunction(value) or isfunction(value):
+            value = value()
+        if iscoroutine(value):
+            value = await value
+        return value
+
+    async def resolve_args(self, *args, **kwargs) -> Tuple[Tuple, Dict]:
+        return (
+            [await self.resolve_value(arg) for arg in args],
+            {key: (await self.resolve_value(value)) for key, value in kwargs.items()}
+        )
+
     def blocking_call(self, coro):
         if self.loop.is_running():
             # If the loop is running, we should schedule the coroutine as a new task
@@ -189,11 +223,12 @@ class Runner:
 
     async def run_application(self, app: _Application, *args, **kwargs):
         with self._app_context(app):
+            args, kwargs = await self.resolve_args(*args, **kwargs)
             await app(*args, **kwargs)
 
     async def init_application(self, cfg: Dict, path: str):
         def wrap_app(app):
-            return _AppProxy(app, self)
+            return _AppProxy(app, self, cfg)
 
         app_name = path.rsplit('.', 1)[-1]
         if (app_module := cfg.get('__init__')) is None:
@@ -204,7 +239,7 @@ class Runner:
         (app := apps[0]).name = app_name
         return wrap_app(app)
 
-    async def init(self, cfg):
+    async def init(self, cfg, cfg_path):
         assert self.cfg is None, "Already initialized. Finalize first."
 
         # TODO: if there're more that one runner, will be conflict
@@ -212,13 +247,15 @@ class Runner:
             r"^applications\.[^.]+$", 'applications'
         )(self.init_application)
 
-        self._tree = await config_loader.parse(cfg)
+        self._tree = await config_loader.parse(cfg, cfg_path)
         self.cfg = cfg
+        self.cfg_path = cfg_path
 
     async def finalize(self):
         assert self.cfg is not None, "Not initialized, to be finilized"
 
         self.cfg = None
+        self.cfg_path = None
         await asyncio.gather(*[
             service.finalize() for service in self._tree.get_services().values()
         ])
@@ -231,31 +268,32 @@ class Runner:
 
         cfg = dict(self.cfg)
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
+        app_tree = self._tree.get(APPLICATIONS_CFG_KEY).get(app.name).tree
         with create_context({
             CONTEXT_CONFIG_KEY: dict(app_cfg),
             CONTEXT_EXTRAS_KEY: dict(cfg),
-            CONTEXT_CHAINS_KEY: dict(self.tree.get_chains()),
-            CONTEXT_SERVICES_KEY: dict(self.tree.get_services()),
+            CONTEXT_CHAINS_KEY: dict(chains if (chains := self.tree.get_chains()) else {}),
+            CONTEXT_SERVICES_KEY: dict(services if (services := self.tree.get_services()) else {}),
         }):
-            self._extend_app_actions(app, app_cfg)
+            self._extend_app_actions(app, app_tree)
             yield app
 
     def _extend_app_actions(self, app: _Application, app_cfg: Dict):
         for action_name, action_cfg in app_cfg.get(ACTIONS_CFG_KEY, {}).items():
-            action_cfg = dict(action_cfg)  # create a copy to modify it
+            action_cfg = dict(action_cfg or {})  # create a copy to modify it
             action_base = action_cfg.pop('action', None) or action_name
             app_action = app._actions.get(action_base)
             if app_action is None:
                 raise ValueError(f"Application '{app.name}' doesn't have any action, "
                                 f"that could be bound to config action '{action_name}'")
-            app._actions[action_name] = partial(app_action, config=action_cfg)
+            app._actions[action_name] = partial(app_action, **action_cfg)
 
 
-def run_shell_cmd(args, *, cfg):
-    Shell(args, cfg)()
+def run_shell_cmd(args, *, cfg, cfg_path):
+    Shell(args, cfg, cfg_path)()
 
 
-def run_app_cmd(args, *, name, cfg):
+def run_app_cmd(args, *, name, cfg, cfg_path):
     app_args, app_kwargs = [], {}
     for item in getattr(args, 'args', []):
         parts = item.split("=", 1)
@@ -270,7 +308,7 @@ def run_app_cmd(args, *, name, cfg):
 
     coro = None
     async def command():
-        await runner.init(cfg)
+        await runner.init(cfg, cfg_path)
         app = runner.tree.get(APPLICATIONS_CFG_KEY).get(name)
         if app is None:
             raise AttributeError(f"Application {name} not found")

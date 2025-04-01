@@ -130,7 +130,7 @@ class Debank:
         cached_only: bool = False,
         chains_filter: Optional[Callable[[Chain], bool]] = None
     ) -> Dict["Chain", List[EstimatedCurrencyAmount]]:
-        address = address.lower()
+        address = str(address).lower()
 
         if cached_only:
             async with self._api_request('get', CACHED_BALANCE_API_URL.format(address=address)) as resp:

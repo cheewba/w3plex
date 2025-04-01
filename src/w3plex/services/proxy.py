@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 from loguru import logger
 
@@ -16,14 +17,15 @@ class ProxyService(Service[ProxiesConfig]):
     async def init(self):
         self._proxies = asyncio.Queue()
         with open(self.config['proxies'], 'r') as fr:
-            for proxy in fr.readlines():
-                await self._proxies.put(proxy)
+            for line in fr.readlines():
+                if (proxy := line.strip()):
+                    await self._proxies.put(proxy)
 
     @asynccontextmanager
-    async def get_proxy(self) -> str:
+    async def get_proxy(self) -> AsyncGenerator[str, None]:
         proxy = None
         try:
-            if not self._proxies.qsize:
+            if not self._proxies.qsize():
                 logger.debug("Waiting for proxy...")
             proxy = await self._proxies.get()
             yield proxy
