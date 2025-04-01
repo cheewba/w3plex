@@ -14,14 +14,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "loguru~=0.7.0",
+    "loguru==0.7.*",
     "ruamel.yaml==0.17.32",
-    "aiohttp~=3.8.4",
-    "aiohttp_socks~=0.8.3",
-    'ptpython~=3.0.23',
-    'rich~=13.6.0',
-    "eciespy~=0.4.0",
-    "hexbytes~=0.3.1",
+    "aiohttp==3.11.*",
+    "aiohttp_socks==0.10.*",
+    'ptpython==3.0.23',
+    'rich==13.*',
     "w3ext @ git+https://github.com/cheewba/w3ext.git@0.0.2#egg=w3ext",
     "lazyplex @ git+https://github.com/cheewba/lazyplex.git@0.0.2#egg=lazyplex",
 ]
