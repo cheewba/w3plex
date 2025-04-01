@@ -28,6 +28,9 @@ dynamic = ["version"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"*" = ["*.yaml"]
+
 [project.scripts]
 w3plex = "w3plex.run:main"
 
