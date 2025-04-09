@@ -35,7 +35,11 @@ class Quote:
         return f"{self.chain}: {input_} -> {output_}"
 
 
-class OdosError(Exception):
+class OdosError(ModuleError):
+    pass
+
+
+class TransactionFailed(OdosError):
     pass
 
 
@@ -145,8 +149,12 @@ class Odos:
             return False
 
         nonce: int = await self.chain.get_nonce(self.account.address)
-        await asyncio.gather(*[approve(amount) for amount in need_permissions])
-
+        tx_hashes = await asyncio.gather(
+            *[approve(amount) for amount in need_permissions])
+        await asyncio.gather(
+            *[self.chain.wait_for_transaction_receipt(tx_hash)
+              for tx_hash in tx_hashes]
+        )
         return True
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -167,15 +175,23 @@ class Odos:
                 raise OdosError(msg)
             return await resp.json()
 
+    async def get_gas_price(self):
+        response = await self._api_request(
+            'get', GAS_PRICE_URL.format(chain_id=self.chain.chain_id)
+        )
+        gas_price = response.get('baseFee') or 0
+        if not gas_price:
+            prices = response.get('prices')
+            if prices:
+                gas_price = int(sum([price['fee'] for price in prices]) / len(prices))
+        return gas_price
+
     async def get_quote(
         self,
         input_: Union["CurrencyAmount", List["CurrencyAmount"]],
         output_: Union["Currency", List["Currency"], List[Tuple["Currency", float]]],
         slippage: float = 0.5
     ) -> Quote:
-        gas_price = await self._api_request(
-            'get', GAS_PRICE_URL.format(chain_id=self.chain.chain_id)
-        )
         data = {
             "chainId": int(self.chain.chain_id),
             "inputTokens": self._format_input(input_),
@@ -183,7 +199,7 @@ class Odos:
             "slippageLimitPercent": slippage,
             "userAddr": self.account.address,
             "referralCode": self.ref_code or 1,
-            "gasPrice": gas_price["baseFee"],
+            "gasPrice": await self.get_gas_price(),
             "disableRFQs": False,
             "likeAsset": True,
             "compact": True,
@@ -208,8 +224,10 @@ class Odos:
             # get new transaction data to be sure it's up to date
             tx_data = (await self._build_swap_tx(quote))["transaction"]
 
-        print(tx_data)
         tx_hash = await self.chain.send_transaction(tx_data, self.account)
         logger.info(f"{self.name}: Swap transaction sent: {self.chain.get_tx_scan(tx_hash)}")
 
-        return await self.chain.wait_for_transaction_receipt(tx_hash)
+        receipt = await self.chain.wait_for_transaction_receipt(tx_hash)
+        if receipt.status != 1:
+            raise TransactionFailed(f"{self.name}: Swap error: {receipt.status}")
+        return receipt
