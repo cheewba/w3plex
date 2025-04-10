@@ -21,7 +21,7 @@ dependencies = [
     'ptpython==3.0.23',
     'rich==13.*',
     "w3ext @ git+https://github.com/cheewba/w3ext.git@0.0.3#egg=w3ext",
-    "lazyplex @ git+https://github.com/cheewba/lazyplex.git@0.0.2#egg=lazyplex",
+    "lazyplex @ git+https://github.com/cheewba/lazyplex.git@0.0.3#egg=lazyplex",
 ]
 dynamic = ["version"]
 
