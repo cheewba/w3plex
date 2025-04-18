@@ -20,8 +20,8 @@ dependencies = [
     "aiohttp_socks==0.10.*",
     'ptpython==3.0.23',
     'rich==13.*',
-    "w3ext @ git+https://github.com/cheewba/w3ext.git@0.0.3#egg=w3ext",
-    "lazyplex @ git+https://github.com/cheewba/lazyplex.git@0.0.3#egg=lazyplex",
+    "w3ext @ git+https://github.com/cheewba/w3ext.git@main#egg=w3ext",
+    "lazyplex @ git+https://github.com/cheewba/lazyplex.git@main#egg=lazyplex",
 ]
 dynamic = ["version"]
 

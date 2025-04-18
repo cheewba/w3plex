@@ -223,6 +223,7 @@ class Odos:
             # if we sent some permissions tx's, it might be better to
             # get new transaction data to be sure it's up to date
             tx_data = (await self._build_swap_tx(quote))["transaction"]
+            await asyncio.sleep(1)  # wait for tx to be mined and nonce updated
 
         tx_hash = await self.chain.send_transaction(tx_data, self.account)
         logger.info(f"{self.name}: Swap transaction sent: {self.chain.get_tx_scan(tx_hash)}")
