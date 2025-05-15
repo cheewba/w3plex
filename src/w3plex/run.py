@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
-import logging
 import os
 import signal
 import sys
@@ -10,7 +9,7 @@ from contextlib import contextmanager
 from functools import partial
 from inspect import iscoroutinefunction, isfunction, iscoroutine
 from types import MethodType
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 from lazyplex import Application as _Application
 from lazyplex import create_context
@@ -26,13 +25,21 @@ from .constants import CONTEXT_CHAINS_KEY, CONTEXT_SERVICES_KEY
 from .utils import AttrDict, load_path
 from .yaml import Dumper, Include, Loader
 from .core import config_loader, ConfigTree
+from .logging import logger
 
-logger = logging.getLogger(__name__)
 
 CHAINS_CONFIG_NAME = 'chains.yaml'
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'w3plex.yaml')
 APPLICATIONS_CFG_KEY = 'applications'
 ACTIONS_CFG_KEY = 'actions'
+LOGGING_CFG_KEY = 'logging'
+LOGGING_DEFAULT_FORMAT = (
+    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
+    "<level>{level: <8}</level> | "
+    "<cyan>{extra[application]}</cyan>:"
+    "<cyan>{extra[action]}</cyan> | "
+    "{extra[item_index]}. <cyan>{extra[item]}</cyan> - <level>{message}</level>"
+)
 
 
 def _get_base_args_parse(*args, **kwargs) -> Tuple[argparse.ArgumentParser]:
@@ -250,6 +257,25 @@ class Runner:
         self._tree = await config_loader.parse(cfg, cfg_path)
         self.cfg = cfg
         self.cfg_path = cfg_path
+        self.init_logger(cfg.get('logging') or [])
+
+    def _parse_log_handler(self, config) -> Any:
+        if (handler := config.pop('handler', None)) is not None:
+            if isinstance(handler, str):
+                return load_path(handler)
+            return handler
+        elif (filename := config.pop('file', None)) is not None:
+            return os.path.join(os.path.dirname(self.cfg_path), filename)
+        return sys.stderr
+
+    def init_logger(self, loggers: List[Dict]):
+        for log in loggers:
+            kwargs = {
+                "sink": self._parse_log_handler(log),
+                "format": LOGGING_DEFAULT_FORMAT,
+            }
+            kwargs.update(log)
+            logger.add(**kwargs)
 
     async def finalize(self):
         assert self.cfg is not None, "Not initialized, to be finilized"

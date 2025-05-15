@@ -1,10 +1,58 @@
+from dataclasses import dataclass
 from typing import Generic, TypeVar, Unpack, TypedDict, Callable, overload, Any
 
-from lazyplex import Application, application as _application
+from lazyplex import (
+    Application as _Application,
+    ApplicationAction as _ApplicationAction,
+    application as _application,
+)
+from ..constants import CONTEXT_CONFIG_KEY, CONTEXT_LOGGER_KEY
+from ..logging import logger
+from ..utils import get_context
 
 
 T = TypeVar('T')
 Cfg = TypeVar('Cfg', bound="EntityConfig")
+
+
+class ApplicationAction(_ApplicationAction):
+    async def get_item_context(self, *args, **kwargs):
+        ctx = await super().get_item_context(*args, **kwargs)
+        logger = get_context()[CONTEXT_LOGGER_KEY]
+        logger = logger.bind(**{
+            "item": ctx[self.context_key],
+            "item_index": ctx[f"{self.context_key}_index"]
+        })
+
+        return {
+            CONTEXT_LOGGER_KEY: logger,
+            **ctx
+        }
+
+    def process_item(self, item: Any, *args, **kwargs):
+        if isinstance(item, ActionData):
+            kwargs['index'] = item.index
+            item = item.item
+        return super().process_item(item, *args, **kwargs)
+
+
+class Application(_Application):
+    action_class = ApplicationAction
+
+    async def update_application_context(self, ctx):
+        await super().update_application_context(ctx)
+        _logger = logger.bind(
+            application=self.name,
+            application_config=ctx.get(CONTEXT_CONFIG_KEY),
+        )
+        ctx[CONTEXT_LOGGER_KEY] = _logger
+
+
+@dataclass
+class ActionData(Generic[T]):
+    item: T
+    index: int
+
 
 @overload
 def application(fn: Callable) -> Application: ...
