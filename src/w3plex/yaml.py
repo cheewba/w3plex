@@ -28,6 +28,22 @@ class Loader(yaml.RoundTripLoader):
         self._root = os.path.split(stream.name)[0]
         super(Loader, self).__init__(stream, *args, **kwargs)
 
+    def flatten_mapping(self, node):
+        index = 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag == 'tag:yaml.org,2002:merge' and value_node.tag == '!include':
+                # in case of merging !include tags, we need to create a dummy node
+                # and replace the value_node with it
+                # to avoid ruamel.yaml from raising an error
+                # since flatten_mapping expects a value node to be a MappingNode
+                # but !include is a ScalarNode
+                dummy_node = yaml.MappingNode(tag='!include', value=value_node.value)
+                self.constructed_objects[dummy_node] = self.construct_object(value_node, deep=True)
+                node.value[index] = (key_node, dummy_node)
+            index += 1
+        return super(Loader, self).flatten_mapping(node)
+
     def include(self, node):
         if isinstance(node, yaml.ScalarNode):
             # For a file include
