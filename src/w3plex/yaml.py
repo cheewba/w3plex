@@ -1,3 +1,4 @@
+import io
 import os
 from typing import Dict, Optional
 
@@ -44,14 +45,20 @@ class Loader(yaml.RoundTripLoader):
             index += 1
         return super(Loader, self).flatten_mapping(node)
 
+    def _load_yaml(self, filename):
+        with open(filename, 'r') as f:
+            expanded = os.path.expandvars(f.read())
+            stream = io.StringIO(expanded)
+            stream.name = os.path.abspath(filename)
+            return yaml.YAML(typ='rt').load(expanded)
+
     def include(self, node):
         if isinstance(node, yaml.ScalarNode):
             # For a file include
             filename = os.path.join(self._root, self.construct_scalar(node))
-            with open(filename, 'r') as f:
-                output = yaml.YAML(typ='rt').load(f)
-                setattr(output, '__include_path__', os.path.abspath(filename))
-                return output
+            output = self._load_yaml(filename)
+            setattr(output, '__include_path__', os.path.abspath(filename))
+            return output
         elif isinstance(node, yaml.MappingNode):
             # If specific parts of the file are to be included
             # Here we are creating a new CommentsMap, which is compatible with ruamel's requirements
@@ -60,9 +67,7 @@ class Loader(yaml.RoundTripLoader):
             filename = os.path.join(self._root, mapping.get('file'))
             parts = mapping.get('items')
 
-            with open(filename, 'r') as f:
-                full_content = yaml.YAML(typ='rt').load(f)
-
+            full_content = self._load_yaml(filename)
             if parts is not None:
                 # Assuming parts need to be returned as a dict
                 output = {part: full_content[part] for part in parts if part in full_content}

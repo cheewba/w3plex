@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
+import io
 import os
 import signal
 import sys
@@ -11,6 +12,7 @@ from inspect import iscoroutinefunction, isfunction, iscoroutine
 from types import MethodType
 from typing import Any, Dict, Optional, Tuple, List
 
+from dotenv import load_dotenv
 from lazyplex import Application as _Application
 from lazyplex import create_context
 from ptpython.repl import embed
@@ -27,6 +29,8 @@ from .yaml import Dumper, Include, Loader
 from .core import config_loader, ConfigTree
 from .logging import logger
 
+
+load_dotenv()
 
 CHAINS_CONFIG_NAME = 'chains.yaml'
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'w3plex.yaml')
@@ -239,7 +243,7 @@ class Runner:
 
         app_name = path.rsplit('.', 1)[-1]
         if (app_module := cfg.get('__init__')) is None:
-            raise AttributeError(f"{app_name}: field `application` is required")
+            raise AttributeError(f"{app_name}: field `__init__` is required")
         apps = load_applications(app_module)
         if not len(apps):
             raise ValueError(f"No applications found for path '{app_module}'")
@@ -378,7 +382,12 @@ def init_cmd(args):
 
 def load_config(filename: str) -> Dict[str, Any]:
     with open(filename) as fr:
-        return yaml_load(fr, Loader)
+        raw = fr.read()
+
+    expanded = os.path.expandvars(raw)
+    stream = io.StringIO(expanded)
+    stream.name = os.path.abspath(filename)
+    return yaml_load(stream, Loader)
 
 
 def load_applications(name: str):
