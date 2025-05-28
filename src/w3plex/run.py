@@ -44,6 +44,7 @@ LOGGING_DEFAULT_FORMAT = (
     "<cyan>{extra[action]}</cyan> | "
     "{extra[item_index]}. <cyan>{extra[item]}</cyan> - <level>{message}</level>"
 )
+LOGGING_DEFAULT_LEVEL = 'INFO'
 
 
 def _get_base_args_parse(*args, **kwargs) -> Tuple[argparse.ArgumentParser]:
@@ -277,6 +278,7 @@ class Runner:
             kwargs = {
                 "sink": self._parse_log_handler(log),
                 "format": LOGGING_DEFAULT_FORMAT,
+                "level": LOGGING_DEFAULT_LEVEL,
             }
             kwargs.update(log)
             logger.add(**kwargs)
