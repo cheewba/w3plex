@@ -1,3 +1,5 @@
+from typing import Any
+
 class W3PlexError(Exception):
     pass
 
@@ -7,4 +9,6 @@ class ConfigError(W3PlexError):
 
 
 class SkipItem(Exception):
-    pass
+    def __init__(self, result: Any = None):
+        super().__init__()
+        self.result = result

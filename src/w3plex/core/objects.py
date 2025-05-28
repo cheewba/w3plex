@@ -7,6 +7,7 @@ from lazyplex import (
     application as _application,
 )
 from ..constants import CONTEXT_CONFIG_KEY, CONTEXT_LOGGER_KEY
+from ..exceptions import SkipItem
 from ..logging import logger
 from ..utils import get_context
 
@@ -29,11 +30,14 @@ class ApplicationAction(_ApplicationAction):
             **ctx
         }
 
-    def process_item(self, item: Any, *args, **kwargs):
-        if isinstance(item, ActionData):
-            kwargs['index'] = item.index
-            item = item.item
-        return super().process_item(item, *args, **kwargs)
+    async def process_item(self, item: Any, *args, **kwargs):
+        try:
+            if isinstance(item, ActionData):
+                kwargs['index'] = item.index
+                item = item.item
+            return await super().process_item(item, *args, **kwargs)
+        except SkipItem as e:
+            return e.result
 
 
 class Application(_Application):
