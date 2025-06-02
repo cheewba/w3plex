@@ -30,4 +30,6 @@ class FileLoader(Generic[T], Loader[T, FileLoaderConfig]):
 
 
 def accounts_loader(**kwargs: Unpack[FileLoaderConfig]):
-    return lambda: FileLoader(**kwargs)(lambda item: Account.from_key(item))
+    def wrapper():
+        return FileLoader(**kwargs)(lambda item: Account.from_key(item))
+    return wrapper

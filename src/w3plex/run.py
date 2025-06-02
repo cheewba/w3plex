@@ -25,7 +25,8 @@ from ruamel.yaml import (
 
 from .constants import CONTEXT_CHAINS_KEY, CONTEXT_SERVICES_KEY
 from .utils import AttrDict, load_path
-from .yaml import Dumper, Include, Loader
+from .utils.loader import Loader
+from .yaml import Dumper, Include, Loader as YamlLoader
 from .core import config_loader, ConfigTree
 from .logging import logger
 
@@ -211,7 +212,9 @@ class Runner:
         return self._tree
 
     async def resolve_value(self, value) -> Any:
-        if iscoroutinefunction(value) or isfunction(value):
+        if (iscoroutinefunction(value)
+                or isfunction(value)
+                or isinstance(value, Loader)):
             value = value()
         if iscoroutine(value):
             value = await value
@@ -389,7 +392,7 @@ def load_config(filename: str) -> Dict[str, Any]:
     expanded = os.path.expandvars(raw)
     stream = io.StringIO(expanded)
     stream.name = os.path.abspath(filename)
-    return yaml_load(stream, Loader)
+    return yaml_load(stream, YamlLoader)
 
 
 def load_applications(name: str):

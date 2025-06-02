@@ -146,7 +146,29 @@ class _ConfigLoader:
 
             if isinstance(value, str) and value.startswith(IMPORT_SIGN):
                 state['unresolved'] += 1
-                resolver.resolve_once_ready(value[1:], callback)
+                resolver.resolve_once_ready(value[len(IMPORT_SIGN):], callback)
+
+        async def _parse_item(key, value, state, path, relative_path):
+            if isinstance(value, dict):
+                value_path = ".".join([path, str(key)]) if path else str(key)
+                entity = await _parse_cfg(
+                    value, value_path, collections,
+                    get_node_rel_path(value, relative_path) or relative_path
+                )
+                if entity:
+                    if not isinstance(entity, dict):
+                        resolver.register(value_path, entity)
+                    value = entity
+            elif isinstance(value, list):
+                parsed = []
+                for i, item in enumerate(value):
+                    parsed.append(await _parse_item(i, item, state, path, relative_path))
+                    _resolve(value, item, i, state)
+                value = parsed
+            elif isinstance(value, str):
+                _resolve(state['parsed'], value, key, state)
+
+            return value
 
         async def _parse_cfg(cfg: Dict, path: str = "",
                              collections: Optional[defaultdict] = None,
@@ -155,21 +177,7 @@ class _ConfigLoader:
                 collections = defaultdict(list)
             state = {'parsed': (parsed := AttrDict()), 'unresolved': 0, 'path': path}
             for key, value in cfg.items():
-                if isinstance(value, dict):
-                    value_path = ".".join([path, key]) if path else key
-                    entity = await _parse_cfg(
-                        value, value_path, collections,
-                        get_node_rel_path(value, relative_path) or relative_path
-                    )
-                    if entity:
-                        if not isinstance(entity, dict):
-                            resolver.register(value_path, entity)
-                        value = entity
-                elif isinstance(value, list):
-                    for i, item in enumerate(value):
-                        _resolve(value, item, i, state)
-                elif isinstance(value, str):
-                    _resolve(parsed, value, key, state)
+                value = await _parse_item(key, value, state, path, relative_path)
                 if key not in parsed:
                     value = validate_relative_path(value, relative_path)
                     value = validate_relative_import(value, relative_path)
