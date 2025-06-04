@@ -220,11 +220,19 @@ class Runner:
             value = await value
         return value
 
-    async def resolve_args(self, *args, **kwargs) -> Tuple[Tuple, Dict]:
-        return (
+    async def resolve_args(self, app: _Application, *args, **kwargs) -> Tuple[Tuple, Dict]:
+        a, kw = (
             [await self.resolve_value(arg) for arg in args],
             {key: (await self.resolve_value(value)) for key, value in kwargs.items()}
         )
+        action_name, _ = app.action_from_args(*a, **kw)
+        if action_name:
+            app_tree = self._tree.get(APPLICATIONS_CFG_KEY).get(app.name).tree
+            actions = app_tree.get(ACTIONS_CFG_KEY, {})
+            action_cfg = dict(actions.get(action_name) or {})  # create a copy to modify it
+            kw.update({key: (await self.resolve_value(value)) for key, value in action_cfg.items()})
+
+        return a, kw
 
     def blocking_call(self, coro):
         if self.loop.is_running():
@@ -238,7 +246,7 @@ class Runner:
 
     async def run_application(self, app: _Application, *args, **kwargs):
         with self._app_context(app):
-            args, kwargs = await self.resolve_args(*args, **kwargs)
+            args, kwargs = await self.resolve_args(app, *args, **kwargs)
             await app(*args, **kwargs)
 
     async def init_application(self, cfg: Dict, path: str):
@@ -310,7 +318,7 @@ class Runner:
             CONTEXT_CHAINS_KEY: dict(chains if (chains := self.tree.get_chains()) else {}),
             CONTEXT_SERVICES_KEY: dict(services if (services := self.tree.get_services()) else {}),
         }):
-            self._extend_app_actions(app, app_tree)
+            # self._extend_app_actions(app, app_tree)
             yield app
 
     def _extend_app_actions(self, app: _Application, app_cfg: Dict):
