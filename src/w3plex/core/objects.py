@@ -7,7 +7,7 @@ from lazyplex import (
     application as _application,
 )
 from ..constants import CONTEXT_CONFIG_KEY, CONTEXT_LOGGER_KEY
-from ..exceptions import SkipItem
+from ..exceptions import SkipItem, W3PlexError
 from ..logging import logger
 from ..utils import get_context
 
@@ -38,6 +38,11 @@ class ApplicationAction(_ApplicationAction):
             return await super().process_item(item, *args, **kwargs)
         except SkipItem as e:
             return e.result
+        except W3PlexError as e:
+            logger.error(e)
+        except Exception as e:
+            logger.exception(e)
+            raise
 
 
 class Application(_Application):
