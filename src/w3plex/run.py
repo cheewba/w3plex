@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
+import getpass
 import io
+import itertools
 import os
 import signal
 import sys
@@ -9,6 +11,7 @@ import textwrap
 from contextlib import contextmanager
 from functools import partial
 from inspect import iscoroutinefunction, isfunction, iscoroutine
+from pathlib import Path
 from operator import itemgetter
 from types import MethodType
 from typing import Any, Dict, Optional, Tuple, List
@@ -74,31 +77,67 @@ def process_args():
     init = actions.add_parser('init', description="Initialize a new config")
     init.set_defaults(func=init_cmd)
 
+    empty_pass = "<!empty>"
     if cfg is not None:
         shell = actions.add_parser('shell', description="Start w3ext shell for the current config")
         shell.set_defaults(func=partial(run_shell_cmd, cfg=cfg, cfg_path=cfg_path))
 
         encrypt_cmd = actions.add_parser('encrypt', description="Encrypt provided file")
-        encrypt_cmd.add_argument('src', help='Path to the file to encrypt')
-        encrypt_cmd.add_argument('--password', '-p', dest='password', help='Password to encrypt the file with')
+        encrypt_cmd.add_argument('src', nargs="+", help='Path to the file to encrypt')
+        encrypt_cmd.add_argument('--password', '-p', nargs="?", const=empty_pass, dest='password',
+                                 help='Password to encrypt the file with')
         encrypt_cmd.add_argument('--output', '-o', dest='dst', help='Output file path')
         encrypt_cmd.add_argument('--overwrite', '-w', dest='inplace', action='store_true',
                                  help='Overwrite the original file')
         encrypt_cmd.add_argument('--add', '-a', dest='add_to_keystore', action='store_true',
                                  help='Add provided encryption key to the keystore')
         def _encrypt_file(args):
-            encrypt_file(**subdict(vars(args), ["src", "dst", "password", "inplace",
-                                                "add_to_keystore", ]))
+            kwargs = subdict(vars(args), ["src", "dst", "password", "inplace",
+                                          "add_to_keystore"])
+            files = set(itertools.chain(
+                *(list(Path().glob(src)) for src in kwargs.pop('src'))
+            ))
+            if kwargs.get('password') == empty_pass:
+                kwargs['password'] = getpass.getpass("Enter password: ")
+            if len(files) > 1:
+                # in case more than one file, --output won't work
+                kwargs.pop('dst', None)
+            for path in files:
+                try:
+                    encrypt_file(path, **kwargs)
+                    print(f"File {path} encrypted")
+                except Exception as e:
+                    print(f"Failed to encrypt file {path}: {e}",
+                          file=sys.stderr)
         encrypt_cmd.set_defaults(func=_encrypt_file)
 
         decrypt_cmd = actions.add_parser('decrypt', description="Decrypt provided file")
-        decrypt_cmd.add_argument('src', help='Path to the file to encrypt')
-        decrypt_cmd.add_argument('--password', '-p', dest='password', help='Password to encrypt the file with')
+        decrypt_cmd.add_argument('src', nargs="+", help='Path to the file to encrypt')
+        decrypt_cmd.add_argument('--password', '-p', nargs="?", const=empty_pass, dest='password',
+                                 help='Password to decrypt the file with')
         decrypt_cmd.add_argument('--output', '-o', dest='dst', help='Output file path')
         decrypt_cmd.add_argument('--overwrite', '-w', dest='inplace', action='store_true',
                                  help='Overwrite the original file')
+        decrypt_cmd.add_argument('--keystore', '-k', dest='use_keystore', action='store_true',
+                                 help='Use keystore for encryption')
         def _decrypt_file(args):
-            decrypt_file(**subdict(vars(args), ["src", "dst", "password", "inplace"]))
+            kwargs = subdict(vars(args), ["src", "dst", "password", "inplace",
+                                          "use_keystore"])
+            files = set(itertools.chain(
+                *(list(Path().glob(src)) for src in kwargs.pop('src'))
+            ))
+            if kwargs.get('password') == empty_pass:
+                kwargs['password'] = getpass.getpass("Enter password: ")
+            if len(files) > 1:
+                # in case more than one file, --output won't work
+                kwargs.pop('dst', None)
+            for path in files:
+                try:
+                    decrypt_file(path, **kwargs)
+                    print(f"File {path} decrypted")
+                except Exception as e:
+                    print(f"Failed to decrypt file {path}: {e}",
+                          file=sys.stderr)
         decrypt_cmd.set_defaults(func=_decrypt_file)
 
         for app_name in cfg.get(APPLICATIONS_CFG_KEY, {}).keys():

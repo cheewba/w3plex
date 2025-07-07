@@ -222,6 +222,7 @@ def decrypt_file(
     password: Optional[str] = None,
     dst: Optional[Union[str, Path]] = None,
     inplace: bool = False,
+    use_keystore: bool = False,
 ) -> Path:
     """Decrypt an `ENC1` file to plaintext.
 
@@ -248,12 +249,13 @@ def decrypt_file(
 
     # 1) try cached keys
     plain: Optional[bytes] = None
-    for k in _all_keys():
-        try:
-            plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
-            break
-        except InvalidToken:
-            continue
+    if use_keystore:
+        for k in _all_keys():
+            try:
+                plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
+                break
+            except InvalidToken:
+                continue
 
     # 2) fallback to provided or prompted password
     if plain is None:
