@@ -9,6 +9,7 @@ import textwrap
 from contextlib import contextmanager
 from functools import partial
 from inspect import iscoroutinefunction, isfunction, iscoroutine
+from operator import itemgetter
 from types import MethodType
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -23,6 +24,7 @@ from ruamel.yaml import (
     load as yaml_load,
 )
 
+from .secure import encrypt_file, decrypt_file
 from .constants import CONTEXT_CHAINS_KEY, CONTEXT_SERVICES_KEY
 from .utils import AttrDict, load_path
 from .utils.loader import Loader
@@ -48,6 +50,10 @@ LOGGING_DEFAULT_FORMAT = (
 LOGGING_DEFAULT_LEVEL = 'INFO'
 
 
+def subdict(d, ks):
+    return dict(zip(ks, itemgetter(*ks)(d)))
+
+
 def _get_base_args_parse(*args, **kwargs) -> Tuple[argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(*args, **kwargs)
     parser.add_argument('--config', '-c', help='run using w3plex config file', default='w3plex.yaml')
@@ -71,6 +77,29 @@ def process_args():
     if cfg is not None:
         shell = actions.add_parser('shell', description="Start w3ext shell for the current config")
         shell.set_defaults(func=partial(run_shell_cmd, cfg=cfg, cfg_path=cfg_path))
+
+        encrypt_cmd = actions.add_parser('encrypt', description="Encrypt provided file")
+        encrypt_cmd.add_argument('src', help='Path to the file to encrypt')
+        encrypt_cmd.add_argument('--password', '-p', dest='password', help='Password to encrypt the file with')
+        encrypt_cmd.add_argument('--output', '-o', dest='dst', help='Output file path')
+        encrypt_cmd.add_argument('--overwrite', '-w', dest='inplace', action='store_true',
+                                 help='Overwrite the original file')
+        encrypt_cmd.add_argument('--add', '-a', dest='add_to_keystore', action='store_true',
+                                 help='Add provided encryption key to the keystore')
+        def _encrypt_file(args):
+            encrypt_file(**subdict(vars(args), ["src", "dst", "password", "inplace",
+                                                "add_to_keystore", ]))
+        encrypt_cmd.set_defaults(func=_encrypt_file)
+
+        decrypt_cmd = actions.add_parser('decrypt', description="Decrypt provided file")
+        decrypt_cmd.add_argument('src', help='Path to the file to encrypt')
+        decrypt_cmd.add_argument('--password', '-p', dest='password', help='Password to encrypt the file with')
+        decrypt_cmd.add_argument('--output', '-o', dest='dst', help='Output file path')
+        decrypt_cmd.add_argument('--overwrite', '-w', dest='inplace', action='store_true',
+                                 help='Overwrite the original file')
+        def _decrypt_file(args):
+            decrypt_file(**subdict(vars(args), ["src", "dst", "password", "inplace"]))
+        decrypt_cmd.set_defaults(func=_decrypt_file)
 
         for app_name in cfg.get(APPLICATIONS_CFG_KEY, {}).keys():
             cmd = actions.add_parser(app_name, description=f"Run `{app_name}` application")

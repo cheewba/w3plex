@@ -20,6 +20,7 @@ dependencies = [
     "aiohttp_socks==0.10.*",
     'ptpython==3.0.23',
     'rich==13.*',
+    'cryptography==45,*',
     'python-dotenv',
     "w3ext @ git+https://github.com/cheewba/w3ext.git@main#egg=w3ext",
     "lazyplex @ git+https://github.com/cheewba/lazyplex.git@main#egg=lazyplex",
