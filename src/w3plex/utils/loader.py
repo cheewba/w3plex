@@ -1,4 +1,4 @@
-from typing import Optional, Callable, NamedTuple, Union, TypeVar, overload, Generic, Unpack
+from typing import Optional, Callable, NamedTuple, Union, TypeVar, overload, Generic, Unpack, NotRequired
 
 from w3ext import Account
 
@@ -9,10 +9,10 @@ T = TypeVar("T")
 
 class FileLoaderConfig(EntityConfig):
     file: str
-    filter: Optional[str]
+    filter: NotRequired[str]
 
 
-class FileLoader(Generic[T], Loader[T, FileLoaderConfig]):
+class FileLoader(Generic[T], Loader[FileLoaderConfig, T]):
     @overload
     async def process(self) -> str: ...
     async def process(self, fn: Optional[Callable[[Union[str, NamedTuple]], T]] = None) -> T:
@@ -29,7 +29,7 @@ class FileLoader(Generic[T], Loader[T, FileLoaderConfig]):
         return fn(line)
 
 
-def accounts_loader(**kwargs: Unpack[FileLoaderConfig]):
+def accounts_loader(**kwargs: Unpack[FileLoaderConfig]) -> Callable[[], FileLoader[Account]]:
     def wrapper():
         return FileLoader(**kwargs)(lambda item: Account.from_key(item))
     return wrapper

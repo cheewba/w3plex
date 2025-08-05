@@ -1,11 +1,12 @@
 import asyncio
 import itertools
+import re
 from collections import defaultdict
 from contextlib import asynccontextmanager, AsyncExitStack
-from typing import Optional, List, Self, Generic, TypeVar, Callable, Dict, Tuple
+from typing import Optional, List, Self, Generic, TypeVar, Callable, Dict, Tuple, Any
 
 import aiohttp
-from aiohttp_socks import ProxyConnector
+from aiohttp_socks import ProxyConnector as _ProxyConnector
 from w3ext import Chain, Currency, CurrencyAmount, TokenAmount, Token
 
 from ..module import ModuleError
@@ -17,6 +18,17 @@ from .constants import (
 
 TC = TypeVar("TC", bound="Currency")
 DEFAULT_CURRENCY = 'UNKNOWN'
+
+
+class ProxyConnector(_ProxyConnector):
+    @classmethod
+    def from_url(cls, url: str, **kwargs: Any) -> 'ProxyConnector':
+        rdns = False
+        if url.startswith('socks5h://'):
+            rdns = True
+            url = url.replace('socks5h://', 'socks5://')
+        return _ProxyConnector.from_url(url, rdns=rdns, **kwargs)
+
 
 class _DebankExt(Generic[TC]):
     def __init__(self, currency: TC, amount: int | str, price: float) -> None:
