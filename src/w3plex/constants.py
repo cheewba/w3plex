@@ -1,5 +1,4 @@
 CONTEXT_CHAINS_KEY = '_chains'
 CONTEXT_CONFIG_KEY = '_config'
 CONTEXT_EXTRAS_KEY = '_extras'
-CONTEXT_SERVICES_KEY = '_services'
 CONTEXT_LOGGER_KEY = '_logger'

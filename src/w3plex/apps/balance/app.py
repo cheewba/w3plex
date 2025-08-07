@@ -17,7 +17,7 @@ from rich.text import Text
 from w3ext import Currency, CurrencyAmount, Account, Token, Chain
 from w3plex import application, apply_plugins
 from w3plex.utils import (
-    get_chains, get_config, get_services, get_context, execute_on_complete
+    get_chains, get_context, execute_on_complete
 )
 from w3plex.utils.filter import AmountFilter, ChainFilter, join_filters, TokenLookup
 from w3plex.utils.loader import FileLoader
@@ -208,8 +208,7 @@ async def debank_balance(account, *, debank: Debank = None, **config):
 
     async with AsyncExitStack() as stack:
         if debank is None:
-            proxy_service = (get_services(service_name)
-                            if (service_name := config.get('proxy')) is not None else None)
+            proxy_service = config.get('proxy')
             proxy = (await stack.enter_async_context(proxy_service.get_proxy())
                     if proxy_service is not None else None)
             debank = Debank(chains=list(get_chains().values()), proxy=proxy,

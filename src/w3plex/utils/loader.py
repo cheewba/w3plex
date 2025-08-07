@@ -1,18 +1,25 @@
-from typing import Optional, Callable, NamedTuple, Union, TypeVar, overload, Generic, Unpack, NotRequired
+from typing import (
+    Optional, Callable, NamedTuple, Union, overload,
+    Unpack, NotRequired, TypedDict
+)
 
 from w3ext import Account
 
 from .filter import TemplateFilter
-from ..core import Loader, EntityConfig, CallableEntity
 
-T = TypeVar("T")
 
-class FileLoaderConfig(EntityConfig):
+class FileLoaderConfig(TypedDict):
     file: str
     filter: NotRequired[str]
 
 
-class FileLoader(Generic[T], Loader[FileLoaderConfig, T]):
+class FileLoader[T]:
+    def __init__(self, **config: Unpack[FileLoaderConfig]):
+        self.config = config
+
+    def __call__(self, *args, **kwargs):
+        return self.process(*args, **kwargs)
+
     @overload
     async def process(self) -> str: ...
     async def process(self, fn: Optional[Callable[[Union[str, NamedTuple]], T]] = None) -> T:
