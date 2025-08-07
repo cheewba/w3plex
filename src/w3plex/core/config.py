@@ -2,27 +2,36 @@ import asyncio
 import os
 import re
 from collections import defaultdict
+from collections.abc import Callable, Generator, AsyncGenerator
 from inspect import isclass
-from typing import Dict, Optional, Callable, Type, TypeVar, overload, Any, Union
+from typing import (
+    Dict, Optional, Type, TypeVar, overload, Any, Union,
+    List, Tuple, Awaitable,
+)
 
-from lazyplex import as_future, Application
+from lazyplex import Application
 from w3ext import Chain
 
-from .objects import EntityConfig, Entity, Service, Loader, Filter, Condition
-from ..utils import load_path, AttrDict
+from ..utils import load_path, AttrDict, as_future
 from ..exceptions import ConfigError
 
 
 __all__ = ['config_loader', 'ConfigTree']
 
 T = TypeVar("T")
+type NodeConfig = Dict[str, Any]
+type NodeFactoryOutput[R] = (
+    R
+    | Awaitable[R]
+    # TODO: add generators support
+    # | Generator[R, object, object]
+    # | AsyncGenerator[R, object]
+)
+type NodeFactory[R] = Callable[['NodeConfig', str], NodeFactoryOutput[R]]
+type InitFactory[R] = Callable[..., NodeFactoryOutput[R]] | type[R]
 
 COLLECTIONS = (
     ('chains', Chain),
-    ('services', Service),
-    ('filters', Filter),
-    ('loaders', Loader),
-    ('conditions', Condition),
 )
 
 IMPORT_KEY = '__init__'
@@ -87,20 +96,18 @@ class _Resolver:
 
 class _ConfigLoader:
     def __init__(self) -> None:
-        self._filters = []
+        self._filters: List[Tuple[
+            Callable[[Dict, str], bool] | str,
+            NodeFactory[Any],
+            Optional[Union[str, Callable[[Any], str]]]
+        ]] = []
 
-    @overload
-    def add_node(
+    def add_node[R](
         self,
-        flt: Callable[[Dict, str], bool],
-        collection: Optional[Union[str, Callable[[Any], str]]] = None
-    ) -> Callable[[Callable[['EntityConfig', str], 'Entity']], None]: ...
-
-    def add_node(
-        self, flt: str,
-        collection: Optional[Union[str, Callable[[Any], str]]] = None
-    ) -> Callable[[Callable[['EntityConfig', str], 'Entity']], None]:
-        def inner(fn: Callable[['EntityConfig', str], 'Entity']):
+        flt: Callable[[Dict, str], bool] | str,
+        collection: Optional[Union[str, Callable[[R], str]]] = None
+    ) -> Callable[[NodeFactory[R]], NodeFactory[R]]:
+        def inner(fn: NodeFactory[R]) -> NodeFactory[R]:
             nonlocal flt
             if not isinstance(flt, Callable):
                 flt = self._regexp_flt(flt)
@@ -115,14 +122,17 @@ class _ConfigLoader:
         return _filter
 
     async def _get_node(
-        self, cfg: Dict, path: str, collections: Optional[defaultdict],
+        self,
+        cfg: Dict,
+        path: str,
+        collections: Optional[defaultdict],
         relative_path: Optional[str] = None
-    ) -> Optional[Callable[['EntityConfig', str], 'Entity']]:
-        for flt, node, collection in self._filters[::-1]:
+    ) -> NodeConfig | NodeFactoryOutput:
+        for flt, node_fn, collection in self._filters[::-1]:
             # check filters as LIFO
             if (flt(cfg, path)):
                 try:
-                    node = await as_future(node(cfg, path))
+                    node = await as_future(node_fn(cfg, path))
                     if node and collection:
                         if isinstance(collection, Callable):
                             collection = collection(node)
@@ -183,7 +193,15 @@ class _ConfigLoader:
                     value = validate_relative_import(value, relative_path)
                     parsed[key] = value
 
-            if state["unresolved"] == 0:
+                if not path:
+                    # on 0 level we can try to resolve node once it's parsed
+                    parsed[key] =  await self._get_node(value, key, collections, relative_path)
+
+            if not path:
+                return parsed
+
+            if path and state["unresolved"] == 0:
+                # on 1+ level parse node only after all items on that level parsed
                 return await self._get_node(parsed, path, collections, relative_path)
 
             unresolved_states.append(state)
@@ -221,14 +239,13 @@ class _ConfigLoader:
 class ConfigTree(AttrDict):
     def __init__(self, tree, collections: Optional[Dict[str, list]]):
         super().__init__(tree)
-
         self._collections = collections
 
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith('get_'):
-            collection = self._collections.get(name[4:])
-            return lambda: collection
-        return super().__getattr__(name)
+    def get_collection(self, name: str):
+        return self._collections.get(name)
+
+    def get_collections(self):
+        return dict(self._collections)
 
     async def close(self):
         pass
@@ -241,7 +258,7 @@ def _entity_filter(cfg: Dict, path: str) -> bool:
     return IMPORT_KEY in cfg
 
 
-def _get_entity_collection(entity: Entity) -> str:
+def _get_entity_collection(entity: Any) -> str:
     for collection, cls in COLLECTIONS:
         if isinstance(entity, cls):
             return collection
@@ -249,27 +266,24 @@ def _get_entity_collection(entity: Entity) -> str:
 
 
 @config_loader.add_node(_entity_filter, _get_entity_collection)
-async def entity_factory(cfg: 'EntityConfig', path: str) -> 'Entity':
+async def entity_factory(cfg: 'NodeConfig', path: str) -> NodeFactoryOutput:
     conf = dict(cfg)  # create a copy to modify it
     init_path = conf.pop(IMPORT_KEY)
-    init = load_path(init_path)
+    init: InitFactory = load_path(init_path)
     if isclass(init) and issubclass(init, Chain):
         return await load_chain(cfg, path, init)
     if isinstance(init, Application):
         # for application there's another protocol
         raise SkipNode
 
-    loaded = await as_future(init(**conf))
-    if isinstance(loaded, Service):
-        await loaded.init()
-    return loaded
+    return await as_future(init(**conf))
 
 
 @overload
-async def load_chain(cfg: 'EntityConfig', path: str) -> Chain: ...
+async def load_chain(cfg: 'NodeConfig', path: str) -> Chain: ...
 
 @config_loader.add_node(r'^chains\.[^.]+$', 'chains')  # default location for chains in config file
-async def load_chain(cfg: 'EntityConfig', path: str, cls: Optional[Type[T]] = None) -> T:
+async def load_chain[R](cfg: 'NodeConfig', path: str, cls: Optional[Type[R]] = None) -> R:
     cls = cls or Chain
     erc20 = cfg.pop('erc20', None)
     chain = await cls.connect(name=path.rsplit('.', 1)[-1], **cfg)

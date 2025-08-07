@@ -1,18 +1,20 @@
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, TypedDict, Unpack, Optional
 
-from loguru import logger
+from ..logging import logger
+from ..utils import deprecated
 
-from ..core import Service, EntityConfig
 
-
-class ProxiesConfig(EntityConfig):
+class ProxiesConfig(TypedDict):
     proxies: str
 
 
-class ProxyService(Service[ProxiesConfig]):
-    _proxies: asyncio.Queue[str]
+@deprecated("use w3plex.modules.proxy instead")
+class ProxyService:
+    def __init__(self, **config: Unpack[ProxiesConfig]):
+        self.config = config
+        self._proxies: Optional[asyncio.Queue[str]] = None
 
     async def init(self):
         self._proxies = asyncio.Queue()
@@ -23,6 +25,9 @@ class ProxyService(Service[ProxiesConfig]):
 
     @asynccontextmanager
     async def get_proxy(self) -> AsyncGenerator[str, None]:
+        if self._proxies is None:
+            await self.init()
+
         proxy = None
         try:
             if not self._proxies.qsize():

@@ -28,9 +28,8 @@ from ruamel.yaml import (
 )
 
 from .secure import encrypt_file, decrypt_file
-from .constants import CONTEXT_CHAINS_KEY, CONTEXT_SERVICES_KEY
+from .constants import CONTEXT_CHAINS_KEY
 from .utils import AttrDict, load_path
-from .utils.loader import Loader
 from .yaml import Dumper, Include, Loader as YamlLoader
 from .core import config_loader, ConfigTree
 from .logging import logger
@@ -224,7 +223,6 @@ class Shell:
                 - `apps`: all applications found in the config file.
                 {{ {", ".join(set(apps.keys()))} }}
                 - `cfg`: config loaded from the file {self.args.config}
-                - `services`: dictionary of loaded from config services
                 - `chains`: dictionary of loaded from config chains
                 - `root`: resolved objects tree loaded from the config
             {"=" * width}
@@ -234,8 +232,7 @@ class Shell:
         globals = {
             'cfg': dict(self.cfg),
             'apps': apps,
-            'services': AttrDict(self.runner.tree.get_services()),
-            'chains': AttrDict(self.runner.tree.get_chains()),
+            'chains': AttrDict(self.runner.tree.get_collection('chains')),
             'root': self.runner.tree,
         }
 
@@ -281,8 +278,7 @@ class Runner:
 
     async def resolve_value(self, value) -> Any:
         if (iscoroutinefunction(value)
-                or isfunction(value)
-                or isinstance(value, Loader)):
+                or isfunction(value)):
             value = value()
         if iscoroutine(value):
             value = await value
@@ -334,14 +330,14 @@ class Runner:
         assert self.cfg is None, "Already initialized. Finalize first."
 
         # TODO: if there're more that one runner, will be conflict
+        config_loader.add_node(r"^logging$")(self.init_loggers)
         config_loader.add_node(
             r"^applications\.[^.]+$", 'applications'
         )(self.init_application)
 
-        self._tree = await config_loader.parse(cfg, cfg_path)
         self.cfg = cfg
         self.cfg_path = cfg_path
-        self.init_logger(cfg.get('logging') or [])
+        self._tree = await config_loader.parse(cfg, cfg_path)
 
     def _parse_log_handler(self, config) -> Any:
         if (handler := config.pop('handler', None)) is not None:
@@ -352,8 +348,9 @@ class Runner:
             return os.path.join(os.path.dirname(self.cfg_path), filename)
         return sys.stderr
 
-    def init_logger(self, loggers: List[Dict]):
+    def init_loggers(self, loggers: List[Dict], path: str):
         for log in loggers:
+            log = log.copy()
             kwargs = {
                 "sink": self._parse_log_handler(log),
                 "format": LOGGING_DEFAULT_FORMAT,
@@ -361,15 +358,13 @@ class Runner:
             }
             kwargs.update(log)
             logger.add(**kwargs)
+        return loggers
 
     async def finalize(self):
         assert self.cfg is not None, "Not initialized, to be finilized"
 
         self.cfg = None
         self.cfg_path = None
-        await asyncio.gather(*[
-            service.finalize() for service in self._tree.get_services().values()
-        ])
 
     @contextmanager
     def _app_context(self, app: _Application):
@@ -383,8 +378,9 @@ class Runner:
         with create_context({
             CONTEXT_CONFIG_KEY: dict(app_cfg),
             CONTEXT_EXTRAS_KEY: dict(cfg),
-            CONTEXT_CHAINS_KEY: dict(chains if (chains := self.tree.get_chains()) else {}),
-            CONTEXT_SERVICES_KEY: dict(services if (services := self.tree.get_services()) else {}),
+            CONTEXT_CHAINS_KEY: dict(
+                chains if (chains := self.tree.get_collection('chains')) else {}
+            ),
         }):
             # self._extend_app_actions(app, app_tree)
             yield app
