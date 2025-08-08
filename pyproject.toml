@@ -34,7 +34,7 @@ where = ["src"]
 "*" = ["*.yaml"]
 
 [project.scripts]
-w3plex = "w3plex.run:main"
+w3plex = "w3plex.main:main"
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
