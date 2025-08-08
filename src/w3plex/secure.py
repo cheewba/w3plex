@@ -28,6 +28,7 @@ import os
 from hashlib import sha256, scrypt
 from pathlib import Path
 from typing import List, Optional, Union, Tuple
+from sys import stdout
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -50,6 +51,14 @@ _SCRYPT_WORK: Tuple[int, int, int] | None = None  # will hold the actual (N,r,p)
 # Salt handling (salt lives as first 16 bytes of keystore)
 # ----------------------------------------------------------------------
 _salt: bytes | None = None
+
+
+class SecureError(Exception):
+    pass
+
+
+class IncorrectPassword(SecureError):
+    pass
 
 
 def _get_salt() -> bytes:
@@ -105,6 +114,10 @@ def _get_master_key() -> bytes:
     global _master_key
     if _master_key is None:
         pwd = getpass.getpass("Master password: ")
+        if not _keystore_exists():
+            pwd_confirm = getpass.getpass("Master password confirm: ")
+            if not pwd == pwd_confirm:
+                raise IncorrectPassword("Master passwords don't match")
         _master_key = _adaptive_scrypt(pwd)
     return _master_key
 
@@ -113,10 +126,13 @@ def _get_master_key() -> bytes:
 # Keystore helpers (JSON list of base‑64 keys, encrypted with master key)
 # ----------------------------------------------------------------------
 
+def _keystore_exists() -> bool:
+    return _KEYSTORE_PATH.exists()
+
 def _raw_keystore_bytes() -> bytes:
     """Keystore content without the leading salt (may be empty)."""
 
-    if not _KEYSTORE_PATH.exists():
+    if not _keystore_exists():
         return b""
     buf = _KEYSTORE_PATH.read_bytes()
     if len(buf) < _SALT_LEN:
@@ -144,7 +160,10 @@ def _load_keystore() -> List[str]:
         plain = f.decrypt(cipher)
         return json.loads(plain.decode())["keys"]
     except InvalidToken as exc:
-        raise ValueError("Wrong master password for keystore") from exc
+        global _master_key
+        _master_key = None
+
+        raise IncorrectPassword("Wrong master password for keystore") from exc
 
 
 def _save_keystore(keys: List[str]) -> None:
@@ -264,7 +283,7 @@ def decrypt_file(
         try:
             plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
         except InvalidToken as exc:
-            raise ValueError("Wrong password") from exc
+            raise IncorrectPassword("Wrong password") from exc
 
     dst_path = src_path if inplace else (
         Path(dst) if dst else src_path.with_suffix(".dec")
@@ -299,7 +318,7 @@ def _decrypt_if_needed(path: Path, raw: bytes, *, text_encoding: Optional[str]):
         try:
             plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
         except InvalidToken as exc:
-            raise ValueError(f"Wrong password for file {path}") from exc
+            raise IncorrectPassword(f"Wrong password for file {path}") from exc
         _add_key(k)
 
     buf = io.BytesIO(plain)
@@ -330,9 +349,23 @@ def _secure_open(
     p = Path(file)
     raw = _orig_open(file, "rb").read()
 
-    replacement = _decrypt_if_needed(p, raw, text_encoding=None if "b" in mode else encoding)
+    attempts = 3
+    while True:
+        try:
+            replacement = _decrypt_if_needed(p, raw, text_encoding=None if "b" in mode else encoding)
+            break
+        except IncorrectPassword as e:
+            attempts -= 1
+            if attempts <= 0:
+                raise
+
+            stdout.write(f"{e}, {attempts} attempts left\r\n")
+            stdout.flush()
+
+
     if replacement is None:
         return _orig_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+
     return replacement
 
 
@@ -341,5 +374,7 @@ builtins.open = _secure_open
 
 __all__ = [
     "encrypt_file",
-    "_secure_open",
+    "decrypt_file",
+    "SecureError",
+    "IncorrectPassword",
 ]

@@ -8,7 +8,7 @@ from lazyplex import (
 )
 from ..constants import CONTEXT_CONFIG_KEY, CONTEXT_LOGGER_KEY
 from ..exceptions import SkipItem, W3PlexError
-from ..logging import logger
+from ..log import logger
 from ..utils import get_context
 
 
