@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, TypedDict, Unpack, Optional
 
-from ..logging import logger
+from ..log import logger
 from ..utils import deprecated
 
 
