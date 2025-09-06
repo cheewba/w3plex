@@ -93,6 +93,13 @@ class Runner:
             action_cfg = dict(actions.get(action_name) or {})  # create a copy to modify it
             kw.update({key: (await self.resolve_value(value)) for key, value in action_cfg.items()})
 
+        if ('action' in kw and len(a) > 0 and a[0] == action_name):
+            # NOTE: specific case
+            # if there's `action` key in config, we have to replace name of the app
+            # as it is in config, to name as set by that `action` key
+            # lazyplex application doesn't know actions only defined in config file
+            a[0] = kw.pop('action')
+
         return a, kw
 
     def blocking_call(self, coro):
