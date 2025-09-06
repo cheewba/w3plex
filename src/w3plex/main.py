@@ -158,9 +158,7 @@ def run_app_cmd(args, *, name, cfg, cfg_path):
             raise AttributeError(f"Application {name} not found")
 
         nonlocal coro
-        coro = asyncio.ensure_future(
-            runner.run_application(app, *app_args, **app_kwargs)
-        )
+        coro = asyncio.ensure_future(app(*app_args, **app_kwargs))
         try:
             await coro
         finally:
