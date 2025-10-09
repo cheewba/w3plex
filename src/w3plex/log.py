@@ -62,7 +62,7 @@ class InterceptHandler(logging.Handler):
 
 class Logger:
     def __init__(self, logger):
-        self._logger = logger
+        self._logger = logger.opt(colors=True)
 
     def __getattribute__(self, name):
         if name == '_logger':
@@ -70,6 +70,93 @@ class Logger:
 
         ctx = get_context() or {}
         return getattr(ctx[CONTEXT_LOGGER_KEY] if CONTEXT_LOGGER_KEY in ctx else self._logger, name)
+
+    def setLevel(self, level):
+        """
+        Set the logging level of this logger.  level must be an int or a str.
+        """
+        ...
+
+    def debug(self, msg, *args, **kwargs):
+        """
+        Log 'msg % args' with severity 'DEBUG'.
+
+        To pass exception information, use the keyword argument exc_info with
+        a true value, e.g.
+
+        logger.debug("Houston, we have a %s", "thorny problem", exc_info=True)
+        """
+        ...
+
+    def info(self, msg, *args, **kwargs):
+        """
+        Log 'msg % args' with severity 'INFO'.
+
+        To pass exception information, use the keyword argument exc_info with
+        a true value, e.g.
+
+        logger.info("Houston, we have a %s", "notable problem", exc_info=True)
+        """
+        ...
+
+    def warning(self, msg, *args, **kwargs):
+        """
+        Log 'msg % args' with severity 'WARNING'.
+
+        To pass exception information, use the keyword argument exc_info with
+        a true value, e.g.
+
+        logger.warning("Houston, we have a %s", "bit of a problem", exc_info=True)
+        """
+        ...
+
+    def warn(self, msg, *args, **kwargs):
+        ...
+
+    def error(self, msg, *args, **kwargs):
+        """
+        Log 'msg % args' with severity 'ERROR'.
+
+        To pass exception information, use the keyword argument exc_info with
+        a true value, e.g.
+
+        logger.error("Houston, we have a %s", "major problem", exc_info=True)
+        """
+        ...
+
+    def exception(self, msg, *args, exc_info=True, **kwargs):
+        """
+        Convenience method for logging an ERROR with exception information.
+        """
+        self.error(msg, *args, exc_info=exc_info, **kwargs)
+
+    def critical(self, msg, *args, **kwargs):
+        """
+        Log 'msg % args' with severity 'CRITICAL'.
+
+        To pass exception information, use the keyword argument exc_info with
+        a true value, e.g.
+
+        logger.critical("Houston, we have a %s", "major disaster", exc_info=True)
+        """
+        ...
+
+    def fatal(self, msg, *args, **kwargs):
+        """
+        Don't use this method, use critical() instead.
+        """
+        ...
+
+    def log(self, level, msg, *args, **kwargs):
+        """
+        Log 'msg % args' with the integer severity 'level'.
+
+        To pass exception information, use the keyword argument exc_info with
+        a true value, e.g.
+
+        logger.log(level, "We have a %s", "mysterious problem", exc_info=True)
+        """
+        ...
 
 
 def monkey_match_standard_logging():
@@ -123,4 +210,5 @@ logger = Logger(copy.deepcopy(_logger).patch(
 ))
 
 # setup default logger to the loguru again
-_logger.add(sys.stderr, level="INFO", enqueue=True, backtrace=False, diagnose=False)
+_logger.add(sys.stderr, level="INFO", enqueue=True,
+            backtrace=False, diagnose=False, colorize=True)

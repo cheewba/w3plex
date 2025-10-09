@@ -155,10 +155,12 @@ class Runner:
     def init_loggers(self, loggers: List[Dict], path: str):
         for log in loggers:
             log = log.copy()
+            is_file = 'file' in log
             kwargs = {
                 "sink": self._parse_log_handler(log),
                 "format": LOGGING_DEFAULT_FORMAT,
                 "level": LOGGING_DEFAULT_LEVEL,
+                "colorize": not is_file,
             }
             kwargs.update(log)
             logger.add(**kwargs)
