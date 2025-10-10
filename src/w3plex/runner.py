@@ -12,7 +12,7 @@ from lazyplex import create_context
 
 from .constants import CONTEXT_CHAINS_KEY
 from .utils import load_path
-from .core import config_loader, ConfigTree
+from .config import config_loader, ConfigTree
 from .log import logger
 
 
