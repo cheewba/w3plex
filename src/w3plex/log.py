@@ -2,6 +2,7 @@ import copy
 import logging
 import sys
 import warnings
+import html
 from collections import defaultdict
 
 from loguru import logger as _logger
@@ -57,7 +58,13 @@ class InterceptHandler(logging.Handler):
             level = logger.level(record.levelname).name
         except Exception:
             level = record.levelno
-        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+        try:
+            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+        except Exception:
+            logger.opt(depth=6, exception=record.exc_info).log(
+                level, html.escape(record.getMessage())
+            )
 
 
 class Logger:
@@ -65,11 +72,57 @@ class Logger:
         self._logger = logger.opt(colors=True)
 
     def __getattribute__(self, name):
-        if name == '_logger':
+        try:
+            # Prefer our own attributes/methods so we can wrap calls safely
             return super().__getattribute__(name)
+        except AttributeError:
+            return getattr(self._delegate(), name)
 
-        ctx = get_context() or {}
-        return getattr(ctx[CONTEXT_LOGGER_KEY] if CONTEXT_LOGGER_KEY in ctx else self._logger, name)
+    # helpers
+    def _delegate(self):
+        return (get_context() or {}).get(CONTEXT_LOGGER_KEY) or self._logger
+
+    @staticmethod
+    def _escape_html_value(v):
+        try:
+            s = str(v)
+        except Exception:
+            try:
+                s = repr(v)
+            except Exception:
+                s = "<unrepresentable>"
+        try:
+            return html.escape(s, quote=False)
+        except Exception:
+            return s
+
+    def _safe_invoke(self, call, msg, *args, **kwargs):
+        # 1) Primary attempt: call with original values
+        try:
+            return call(msg, *args, **kwargs)
+        except Exception:
+            pass
+        # 2) Fallback: HTML-escape values and retry once
+        try:
+            safe_msg = self._escape_html_value(msg)
+            safe_args = tuple(self._escape_html_value(a) for a in args)
+            safe_kwargs = {}
+            for k, v in kwargs.items():
+                if k in ('exc_info', 'stack_info'):
+                    safe_kwargs[k] = v
+                else:
+                    safe_kwargs[k] = self._escape_html_value(v)
+            return call(safe_msg, *safe_args, **safe_kwargs)
+        except Exception:
+            pass
+        # 3) Final failsafe: minimal stderr line
+        try:
+            sys.stderr.write(f"[LOGGING-FAILSAFE] {self._escape_html_value(msg)}\n")
+        except Exception:
+            pass
+
+    def _safe_log(self, method_name, msg, *args, **kwargs):
+        return self._safe_invoke(getattr(self._delegate(), method_name), msg, *args, **kwargs)
 
     def setLevel(self, level):
         """
@@ -80,83 +133,58 @@ class Logger:
     def debug(self, msg, *args, **kwargs):
         """
         Log 'msg % args' with severity 'DEBUG'.
-
-        To pass exception information, use the keyword argument exc_info with
-        a true value, e.g.
-
-        logger.debug("Houston, we have a %s", "thorny problem", exc_info=True)
         """
-        ...
+        return self._safe_log("debug", msg, *args, **kwargs)
 
     def info(self, msg, *args, **kwargs):
         """
         Log 'msg % args' with severity 'INFO'.
-
-        To pass exception information, use the keyword argument exc_info with
-        a true value, e.g.
-
-        logger.info("Houston, we have a %s", "notable problem", exc_info=True)
         """
-        ...
+        return self._safe_log("info", msg, *args, **kwargs)
 
     def warning(self, msg, *args, **kwargs):
         """
         Log 'msg % args' with severity 'WARNING'.
-
-        To pass exception information, use the keyword argument exc_info with
-        a true value, e.g.
-
-        logger.warning("Houston, we have a %s", "bit of a problem", exc_info=True)
         """
-        ...
+        return self._safe_log("warning", msg, *args, **kwargs)
 
     def warn(self, msg, *args, **kwargs):
-        ...
+        """
+        Alias for warning().
+        """
+        return self._safe_log("warning", msg, *args, **kwargs)
 
     def error(self, msg, *args, **kwargs):
         """
         Log 'msg % args' with severity 'ERROR'.
-
-        To pass exception information, use the keyword argument exc_info with
-        a true value, e.g.
-
-        logger.error("Houston, we have a %s", "major problem", exc_info=True)
         """
-        ...
+        return self._safe_log("error", msg, *args, **kwargs)
 
     def exception(self, msg, *args, exc_info=True, **kwargs):
         """
         Convenience method for logging an ERROR with exception information.
         """
-        self.error(msg, *args, exc_info=exc_info, **kwargs)
+        kwargs.setdefault("exc_info", exc_info)
+        return self._safe_log("error", msg, *args, **kwargs)
 
     def critical(self, msg, *args, **kwargs):
         """
         Log 'msg % args' with severity 'CRITICAL'.
-
-        To pass exception information, use the keyword argument exc_info with
-        a true value, e.g.
-
-        logger.critical("Houston, we have a %s", "major disaster", exc_info=True)
         """
-        ...
+        return self._safe_log("critical", msg, *args, **kwargs)
 
     def fatal(self, msg, *args, **kwargs):
         """
-        Don't use this method, use critical() instead.
+        Alias for critical().
         """
-        ...
+        return self._safe_log("critical", msg, *args, **kwargs)
 
     def log(self, level, msg, *args, **kwargs):
         """
-        Log 'msg % args' with the integer severity 'level'.
-
-        To pass exception information, use the keyword argument exc_info with
-        a true value, e.g.
-
-        logger.log(level, "We have a %s", "mysterious problem", exc_info=True)
+        Log 'msg % args' with the integer or string severity 'level'.
         """
-        ...
+        log_method = getattr(self._delegate(), "log")
+        return self._safe_invoke(lambda m, *a, **kw: log_method(level, m, *a, **kw), msg, *args, **kwargs)
 
 
 def monkey_match_standard_logging():

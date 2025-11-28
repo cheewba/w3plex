@@ -3,7 +3,6 @@ import asyncio
 import os
 import sys
 from contextlib import contextmanager
-from functools import partial
 from inspect import iscoroutinefunction, isfunction, iscoroutine
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -12,7 +11,7 @@ from lazyplex import create_context
 
 from .constants import CONTEXT_CHAINS_KEY
 from .utils import load_path
-from .core import config_loader, ConfigTree
+from .config import config_loader, ConfigTree, Lazy
 from .log import logger
 
 
@@ -74,6 +73,10 @@ class Runner:
         return self._tree
 
     async def resolve_value(self, value) -> Any:
+        if isinstance(value, Lazy):
+            # Lazy should be resolved on action level,
+            # when action context is defined
+            return value
         if (iscoroutinefunction(value)
                 or isfunction(value)):
             value = value()
@@ -180,7 +183,6 @@ class Runner:
 
         cfg = dict(self.cfg)
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
-        app_tree = self._tree.get(APPLICATIONS_CFG_KEY).get(app.name).tree
         with create_context({
             CONTEXT_CONFIG_KEY: dict(app_cfg),
             CONTEXT_EXTRAS_KEY: dict(cfg),
@@ -188,18 +190,7 @@ class Runner:
                 chains if (chains := self.tree.get_collection('chains')) else {}
             ),
         }):
-            # self._extend_app_actions(app, app_tree)
             yield app
-
-    def _extend_app_actions(self, app: _Application, app_cfg: Dict):
-        for action_name, action_cfg in app_cfg.get(ACTIONS_CFG_KEY, {}).items():
-            action_cfg = dict(action_cfg or {})  # create a copy to modify it
-            action_base = action_cfg.pop('action', None) or action_name
-            app_action = app._actions.get(action_base)
-            if app_action is None:
-                raise ValueError(f"Application '{app.name}' doesn't have any action, "
-                                f"that could be bound to config action '{action_name}'")
-            app._actions[action_name] = partial(app_action, **action_cfg)
 
 
 def load_applications(name: str):

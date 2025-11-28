@@ -12,11 +12,11 @@ from typing import (
 from lazyplex import Application
 from w3ext import Chain
 
-from ..utils import load_path, AttrDict, as_future
+from ..utils import load_path, AttrDict, as_future, get_context
 from ..exceptions import ConfigError
 
 
-__all__ = ['config_loader', 'ConfigTree']
+__all__ = ['config_loader', 'ConfigTree', 'Lazy']
 
 T = TypeVar("T")
 type NodeConfig = Dict[str, Any]
@@ -35,7 +35,11 @@ COLLECTIONS = (
 )
 
 IMPORT_KEY = '__init__'
-IMPORT_SIGN = '$'
+AS_LAZY_KEY = '__lazy__'
+ENTITY_RE = re.compile(r'\$([^.].*)$')
+LAZY_ITEM_RE = re.compile(r'\$\.(.+)$')
+
+empty = object()
 
 
 def validate_relative_path(path, root=None):
@@ -121,11 +125,11 @@ class _ConfigLoader:
             return _regexp.match(path) is not None
         return _filter
 
-    async def _get_node(
+    async def get_node(
         self,
         cfg: Dict,
         path: str,
-        collections: Optional[defaultdict],
+        collections: Optional[defaultdict] = None,
         relative_path: Optional[str] = None
     ) -> NodeConfig | NodeFactoryOutput:
         for flt, node_fn, collection in self._filters[::-1]:
@@ -133,7 +137,7 @@ class _ConfigLoader:
             if (flt(cfg, path)):
                 try:
                     node = await as_future(node_fn(cfg, path))
-                    if node and collection:
+                    if node and collection and collections is not None:
                         if isinstance(collection, Callable):
                             collection = collection(node)
                         collections[collection][path.rsplit('.', 1)[-1]] = node
@@ -154,9 +158,9 @@ class _ConfigLoader:
                 collection[key] = val
                 state['unresolved'] -= 1
 
-            if isinstance(value, str) and value.startswith(IMPORT_SIGN):
+            if isinstance(value, str) and (entity_match := ENTITY_RE.match(value)):
                 state['unresolved'] += 1
-                resolver.resolve_once_ready(value[len(IMPORT_SIGN):], callback)
+                resolver.resolve_once_ready(entity_match.group(1), callback)
 
         async def _parse_item(key, value, state, path, relative_path):
             if isinstance(value, dict):
@@ -195,14 +199,14 @@ class _ConfigLoader:
 
                 if not path:
                     # on 0 level we can try to resolve node once it's parsed
-                    parsed[key] =  await self._get_node(value, key, collections, relative_path)
+                    parsed[key] =  await self.get_node(value, key, collections, relative_path)
 
             if not path:
                 return parsed
 
             if path and state["unresolved"] == 0:
                 # on 1+ level parse node only after all items on that level parsed
-                return await self._get_node(parsed, path, collections, relative_path)
+                return await self.get_node(parsed, path, collections, relative_path)
 
             unresolved_states.append(state)
             return None
@@ -221,7 +225,7 @@ class _ConfigLoader:
                     parent = parsed
                     for item in path[:-1]:
                         parent = parent[item]
-                    parent[path[-1]] = await self._get_node(
+                    parent[path[-1]] = await self.get_node(
                         state['parsed'], state['path'], collections
                     )
                     unresolved_states.pop(i)
@@ -270,11 +274,14 @@ async def entity_factory(cfg: 'NodeConfig', path: str) -> NodeFactoryOutput:
     conf = dict(cfg)  # create a copy to modify it
     init_path = conf.pop(IMPORT_KEY)
     init: InitFactory = load_path(init_path)
+
     if isclass(init) and issubclass(init, Chain):
         return await load_chain(cfg, path, init)
     if isinstance(init, Application):
         # for application there's another protocol
         raise SkipNode
+    if len([val for val in cfg.values() if isinstance(val, Lazy)]) > 0:
+        return await lazy_factory(cfg, path)
 
     return await as_future(init(**conf))
 
@@ -291,3 +298,88 @@ async def load_chain[R](cfg: 'NodeConfig', path: str, cls: Optional[Type[R]] = N
         await asyncio.gather(*[chain.load_token(token, cache_as=key)
                                 for key, token in erc20.items()])
     return chain
+
+
+def _lazy_filter(cfg: Dict, path: str) -> bool:
+    return (
+        cfg.get(AS_LAZY_KEY, False)
+        or len([val for val in cfg.values()
+                if isinstance(val, str) and LAZY_ITEM_RE.match(val)]) > 0
+    )
+
+
+@config_loader.add_node(_lazy_filter)
+async def lazy_factory[R](cfg: 'NodeConfig', path: str) -> R:
+    return Lazy(cfg, path)
+
+
+class Lazy[T]:
+    def __init__(self, cfg: 'NodeConfig', path: str):
+        self._as_lazy = cfg.pop(AS_LAZY_KEY, False)
+
+        self.cfg = cfg
+        self.path = path
+
+    @property
+    def as_lazy(self):
+        return self._as_lazy
+
+    @property
+    def type(self) -> Type[T]:
+        pass
+
+    def _resolve_path(self, path: str, vars: Dict[str, Any]):
+        """
+        Resolves a dot-separated path against the provided vars.
+        Each segment can resolve as:
+        - Mapping key (dict-like)
+        - Object attribute (getattr)
+        - Iterable/sequence index (when the segment is an integer)
+        """
+        if not isinstance(path, str):
+            raise TypeError("path must be a string")
+
+        def get_attr(item, key):
+            try:
+                return getattr(item, key)
+            except AttributeError:
+                return empty
+
+        def get_item(item, key):
+            try:
+                return item[key]
+            except KeyError:
+                return empty
+
+        def get_index(item, idx):
+            try:
+                return item[int(idx)]
+            except (ValueError, IndexError):
+                return empty
+
+        current = vars
+        for segment in path.split('.'):
+            if segment == '':
+                continue
+
+            for resolver in (get_item, get_attr, get_index):
+                resolved = resolver(current, segment)
+                if resolved is not empty:
+                    current = resolved
+                    break
+                raise ConfigError(f"Can't resolve {path} to value")
+        return current
+
+    async def __call__(self, **kwargs) -> T:
+        kw = dict(self.cfg)
+        kw.update(kwargs)
+
+        vars = {
+            'context': get_context() or {}
+        }
+        for key, value in kw.items():
+            if isinstance(value, str) and (match := LAZY_ITEM_RE.match(value)):
+                kw[key] = self._resolve_path(match.group(1), vars)
+            elif isinstance(value, Lazy) and not value.as_lazy:
+                kw[key] = await value()
+        return await config_loader.get_node(kw, self.path)
