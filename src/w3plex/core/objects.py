@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from typing import Generic, TypeVar, Callable, overload, Any
+from typing import Generic, TypeVar, Callable, overload, Any, Dict, Tuple
 
 from lazyplex import (
     Application as _Application,
     ApplicationAction as _ApplicationAction,
     application as _application,
 )
+from ..config import Lazy
 from ..constants import CONTEXT_CONFIG_KEY, CONTEXT_LOGGER_KEY
 from ..exceptions import SkipItem, W3PlexError
 from ..log import logger
@@ -42,6 +43,21 @@ class ApplicationAction(_ApplicationAction):
         except Exception as e:
             logger.exception(e)
             raise
+
+    async def parse_args(self, *args, **kwargs) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        async def resolve_value(value):
+            if isinstance(value, dict):
+                return {key: await resolve_value(subvalue) for key, subvalue in value.items()}
+            elif isinstance(value, (list, tuple, set)):
+                resolved = [await resolve_value(item) for item in value]
+                return type(value)(resolved)
+            elif isinstance(value, Lazy) and not value.as_lazy:
+                return await value()
+            return value
+        args = await resolve_value(args)
+        kwargs = await resolve_value(kwargs)
+
+        return await super().parse_args(*args, **kwargs)
 
 
 class Application(_Application):

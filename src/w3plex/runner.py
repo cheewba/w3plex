@@ -11,7 +11,7 @@ from lazyplex import create_context
 
 from .constants import CONTEXT_CHAINS_KEY
 from .utils import load_path
-from .config import config_loader, ConfigTree
+from .config import config_loader, ConfigTree, Lazy
 from .log import logger
 
 
@@ -73,6 +73,10 @@ class Runner:
         return self._tree
 
     async def resolve_value(self, value) -> Any:
+        if isinstance(value, Lazy):
+            # Lazy should be resolved on action level,
+            # when action context is defined
+            return value
         if (iscoroutinefunction(value)
                 or isfunction(value)):
             value = value()

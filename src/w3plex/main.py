@@ -24,7 +24,7 @@ from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
 from w3plex.shell import Shell
 from w3plex.secure import encrypt_file, decrypt_file
-from w3plex.yaml import Dumper, Include, Loader as YamlLoader
+from w3plex.config import Dumper, Include, Loader as YamlLoader
 
 
 load_dotenv()
