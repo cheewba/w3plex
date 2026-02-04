@@ -165,7 +165,8 @@ def run_app_cmd(args, *, name, cfg, cfg_path):
             await runner.finalize()
 
     def cancel_coro():
-        coro.cancel()
+        if coro is not None:
+            coro.cancel()
 
     runner.loop.add_signal_handler(signal.SIGINT, cancel_coro)
 

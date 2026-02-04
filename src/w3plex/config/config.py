@@ -2,17 +2,20 @@ import asyncio
 import os
 import re
 from collections import defaultdict
-from collections.abc import Callable, Generator, AsyncGenerator
+from collections.abc import Callable
 from inspect import isclass
 from typing import (
     Dict, Optional, Type, TypeVar, overload, Any, Union,
     List, Tuple, Awaitable,
 )
 
-from lazyplex import Application
+from lazyplex import Application, ContextScope
 from w3ext import Chain
 
-from ..utils import load_path, AttrDict, as_future, get_context
+from ..constants import (
+    CONTEXT_VARS_KEY, VARS_COLLECTION, ACTIONS_CFG_KEY, APPLICATIONS_CFG_KEY,
+)
+from ..utils import load_path, AttrDict, as_future, get_context, get_scope
 from ..exceptions import ConfigError
 
 
@@ -35,9 +38,14 @@ COLLECTIONS = (
 )
 
 IMPORT_KEY = '__init__'
+VAR_KEY = '__var__'
 AS_LAZY_KEY = '__lazy__'
+AS_FACTORY_KEY = '__factory__'
 ENTITY_RE = re.compile(r'\$([^.].*)$')
 LAZY_ITEM_RE = re.compile(r'\$\.(.+)$')
+
+APPLICATIONS_CFG_RE = re.compile((_app_re:=r'^.*' + APPLICATIONS_CFG_KEY + r'\.[^.]*') + r"$")
+ACTION_CONFIG_RE = re.compile(_app_re + r'\.' + ACTIONS_CFG_KEY + r'\.([^.]+)$')
 
 empty = object()
 
@@ -132,6 +140,9 @@ class _ConfigLoader:
         collections: Optional[defaultdict] = None,
         relative_path: Optional[str] = None
     ) -> NodeConfig | NodeFactoryOutput:
+
+        node = cfg
+        is_var = isinstance(cfg, dict) and cfg.pop(VAR_KEY, False)
         for flt, node_fn, collection in self._filters[::-1]:
             # check filters as LIFO
             if (flt(cfg, path)):
@@ -141,10 +152,14 @@ class _ConfigLoader:
                         if isinstance(collection, Callable):
                             collection = collection(node)
                         collections[collection][path.rsplit('.', 1)[-1]] = node
-                    return node
+                    break
                 except SkipNode:
                     continue
-        return cfg
+
+        if is_var:
+            collections[VARS_COLLECTION][path.split('.')[-1]] = node
+
+        return node
 
     async def parse(self, cfg: Dict, cfg_path: str) -> "ConfigTree":
         unresolved_states = []
@@ -275,15 +290,19 @@ async def entity_factory(cfg: 'NodeConfig', path: str) -> NodeFactoryOutput:
     init_path = conf.pop(IMPORT_KEY)
     init: InitFactory = load_path(init_path)
 
-    if isclass(init) and issubclass(init, Chain):
-        return await load_chain(cfg, path, init)
     if isinstance(init, Application):
         # for application there's another protocol
         raise SkipNode
-    if len([val for val in cfg.values() if isinstance(val, Lazy)]) > 0:
-        return await lazy_factory(cfg, path)
 
-    return await as_future(init(**conf))
+    if isclass(init) and issubclass(init, Chain):
+        entity = await load_chain(cfg, path, init)
+    if len([val for val in cfg.values()
+            if isinstance(val, Lazy) and not val.as_lazy]) > 0:
+        entity = await lazy_factory(cfg, path)
+    else:
+        entity = await as_future(init(**conf))
+
+    return entity
 
 
 @overload
@@ -303,26 +322,46 @@ async def load_chain[R](cfg: 'NodeConfig', path: str, cls: Optional[Type[R]] = N
 def _lazy_filter(cfg: Dict, path: str) -> bool:
     return (
         cfg.get(AS_LAZY_KEY, False)
-        or len([val for val in cfg.values()
-                if isinstance(val, str) and LAZY_ITEM_RE.match(val)]) > 0
+        or cfg.get(AS_FACTORY_KEY, False)
+        or (
+            len([val for val in cfg.values()
+                 if isinstance(val, str) and LAZY_ITEM_RE.match(val)]) > 0
+        )
     )
 
 
 @config_loader.add_node(_lazy_filter)
 async def lazy_factory[R](cfg: 'NodeConfig', path: str) -> R:
+    if (APPLICATIONS_CFG_RE.match(path) or ACTION_CONFIG_RE.match(path)):
+        # Application and Action can't be Lazy instance
+        # but seems they have a field expected to be a Lazy
+        output = dict(cfg)
+        for key, val in cfg.items():
+            if isinstance(val, str) and LAZY_ITEM_RE.match(val):
+                output[key] = LazyVar(val, ".".join([path, key]))
+        return output
+
     return Lazy(cfg, path)
 
 
 class Lazy[T]:
+    _as_factory = False
+    _as_lazy = False
+
     def __init__(self, cfg: 'NodeConfig', path: str):
         self._as_lazy = cfg.pop(AS_LAZY_KEY, False)
+        self._as_factory = cfg.pop(AS_FACTORY_KEY, False)
 
         self.cfg = cfg
         self.path = path
 
     @property
     def as_lazy(self):
-        return self._as_lazy
+        return self._as_lazy or self._as_factory
+
+    @property
+    def as_factory(self):
+        return self._as_factory
 
     @property
     def type(self) -> Type[T]:
@@ -370,16 +409,65 @@ class Lazy[T]:
                 raise ConfigError(f"Can't resolve {path} to value")
         return current
 
+    def _set_cached(self, value: T):
+        if get_scope() == ContextScope.action:
+            ctx = get_context()
+            ctx.setdefault('_lazy_cache', {})[self.path] = value
+        else:
+            # when scope is an application, behave like a singleton
+            setattr(self, '_cached', value)
+
+    def _get_cached(self) -> T | object:
+        if get_scope() == ContextScope.action:
+            ctx = get_context()
+            return ctx.get('_lazy_cache', {}).get(self.path) or empty
+        else:
+            return getattr(self, '_cached', empty)
+
     async def __call__(self, **kwargs) -> T:
+        if not self.as_factory and (value := self._get_cached()) is not empty:
+            return value
+
         kw = dict(self.cfg)
         kw.update(kwargs)
 
+        ctx = get_context() or {}
+
         vars = {
-            'context': get_context() or {}
+            'vars': ctx.get(CONTEXT_VARS_KEY) or {},
+            'context': ctx,
         }
         for key, value in kw.items():
             if isinstance(value, str) and (match := LAZY_ITEM_RE.match(value)):
-                kw[key] = self._resolve_path(match.group(1), vars)
-            elif isinstance(value, Lazy) and not value.as_lazy:
+                kw[key] = value = self._resolve_path(match.group(1), vars)
+            if isinstance(value, Lazy) and not value.as_lazy:
                 kw[key] = await value()
-        return await config_loader.get_node(kw, self.path)
+        value = await config_loader.get_node(kw, self.path)
+        if not self.as_factory:
+            self._set_cached(value)
+        return value
+
+
+class LazyVar(Lazy[T]):
+    def __init__(self, var: str, path: str):
+        self._as_lazy = False
+
+        self.var = var
+        self.path = path
+
+    async def __call__(self, **kwargs) -> T:
+        if (value := self._get_cached()) is not empty:
+            return value
+
+        ctx = get_context() or {}
+
+        vars = {
+            'vars': ctx.get(CONTEXT_VARS_KEY) or {},
+            'context': ctx,
+        }
+        match = LAZY_ITEM_RE.match(self.var)
+        value = self._resolve_path(match.group(1), vars)
+        if isinstance(value, Lazy) and not value.as_lazy:
+            value = await value()
+        self._set_cached(value)
+        return value

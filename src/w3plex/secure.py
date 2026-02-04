@@ -25,6 +25,7 @@ import getpass
 import io
 import json
 import os
+import secrets
 from hashlib import sha256, scrypt
 from pathlib import Path
 from typing import List, Optional, Union, Tuple
@@ -111,6 +112,11 @@ def _adaptive_scrypt(password: str) -> bytes:
 
 
 def _get_master_key() -> bytes:
+    unlock_keystore()
+    return _master_key
+
+
+def unlock_keystore():
     global _master_key
     if _master_key is None:
         pwd = getpass.getpass("Master password: ")
@@ -119,7 +125,6 @@ def _get_master_key() -> bytes:
             if not pwd == pwd_confirm:
                 raise IncorrectPassword("Master passwords don't match")
         _master_key = _adaptive_scrypt(pwd)
-    return _master_key
 
 
 # ----------------------------------------------------------------------
@@ -199,6 +204,83 @@ def _derive_file_key(password: str) -> bytes:
 
 
 # ----------------------------------------------------------------------
+# Core encryption/decryption helpers
+# ----------------------------------------------------------------------
+
+def _encrypt_bytes(
+    data: bytes,
+    password: str,
+    *,
+    add_to_keystore: bool = False,
+) -> bytes:
+    """Encrypt bytes and return data with MAGIC prefix.
+
+    Args:
+        data: Bytes to encrypt
+        password: Required password for encryption
+        add_to_keystore: If True, add derived key to keystore
+    """
+    key = _derive_file_key(password)
+    cipher = Fernet(base64.urlsafe_b64encode(key)).encrypt(data)
+
+    if add_to_keystore:
+        _add_key(key)
+
+    return _MAGIC + cipher
+
+
+def _decrypt_bytes(
+    data: bytes,
+    *,
+    password: Optional[str] = None,
+    use_keystore: bool = True,
+    ask_password: bool = False,
+    prompt_context: str = "data",
+) -> bytes:
+    """Decrypt bytes with MAGIC prefix, trying keystore first.
+
+    Args:
+        data: Encrypted bytes with MAGIC prefix
+        password: Optional password for decryption
+        use_keystore: Try cached keys from keystore
+        ask_password: If True and no password/keystore match, prompt; else raise
+        prompt_context: Context string for password prompt
+    """
+    if not data.startswith(_MAGIC):
+        raise ValueError(f"{prompt_context} is not encrypted")
+
+    cipher = data[len(_MAGIC):]
+
+    plain: Optional[bytes] = None
+    if use_keystore and not password:
+        for k in _all_keys():
+            try:
+                plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
+                break
+            except InvalidToken:
+                continue
+
+    if plain is None:
+        if password:
+            k = _derive_file_key(password)
+        elif ask_password:
+            pwd = getpass.getpass(f"Password for {prompt_context}: ")
+            k = _derive_file_key(pwd)
+        else:
+            raise IncorrectPassword("No password provided and key not in keystore")
+
+        try:
+            plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
+        except InvalidToken as exc:
+            raise IncorrectPassword("Wrong password") from exc
+
+        if not password and use_keystore:
+            _add_key(k)
+
+    return plain
+
+
+# ----------------------------------------------------------------------
 # Public helper: encrypt_file
 # ----------------------------------------------------------------------
 
@@ -211,17 +293,13 @@ def encrypt_file(
     add_to_keystore: bool = False,
 ) -> Path:
     """Encrypt *src* with a file-specific password and cache its key."""
-
     src_path = Path(src)
     data = src_path.read_bytes()
     if data.startswith(_MAGIC):
         raise ValueError(f"{src_path} is already encrypted")
 
     pwd = password or getpass.getpass(f"Password for {src_path}: ")
-    key = _derive_file_key(pwd)
-
-    cipher = Fernet(base64.urlsafe_b64encode(key)).encrypt(data)
-    out_bytes = _MAGIC + cipher
+    out_bytes = _encrypt_bytes(data, password=pwd, add_to_keystore=add_to_keystore)
 
     if inplace:
         dst_path = src_path
@@ -229,9 +307,6 @@ def encrypt_file(
         dst_path = Path(dst) if dst else src_path.with_suffix(src_path.suffix + ".enc")
 
     dst_path.write_bytes(out_bytes)
-
-    if add_to_keystore:
-        _add_key(key)
     return dst_path
 
 
@@ -243,47 +318,17 @@ def decrypt_file(
     inplace: bool = False,
     use_keystore: bool = False,
 ) -> Path:
-    """Decrypt an `ENC1` file to plaintext.
-
-    Parameters
-    ----------
-    src : str | Path
-        Path to the encrypted file.
-    password : str, optional
-        File password; if omitted the function tries cached keys and
-        prompts only if necessary.
-    dst : str | Path, optional
-        Destination path for the plaintext. Ignored if ``inplace`` is
-        True.
-    inplace : bool, default ``False``
-        If True, overwrite *src* with its plaintext.
-    """
-
+    """Decrypt an `ENC1` file to plaintext."""
     src_path = Path(src)
     raw = src_path.read_bytes()
-    if not raw.startswith(_MAGIC):
-        raise ValueError(f"{src_path} is not encrypted")
 
-    cipher = raw[len(_MAGIC):]
-
-    # 1) try cached keys
-    plain: Optional[bytes] = None
-    if use_keystore:
-        for k in _all_keys():
-            try:
-                plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
-                break
-            except InvalidToken:
-                continue
-
-    # 2) fallback to provided or prompted password
-    if plain is None:
-        pwd = password or getpass.getpass(f"Password for {src_path}: ")
-        k = _derive_file_key(pwd)
-        try:
-            plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
-        except InvalidToken as exc:
-            raise IncorrectPassword("Wrong password") from exc
+    plain = _decrypt_bytes(
+        raw,
+        password=password,
+        use_keystore=use_keystore,
+        ask_password=True,
+        prompt_context=str(src_path)
+    )
 
     dst_path = src_path if inplace else (
         Path(dst) if dst else src_path.with_suffix(".dec")
@@ -298,28 +343,15 @@ def decrypt_file(
 
 def _decrypt_if_needed(path: Path, raw: bytes, *, text_encoding: Optional[str]):
     """Return file-like object with plaintext; None if *raw* is plain."""
-
     if not raw.startswith(_MAGIC):
-        return None  # original file is plaintext
+        return None
 
-    cipher = raw[len(_MAGIC):]
-
-    # Try cached keys first
-    for k in _all_keys():
-        try:
-            plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
-            break
-        except InvalidToken:
-            continue
-    else:
-        # Need file password
-        pwd = getpass.getpass(f"Password for {path}: ")
-        k = _derive_file_key(pwd)
-        try:
-            plain = Fernet(base64.urlsafe_b64encode(k)).decrypt(cipher)
-        except InvalidToken as exc:
-            raise IncorrectPassword(f"Wrong password for file {path}") from exc
-        _add_key(k)
+    plain = _decrypt_bytes(
+        raw,
+        use_keystore=True,
+        ask_password=True,
+        prompt_context=str(path)
+    )
 
     buf = io.BytesIO(plain)
     return buf if text_encoding is None else io.TextIOWrapper(buf, encoding=text_encoding)
@@ -372,9 +404,85 @@ def _secure_open(
 # Patch builtins once
 builtins.open = _secure_open
 
+
+# ----------------------------------------------------------------------
+# Data encryption/decryption (for in-memory or stream data)
+# ----------------------------------------------------------------------
+
+def encrypt_data(
+    data: Union[str, bytes],
+    *,
+    password: Optional[str] = None,
+    add_to_keystore: bool = True,
+) -> Tuple[str, str]:
+    """Encrypt data and return (encrypted_data, password).
+
+    Args:
+        data: String or bytes to encrypt
+        password: Optional password; if None, generates random password
+        add_to_keystore: If True, add derived key to keystore (default: True)
+
+    Returns:
+        Tuple of (base64-encoded encrypted data, password used)
+
+    Raises:
+        ValueError: If neither password nor add_to_keystore is provided
+    """
+    if password is None and not add_to_keystore:
+        raise ValueError("Either password must be provided or add_to_keystore must be True")
+
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+
+    if password is None:
+        password = secrets.token_urlsafe(32)
+
+    encrypted_bytes = _encrypt_bytes(data, password, add_to_keystore=add_to_keystore)
+    return base64.b64encode(encrypted_bytes).decode('ascii'), password
+
+
+def decrypt_data(
+    encrypted: str,
+    *,
+    password: Optional[str] = None,
+    use_keystore: bool = True,
+) -> str:
+    """Decrypt data that was encrypted with encrypt_data.
+
+    Args:
+        encrypted: Base64-encoded encrypted data
+        password: Optional password for decryption
+        use_keystore: Try cached keys from keystore
+
+    Returns:
+        Decrypted data as string
+
+    Raises:
+        IncorrectPassword: If decryption fails or no key available
+    """
+    try:
+        raw = base64.b64decode(encrypted.encode('ascii'))
+    except Exception:
+        raise ValueError("Invalid base64-encoded data")
+
+    if not raw.startswith(_MAGIC):
+        return encrypted
+
+    plain = _decrypt_bytes(
+        raw,
+        password=password,
+        use_keystore=use_keystore,
+        ask_password=False,
+        prompt_context="encrypted data"
+    )
+    return plain.decode('utf-8')
+
+
 __all__ = [
     "encrypt_file",
     "decrypt_file",
+    "encrypt_data",
+    "decrypt_data",
     "SecureError",
     "IncorrectPassword",
 ]
