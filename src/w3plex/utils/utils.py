@@ -1,8 +1,8 @@
 from importlib import import_module
-from typing import Optional, Dict, TypeVar, Any, List, TYPE_CHECKING, Union
+from typing import Optional, Dict, TypeVar, Any, TYPE_CHECKING
 
 from w3ext import Chain
-from lazyplex import get_context, CTX_APPLICATION
+from lazyplex import get_context, CTX_APPLICATION, ContextScope
 
 from ..constants import (
     CONTEXT_CHAINS_KEY, CONTEXT_CONFIG_KEY
@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
+
 
 
 def get_chains() -> Optional[Dict[str, Chain]]:
@@ -27,6 +28,11 @@ def get_config() -> Optional[Dict[str, Any]]:
 def get_application() -> "Application":
     """ Return current Application. """
     return get_context().get(CTX_APPLICATION)
+
+
+def get_scope() -> ContextScope:
+    ctx = get_context()
+    return ctx.get_scope()
 
 
 def execute_on_complete(fn, *args, **kwargs):

@@ -9,14 +9,15 @@ from typing import Any, Dict, Optional, Tuple, List
 from lazyplex import Application as _Application
 from lazyplex import create_context
 
-from .constants import CONTEXT_CHAINS_KEY
+from .constants import (
+    CONTEXT_CHAINS_KEY, CONTEXT_VARS_KEY, VARS_COLLECTION,
+    APPLICATIONS_CFG_KEY, ACTIONS_CFG_KEY,
+)
 from .utils import load_path
 from .config import config_loader, ConfigTree, Lazy
 from .log import logger
 
 
-APPLICATIONS_CFG_KEY = 'applications'
-ACTIONS_CFG_KEY = 'actions'
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
     "<level>{level: <8}</level> | "
@@ -189,6 +190,7 @@ class Runner:
             CONTEXT_CHAINS_KEY: dict(
                 chains if (chains := self.tree.get_collection('chains')) else {}
             ),
+            CONTEXT_VARS_KEY: self._tree.get_collection(VARS_COLLECTION)
         }):
             yield app
 
