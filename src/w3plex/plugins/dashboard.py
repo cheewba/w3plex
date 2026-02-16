@@ -69,6 +69,9 @@ if TYPE_CHECKING:
 _current_level: ContextVar[Optional["DashboardLevel"]] = ContextVar(
     "_current_level", default=None
 )
+_current_page: ContextVar[Optional["DashboardPage"]] = ContextVar(
+    "_current_page", default=None
+)
 
 _dashboard_manager: Optional["DashboardManager"] = None
 
@@ -926,12 +929,22 @@ class DashboardManager:
         logs = self._render_logs_panel()
         footer = self._render_navigation_bar()
 
-        parts: List[RenderableType] = [header, Text(""), content]
+        content_body: RenderableType = content
         if logs is not None:
-            parts.extend([Text(""), logs])
-        parts.extend([Text(""), Panel(footer, box=box.SIMPLE, style="dim")])
+            content_body = Group(content, Text(""), logs)
 
-        return Group(*parts)
+        # Keep header and hotkeys visible even when page content grows taller
+        # than terminal viewport. The center content area gets clipped first.
+        root = Layout(name="dashboard_root")
+        root.split_column(
+            Layout(name="header", size=3),
+            Layout(name="content", ratio=1),
+            Layout(name="footer", size=3),
+        )
+        root["header"].update(Panel(header, box=box.SIMPLE, style="dim"))
+        root["content"].update(content_body)
+        root["footer"].update(Panel(footer, box=box.SIMPLE, style="dim"))
+        return root
 
     async def start(self) -> None:
         """Start the dashboard Live display."""
@@ -1120,6 +1133,10 @@ def get_dashboard() -> Optional[IDashboard]:
     Returns:
         The current DashboardPage implementing IDashboard, or None
     """
+    page = _current_page.get()
+    if page is not None:
+        return page
+
     level = _current_level.get()
     if level is None:
         return None
@@ -1170,6 +1187,7 @@ async def dashboard_page(
     level.add_page(page)
 
     token = _current_level.set(level)
+    page_token = _current_page.set(page)
 
     is_first_page = (
         manager.root_level is not None and
@@ -1184,6 +1202,7 @@ async def dashboard_page(
         yield page
 
     finally:
+        _current_page.reset(page_token)
         _current_level.reset(token)
         level.remove_page(page)
 
