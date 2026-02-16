@@ -22,8 +22,8 @@ dependencies = [
     'rich==13.*',
     'cryptography==45.*',
     'python-dotenv',
-    "w3ext @ git+https://github.com/cheewba/w3ext.git@main#egg=w3ext",
-    "lazyplex @ git+https://github.com/cheewba/lazyplex.git@main#egg=lazyplex",
+    "w3ext @ git+https://github.com/cheewba/w3ext.git@0.0.4#egg=w3ext",
+    "lazyplex @ git+https://github.com/cheewba/lazyplex.git@0.0.4#egg=lazyplex",
 ]
 dynamic = ["version"]
 
