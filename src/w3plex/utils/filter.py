@@ -1,4 +1,5 @@
 import asyncio
+import operator
 import re
 from collections.abc import Callable, Iterable
 from typing import Any, ClassVar
@@ -23,7 +24,9 @@ def _filter(fn: Callable):
 def _filter_chain(chain: Chain | None, *, template: str, **kwargs) -> bool:
     if template == WILDCARD:
         return True
-    return chain is not None and (chain.name == template or chain.chain_id == template)
+    return chain is not None and (
+        chain.name == template or str(chain.chain_id) == template
+    )
 
 
 @_filter
@@ -32,7 +35,7 @@ def _filter_token(
 ) -> bool:
     if template == WILDCARD:
         return True
-    success = amount.currency.name == template or (
+    success = template in (amount.currency.name, amount.currency.symbol) or (
         chain is not None and getattr(chain, template, None) == amount.currency
     )
 
@@ -44,14 +47,23 @@ def _filter_token(
 
 @_filter
 def _filter_amount(amount: CurrencyAmount, *, template: str, **kwargs) -> bool:
-    if re.search(r";", template):
-        raise ValueError(f"Unsafe filter found: `{template}`")
-
-    template, was_usd = re.subn(r"\$([\d.]+)", r"\1", template)
-    value = amount.to_fixed() if not was_usd else getattr(amount, "usd_price", 0)
-
-    # TODO: it might be unsafe, so maybe more checks should be added
-    return bool(eval(f"amount {template}", {}, {"amount": value}))
+    found = re.fullmatch(
+        r"\s*(<=|>=|==|!=|<|>)\s*(\$)?([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*",
+        template,
+    )
+    if found is None:
+        raise ValueError(f"Invalid amount condition: {template}")
+    operation, usd, number = found.groups()
+    value = amount.to_fixed() if usd is None else getattr(amount, "usd_price", 0)
+    operations = {
+        "<": operator.lt,
+        "<=": operator.le,
+        ">": operator.gt,
+        ">=": operator.ge,
+        "==": operator.eq,
+        "!=": operator.ne,
+    }
+    return operations[operation](value, float(number))
 
 
 @_filter
@@ -87,12 +99,14 @@ class AmountFilter(Filter):
         "token": _filter_token,
         "condition": _filter_amount,
     }
-    regexp = re.compile(r"(?P<chain>[^:]+):(?P<token>[\w\d*]+)(?P<condition>.*$)")
+    regexp = re.compile(
+        r"(?P<chain>[^:\s]+):(?P<token>[^\s:<>=!]+)\s*(?P<condition>.*)"
+    )
 
     def parse_filters(self, template: str) -> list[Callable[..., bool]]:
-        found = self.regexp.search(template)
+        found = self.regexp.fullmatch(template.strip())
         if found is None:
-            return []
+            raise ValueError(f"Invalid amount filter: {template}")
         parsed = found.groupdict()
         return [
             filter_(value)
@@ -119,15 +133,19 @@ class ChainTemplateLookup[T]:
         )
         return [token for token in tokens if token is not None]
 
-    async def get_item(self, chain: Chain, item_name: str) -> tuple[T, Chain] | None:
+    async def get_item(
+        self, chain: Chain, item_name: str, *route: str
+    ) -> tuple[T, Chain] | None:
         raise NotImplementedError
 
 
 class TokenLookup(ChainTemplateLookup[Currency]):
     async def get_item(
-        self, chain: Chain, item_name: str
+        self, chain: Chain, item_name: str, *route: str
     ) -> tuple[Currency, Chain] | None:
         token_name = item_name
+        if route:
+            raise ValueError("Token lookup must have the form chain:token")
         if token_name == WILDCARD:
             raise ValueError("wildcard for token lookup is not allowed")
 
@@ -149,16 +167,33 @@ class ContractLookup(ChainTemplateLookup[Contract]):
         self.abi = abi
 
     async def get_item(
-        self, chain: Chain, item_name: str
+        self, chain: Chain, item_name: str, *route: str
     ) -> tuple[Contract, Chain] | None:
         address = item_name
+        if route:
+            raise ValueError("Contract lookup must have the form chain:address")
         if address == WILDCARD:
             raise ValueError("wildcard for contract lookup address is not allowed")
         return chain.contract(HexAddress(HexStr(address)), abi=self.abi), chain
 
 
-class ContractMethodLookup(ContractLookup):
-    pass
+class ContractMethodLookup(ChainTemplateLookup[Callable[..., Any]]):
+    def __init__(self, template: str, abi: str | None = None):
+        super().__init__(template)
+        self.abi = abi
+
+    async def get_item(
+        self, chain: Chain, item_name: str, *route: str
+    ) -> tuple[Callable[..., Any], Chain]:
+        if len(route) != 1 or not route[0]:
+            raise ValueError(
+                "Contract method lookup must have the form chain:address:method"
+            )
+        contract = await ContractLookup(f"*:{item_name}", self.abi).get_item(
+            chain, item_name
+        )
+        assert contract is not None
+        return getattr(contract[0].functions, route[0]), chain
 
 
 def join_filters(*filters) -> Callable[..., bool]:

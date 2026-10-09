@@ -1,5 +1,5 @@
 import asyncio
-import os
+import shutil
 import signal
 import textwrap
 from collections.abc import Awaitable
@@ -19,7 +19,7 @@ class Shell:
     def __init__(self, cfg, cfg_path) -> None:
         self.cfg = cfg
         self.cfg_path = cfg_path
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.new_event_loop()
         self.runner = Runner(self.loop)
 
         self._active_tasks: set[asyncio.Future] = set()
@@ -31,25 +31,33 @@ class Shell:
 
     def __call__(self) -> Any:
         async def task():
-            await self.runner.init(self.cfg, self.cfg_path)
             try:
+                await self.runner.init(self.cfg, self.cfg_path)
                 await self._run_shell()
             finally:
                 await self.runner.finalize()
 
+        asyncio.set_event_loop(self.loop)
         self.loop.add_signal_handler(signal.SIGINT, self._term_active_tasks)
         try:
             self._main_task = asyncio.ensure_future(task())
             self.loop.run_until_complete(self._main_task)
         except KeyboardInterrupt:
             pass
-        except Exception as e:  # noqa: BLE001 -- report interactive shell failures
+        except Exception as e:
             logger.exception(e)
+            raise
+        finally:
+            self.loop.remove_signal_handler(signal.SIGINT)
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.run_until_complete(self.loop.shutdown_default_executor())
+            self.loop.close()
+            asyncio.set_event_loop(None)
 
     async def _run_shell(self):
         apps = self.runner.tree.get_collection("applications") or {}
 
-        width, _ = os.get_terminal_size()
+        width = shutil.get_terminal_size().columns
         banner = textwrap.dedent(f"""
             {"=" * (width)}
             W3plex interactive shell

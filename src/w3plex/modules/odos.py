@@ -58,7 +58,18 @@ class Odos:
         self.ref_code = ref_code
 
         # setup session default args
-        self._session = aiohttp.ClientSession()
+        self._session: aiohttp.ClientSession | None = None
+
+    async def close(self):
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
 
     def _token_address(self, item: Currency | CurrencyAmount) -> str:
         if isinstance(item, CurrencyAmount):
@@ -171,7 +182,7 @@ class Odos:
         return True
 
     async def get_session(self) -> aiohttp.ClientSession:
-        if not self._session:
+        if self._session is None or self._session.closed:
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",

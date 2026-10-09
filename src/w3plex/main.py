@@ -1,270 +1,241 @@
 import argparse
 import asyncio
 import getpass
+import glob
 import io
-import itertools
 import os
-import signal
 import sys
 from functools import partial
-from operator import itemgetter
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO, cast
 
 from dotenv import load_dotenv
 from rich import print
-from rich.text import Text
-from ruamel.yaml import (
-    dump as yaml_dump,
-)
-from ruamel.yaml import (
-    load as yaml_load,
-)
+from ruamel.yaml import dump as yaml_dump
+from ruamel.yaml import load as yaml_load
 
 from w3plex.config import Dumper, Include
 from w3plex.config import Loader as YamlLoader
 from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
-from w3plex.secure import decrypt_file, encrypt_file
 from w3plex.shell import Shell
 
-load_dotenv()
+load_dotenv(Path.cwd() / ".env")
 
 CHAINS_CONFIG_NAME = "chains.yaml"
-DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "w3plex.yaml")
+DEFAULT_CONFIG_PATH = str(Path(__file__).with_name("w3plex.yaml"))
+EMPTY_PASSWORD = "<!empty>"
 
 
 def subdict(d, ks):
-    return dict(zip(ks, itemgetter(*ks)(d)))
+    return {key: d[key] for key in ks}
 
 
 def _get_base_args_parse(*args, **kwargs) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(*args, **kwargs)
     parser.add_argument(
-        "--config", "-c", help="run using w3plex config file", default="w3plex.yaml"
+        "--config", "-c", default="w3plex.yaml", help="YAML config path"
     )
-
     return parser
 
 
-def process_args():
-    cfg_parser = _get_base_args_parse(add_help=False)
-    cfg_parser.add_argument("kwargs", nargs="*")
-    cfg_args, _ = cfg_parser.parse_known_args()
-
+def process_args(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    cfg_args, remaining = _get_base_args_parse(add_help=False).parse_known_args(argv)
     cfg_path = os.path.abspath(cfg_args.config)
-    cfg = load_config(cfg_path) if os.path.exists(cfg_path) else None
+    cfg = None
+    if (
+        remaining
+        and remaining[0] not in {"init", "encrypt", "decrypt"}
+        and os.path.exists(cfg_path)
+    ):
+        cfg = load_config(cfg_path)
 
     parser = _get_base_args_parse()
-    actions = parser.add_subparsers(title="w3plex actions", required=False)
-    init = actions.add_parser("init", description="Initialize a new config")
-    init.set_defaults(func=init_cmd)
+    parser.set_defaults(config=cfg_args.config)
+    actions = parser.add_subparsers(title="w3plex actions")
 
-    empty_pass = "<!empty>"
-    if cfg is not None:
-        shell = actions.add_parser(
-            "shell", description="Start w3ext shell for the current config"
+    def command(name, **kwargs):
+        cmd = actions.add_parser(name, **kwargs)
+        cmd.add_argument(
+            "--config", "-c", default=argparse.SUPPRESS, help="YAML config path"
         )
-        shell.set_defaults(func=partial(run_shell_cmd, cfg=cfg, cfg_path=cfg_path))
+        return cmd
 
-        encrypt_cmd = actions.add_parser("encrypt", description="Encrypt provided file")
-        encrypt_cmd.add_argument("src", nargs="+", help="Path to the file to encrypt")
-        encrypt_cmd.add_argument(
+    command("init", help="Create a starter config and wallet file").set_defaults(
+        func=init_cmd
+    )
+    command("shell", help="Open the interactive Python shell").set_defaults(
+        func=partial(run_shell_cmd, cfg=cfg, cfg_path=cfg_path)
+    )
+    for name in ("encrypt", "decrypt"):
+        cmd = command(name, help=f"{name.capitalize()} files")
+        cmd.add_argument("src", nargs="+", help="File paths or glob patterns")
+        cmd.add_argument(
             "--password",
             "-p",
             nargs="?",
-            const=empty_pass,
-            dest="password",
-            help="Password to encrypt the file with",
+            const=EMPTY_PASSWORD,
+            help="File password; omit the value to prompt",
         )
-        encrypt_cmd.add_argument("--output", "-o", dest="dst", help="Output file path")
-        encrypt_cmd.add_argument(
+        destination = cmd.add_mutually_exclusive_group()
+        destination.add_argument(
+            "--output", "-o", dest="dst", help="Output path (one source only)"
+        )
+        destination.add_argument(
             "--overwrite",
             "-w",
             dest="inplace",
             action="store_true",
-            help="Overwrite the original file",
+            help="Replace the source file",
         )
-        encrypt_cmd.add_argument(
-            "--add",
-            "-a",
-            dest="add_to_keystore",
-            action="store_true",
-            help="Add provided encryption key to the keystore",
-        )
-
-        def _encrypt_file(args):
-            kwargs = subdict(
-                vars(args), ["src", "dst", "password", "inplace", "add_to_keystore"]
-            )
-            files = set(
-                itertools.chain(*(list(Path().glob(src)) for src in kwargs.pop("src")))
-            )
-            if kwargs.get("password") == empty_pass:
-                kwargs["password"] = getpass.getpass("Enter password: ")
-            if len(files) > 1:
-                # in case more than one file, --output won't work
-                kwargs.pop("dst", None)
-            for path in files:
-                try:
-                    encrypt_file(path, **kwargs)
-                    print(f"File {path} encrypted")
-                except Exception as e:  # noqa: BLE001 -- report each file failure
-                    print(f"Failed to encrypt file {path}: {e}", file=sys.stderr)
-
-        encrypt_cmd.set_defaults(func=_encrypt_file)
-
-        decrypt_cmd = actions.add_parser("decrypt", description="Decrypt provided file")
-        decrypt_cmd.add_argument("src", nargs="+", help="Path to the file to encrypt")
-        decrypt_cmd.add_argument(
-            "--password",
-            "-p",
-            nargs="?",
-            const=empty_pass,
-            dest="password",
-            help="Password to decrypt the file with",
-        )
-        decrypt_cmd.add_argument("--output", "-o", dest="dst", help="Output file path")
-        decrypt_cmd.add_argument(
-            "--overwrite",
-            "-w",
-            dest="inplace",
-            action="store_true",
-            help="Overwrite the original file",
-        )
-        decrypt_cmd.add_argument(
-            "--keystore",
-            "-k",
-            dest="use_keystore",
-            action="store_true",
-            help="Use keystore for encryption",
-        )
-
-        def _decrypt_file(args):
-            kwargs = subdict(
-                vars(args), ["src", "dst", "password", "inplace", "use_keystore"]
-            )
-            files = set(
-                itertools.chain(*(list(Path().glob(src)) for src in kwargs.pop("src")))
-            )
-            if kwargs.get("password") == empty_pass:
-                kwargs["password"] = getpass.getpass("Enter password: ")
-            if len(files) > 1:
-                # in case more than one file, --output won't work
-                kwargs.pop("dst", None)
-            for path in files:
-                try:
-                    decrypt_file(path, **kwargs)
-                    print(f"File {path} decrypted")
-                except Exception as e:  # noqa: BLE001 -- report each file failure
-                    print(f"Failed to decrypt file {path}: {e}", file=sys.stderr)
-
-        decrypt_cmd.set_defaults(func=_decrypt_file)
-
-        for app_name in cfg.get(APPLICATIONS_CFG_KEY, {}):
-            cmd = actions.add_parser(
-                app_name, description=f"Run `{app_name}` application"
-            )
+        if name == "encrypt":
             cmd.add_argument(
-                "args",
-                nargs="*",
-                default=[],
-                help="Single value or Key-value pairs separated by a comma. (e.g., value1 key2=value2)",
+                "--add",
+                "-a",
+                dest="add_to_keystore",
+                action="store_true",
+                help="Remember the key in the encrypted keystore",
             )
-            cmd.set_defaults(
-                func=partial(run_app_cmd, name=app_name, cfg=cfg, cfg_path=cfg_path)
+        else:
+            cmd.add_argument(
+                "--keystore",
+                "-k",
+                dest="use_keystore",
+                action="store_true",
+                help="Try keys from the keystore",
             )
+        cmd.set_defaults(func=partial(crypt_cmd, encrypt=name == "encrypt"))
 
-    args = parser.parse_args(" ".join(sys.argv[1:]).split(" "))
+    for app_name in (cfg or {}).get(APPLICATIONS_CFG_KEY, {}):
+        cmd = command(app_name, help=f"Run the {app_name} application")
+        cmd.add_argument("args", nargs="*", help="Action name and key=value arguments")
+        cmd.set_defaults(
+            func=partial(run_app_cmd, name=app_name, cfg=cfg, cfg_path=cfg_path)
+        )
 
-    func = getattr(args, "func", None)
-    if func is not None:
+    args = parser.parse_args(argv)
+    if func := getattr(args, "func", None):
         return func(args)
+    parser.print_help()
+    return None
+
+
+def crypt_cmd(args, *, encrypt):
+    from w3plex.secure import decrypt_file, encrypt_file
+
+    files = sorted(
+        {
+            Path(filename)
+            for pattern in args.src
+            for filename in glob.glob(pattern, recursive=True)
+            if Path(filename).is_file()
+        }
+    )
+    if not files:
+        raise FileNotFoundError("No source files matched")
+    if args.dst and len(files) != 1:
+        raise ValueError("--output requires exactly one source file")
+    password = (
+        getpass.getpass("File password: ")
+        if args.password == EMPTY_PASSWORD
+        else args.password
+    )
+    kwargs = {"password": password, "dst": args.dst, "inplace": args.inplace}
+    fn = encrypt_file if encrypt else decrypt_file
+    kwargs["add_to_keystore" if encrypt else "use_keystore"] = getattr(
+        args, "add_to_keystore" if encrypt else "use_keystore"
+    )
+    for path in files:
+        output = fn(path, **kwargs)
+        print(f"{path} -> {output}")
 
 
 def run_shell_cmd(args, *, cfg, cfg_path):
+    if cfg is None:
+        raise FileNotFoundError(
+            f"Config not found: {cfg_path}. Run 'w3plex init' first."
+        )
     Shell(cfg, cfg_path)()
 
 
 def run_app_cmd(args, *, name, cfg, cfg_path):
     app_args, app_kwargs = [], {}
     for item in getattr(args, "args", []):
-        parts = item.split("=", 1)
-        if len(parts) == 1:
-            if len(app_kwargs):
-                raise AttributeError(
-                    "A key=value argument cannot be followed by a positional argument."
+        key, separator, value = item.partition("=")
+        if not separator:
+            if app_kwargs:
+                raise ValueError(
+                    "Positional arguments must come before key=value arguments"
                 )
-            app_args.append(parts[0])
+            app_args.append(key)
         else:
-            app_kwargs[parts[0]] = parts[1]
-
-    runner = Runner()
-
-    coro = None
+            stream = io.StringIO(value)
+            stream.name = cfg_path
+            app_kwargs[key] = yaml_load(stream, YamlLoader) if value else ""
 
     async def command():
-        await runner.init(cfg, cfg_path)
-        app = runner.tree.get(APPLICATIONS_CFG_KEY, {}).get(name)
-        if app is None:
-            raise AttributeError(f"Application {name} not found")
-
-        nonlocal coro
-        coro = asyncio.ensure_future(app(*app_args, **app_kwargs))
+        runner = Runner()
         try:
-            await coro
+            await runner.init(cfg, cfg_path)
+            app = runner.tree.get(APPLICATIONS_CFG_KEY, {}).get(name)
+            if app is None:
+                raise ValueError(f"Application {name} not found")
+            return await app(*app_args, **app_kwargs)
         finally:
             await runner.finalize()
 
-    def cancel_coro():
-        if coro is not None:
-            coro.cancel()
-
-    runner.loop.add_signal_handler(signal.SIGINT, cancel_coro)
-
-    try:
-        runner.loop.run_until_complete(command())
-    except asyncio.CancelledError:
-        print(Text("Execution cancelled", "red"))
-    # hack to clean up loop resources, once execution completed
-    runner.loop.run_until_complete(asyncio.sleep(0))
+    return asyncio.run(command())
 
 
 def init_cmd(args):
+    target = Path(args.config).absolute()
+    if target.exists():
+        raise FileExistsError(f"Config already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
     cfg = load_config(DEFAULT_CONFIG_PATH)
-
-    chains = cfg.get("chains")
-    # TODO: somehow comment in yaml doesn't work
-    cfg["chains"] = Include(CHAINS_CONFIG_NAME, {"items": 'items: ["ethereum"]'})
-
-    chains_path = os.path.join(os.path.dirname(args.config), CHAINS_CONFIG_NAME)
-    if not os.path.exists(chains_path):
-        with open(chains_path, "w") as fw:
-            yaml_dump(chains, fw, Dumper)
-    with open(args.config, "w") as fw:
-        yaml_dump(cfg, fw, Dumper)
+    cfg["chains"] = Include(CHAINS_CONFIG_NAME, items=["ethereum"])
+    cfg["applications"]["balance"]["wallets"]["file"] = "wallets.txt"
+    chains_path = target.with_name(CHAINS_CONFIG_NAME)
+    if not chains_path.exists():
+        chains_path.write_text(
+            Path(__file__).with_name("config").joinpath("chains.yaml").read_text(),
+            encoding="utf-8",
+        )
+    with open(target, "w") as stream:
+        yaml_dump(cfg, stream, Dumper)
+    wallets = target.with_name("wallets.txt")
+    if not wallets.exists():
+        wallets.write_text(
+            "# One public EVM wallet address per line.\n", encoding="utf-8"
+        )
+    print(
+        f"Created {target}. Set your RPC URL in {chains_path} and add addresses to {wallets}."
+    )
 
 
 def load_config(filename: str) -> dict[str, Any]:
-    with open(filename) as fr:
-        raw = fr.read()
+    from w3plex.secure import _secure_open
 
-    expanded = os.path.expandvars(raw)
-    stream = io.StringIO(expanded)
-    stream.name = os.path.abspath(filename)
-    return yaml_load(stream, YamlLoader)
+    with cast(TextIO, _secure_open(filename, encoding="utf-8")) as stream:
+        expanded = os.path.expandvars(stream.read())
+    named = io.StringIO(expanded)
+    named.name = os.path.abspath(filename)
+    cfg = yaml_load(named, YamlLoader)
+    if not isinstance(cfg, dict):
+        raise TypeError(f"Config must be a YAML mapping: {filename}")
+    return cfg
 
 
 def main():
-    # # for w3plex development purposes add the package path
-    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     sys.path.insert(0, os.getcwd())
-
     try:
         process_args()
+    except KeyboardInterrupt:
+        print("Execution cancelled", file=sys.stderr)
+        sys.exit(130)
     except Exception as err:  # noqa: BLE001 -- CLI reports application failures
         print(str(err), file=sys.stderr)
-        sys.stderr.flush()
         sys.exit(1)
 
 

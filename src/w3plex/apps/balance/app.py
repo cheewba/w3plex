@@ -20,7 +20,7 @@ from w3ext import Chain, Currency, CurrencyAmount, Token
 from w3plex import application, apply_plugins
 from w3plex.modules.debank import Debank
 from w3plex.plugins import progress_bar
-from w3plex.utils import execute_on_complete, get_chains, get_context
+from w3plex.utils import get_chains, get_context
 from w3plex.utils.filter import AmountFilter, ChainFilter, TokenLookup, join_filters
 
 empty = object()
@@ -42,6 +42,8 @@ async def balance_of(
         or await chain.load_token(HexAddress(HexStr(token)))
         for token in tokens
     ]
+    if any(token is None for token in resolved_tokens):
+        raise ValueError("A requested token could not be loaded")
 
     return await asyncio.gather(
         *[
@@ -156,7 +158,7 @@ def _format_output(accounts, result, _filter, show_total=True) -> Group:
     return format_all()
 
 
-@application(return_exceptions=False)
+@application(return_exceptions=True)
 async def balance(action, **config):
     input = config.get("wallets") or []
     if isinstance(input, str):
@@ -176,41 +178,40 @@ async def balance(action, **config):
         print(_format_output(input, result, ctx["result_filter"]))
 
 
-# @balance.input
-# async def get_input(value):
-#     config = get_config()
-#     return await FileLoader(file=config['wallets'])(
-#         lambda item: item if is_erc_address(item) else Account.from_key(item).address
-#     )
-
-
 @balance.action("onchain", default=True)
 async def onchain_balance(account, **config):
     threads = threads if (threads := config.get("threads", empty)) is not empty else 1
-    semaphore = asyncio.Semaphore(threads)
+    if threads is not None and (not isinstance(threads, int) or threads <= 0):
+        raise ValueError("threads must be positive or null")
+    attempts = config.get("attempts", 1)
+    if not isinstance(attempts, int) or attempts <= 0:
+        raise ValueError("attempts must be positive")
+    semaphore = asyncio.Semaphore(threads) if threads is not None else None
 
     async def balance(chain, tokens) -> tuple[Chain, list[CurrencyAmount]]:
-        async with semaphore:
-            attempts = config.get("attempts") or 1
-            while attempts > 0:
+        async with AsyncExitStack() as stack:
+            if semaphore is not None:
+                await stack.enter_async_context(semaphore)
+            remaining = attempts
+            while remaining > 0:
                 try:
                     return chain, await balance_of(account, chain, *tokens)
                 except Exception:
-                    attempts -= 1
-                    if attempts == 0:
+                    remaining -= 1
+                    if remaining == 0:
                         raise
                     await asyncio.sleep(1)
             raise ValueError("Balance attempts must be positive")
 
     chains = get_chains()
-    found_tokens = itertools.chain(
-        *await asyncio.gather(
-            *[
-                TokenLookup(lookup)(chains.values())
-                for lookup in config.get("tokens") or []
-            ]
-        )
+    lookups = config.get("tokens") or []
+    matches = await asyncio.gather(
+        *[TokenLookup(lookup)(chains.values()) for lookup in lookups]
     )
+    for lookup, found in zip(lookups, matches):
+        if not found:
+            raise ValueError(f"No token found for '{lookup}' in the loaded chains")
+    found_tokens = itertools.chain(*matches)
     merged = defaultdict(list)
     for token, chain in found_tokens:
         merged[chain].append(token)
@@ -255,8 +256,9 @@ async def debank_balance(account, *, debank: Debank | None = None, **config):
                 threads=threads
                 if (threads := config.get("threads", empty)) is not empty
                 else 1,
+                access_key=config.get("access_key"),
             )
-            execute_on_complete(debank.close)
+            stack.push_async_callback(debank.close)
 
         return await debank.get_balance(
             account,

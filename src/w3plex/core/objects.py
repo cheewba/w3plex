@@ -20,6 +20,13 @@ from ..utils import get_context
 
 
 class ApplicationAction(_ApplicationAction):
+    async def _process_action(self, item: Any, action: Any):
+        # lazyplex treats every iterable result as a collection of actions.
+        # Strings and bytes are complete values, not character-level actions.
+        if isinstance(action, (str, bytes)):
+            return action
+        return await super()._process_action(item, action)
+
     async def get_item_context(self, *args, **kwargs):
         ctx = await super().get_item_context(*args, **kwargs)
         logger = get_context()[CONTEXT_LOGGER_KEY]
@@ -39,6 +46,7 @@ class ApplicationAction(_ApplicationAction):
             return e.result
         except W3PlexError as e:
             logger.error(e)
+            raise
         except Exception as e:
             logger.exception(e)
             raise
@@ -68,6 +76,11 @@ class ApplicationAction(_ApplicationAction):
 class Application(_Application):
     action_class = ApplicationAction
 
+    async def process_action_data(self, action, data, counter=None, kwargs=None):
+        if isinstance(data, (str, bytes)) and not self.protected_items:
+            data = [data]
+        return await super().process_action_data(action, data, counter, kwargs)
+
     async def update_application_context(self, ctx):
         await super().update_application_context(ctx)
         _logger = logger.bind(
@@ -95,7 +108,7 @@ def application(
 def application(*args, **kwargs):
     """Wrapper around ``lazyplex.application`` that accepts function as argument only.
 
-    Threre's no need to pass name of the application, since
+    There's no need to pass the name of the application, since
     it's taken from the config file.
     """
     kwargs["application_class"] = Application

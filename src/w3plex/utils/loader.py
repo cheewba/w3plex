@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, NotRequired, TypedDict, Unpack, overload
 
 from w3ext import Account
+from web3 import Web3
 
 from .filter import TemplateFilter
 
@@ -42,6 +43,7 @@ class FileLoader[T]:
         return [
             val
             for line in lines
+            if line.strip() and not line.lstrip().startswith("#")
             if flt(line=line)
             and (val := self.process_line(line.strip(), transform)) is not None
         ]
@@ -59,3 +61,14 @@ def accounts_loader(
         )
 
     return wrapper
+
+
+async def wallets_loader(**kwargs: Unpack[FileLoaderConfig]) -> list[str]:
+    """Load public EVM addresses, ignoring blank lines and comments."""
+
+    def address(line: str) -> str:
+        if not Web3.is_address(line):
+            raise ValueError(f"Invalid wallet address in {kwargs['file']}: {line}")
+        return Web3.to_checksum_address(line)
+
+    return await FileLoader[str](**kwargs).process(address)

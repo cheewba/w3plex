@@ -20,17 +20,17 @@ def get_chains() -> dict[str, Chain]:
 
 def get_config() -> dict[str, Any] | None:
     """Return current Application's config."""
-    return get_context().get(CONTEXT_CONFIG_KEY)
+    return (get_context() or {}).get(CONTEXT_CONFIG_KEY)
 
 
 def get_application() -> "Application | None":
     """Return current Application."""
-    return get_context().get(CTX_APPLICATION)
+    return (get_context() or {}).get(CTX_APPLICATION)
 
 
 def get_scope() -> ContextScope:
     ctx = get_context()
-    return ctx.get_scope()
+    return ctx.get_scope() if ctx is not None else ContextScope.application
 
 
 def execute_on_complete(fn, *args, **kwargs):

@@ -17,9 +17,15 @@ def is_hex(value):
 
 
 class Include:
-    def __init__(self, filename, comments: dict[str, str] | None = None):
+    def __init__(
+        self,
+        filename,
+        comments: dict[str, str] | None = None,
+        items: list[str] | None = None,
+    ):
         self.filename = filename
         self.comments = comments
+        self.items = items
 
 
 class Loader(yaml.RoundTripLoader):
@@ -55,7 +61,7 @@ class Loader(yaml.RoundTripLoader):
             expanded = os.path.expandvars(f.read())
             stream = io.StringIO(expanded)
             stream.name = os.path.abspath(filename)
-            return yaml.YAML(typ="rt").load(expanded)
+            return yaml.load(stream, Loader=Loader)
 
     def include(self, node):
         if isinstance(node, yaml.ScalarNode):
@@ -113,6 +119,8 @@ class Dumper(yaml.RoundTripDumper):
             comments.CommentedMap()
         )  # Using CommentedMap to keep the style and comments
         value["file"] = data.filename
+        if data.items is not None:
+            value["items"] = data.items
         for key, comment in (data.comments or {}).items():
             # This places a comment on the 'items' line, without an actual value for 'items'
             value.yaml_set_comment_before_after_key(key, before=comment)

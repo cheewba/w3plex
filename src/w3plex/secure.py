@@ -29,6 +29,7 @@ import secrets
 from hashlib import scrypt, sha256
 from pathlib import Path
 from sys import stdout
+from typing import BinaryIO, TextIO, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -37,8 +38,9 @@ from cryptography.fernet import Fernet, InvalidToken
 # ----------------------------------------------------------------------
 _MAGIC = b"ENC1"  # header for encrypted *files*
 _KS_MAGIC = b"KS01"  # header for encrypted *keystore*
-# TODO: think about customized keystore path
-_KEYSTORE_PATH = Path.home() / ".keystore.bin"
+_KEYSTORE_PATH = Path(
+    os.environ.get("W3PLEX_KEYSTORE", str(Path.home() / ".keystore.bin"))
+).expanduser()
 _SALT_LEN = 16  # bytes reserved for salt at file start
 
 # scrypt work factors (adjust to taste)
@@ -347,7 +349,9 @@ def decrypt_file(
 # ----------------------------------------------------------------------
 
 
-def _decrypt_if_needed(path: Path, raw: bytes, *, text_encoding: str | None):
+def _decrypt_if_needed(
+    path, raw: bytes, *, binary=False, text_encoding=None, errors=None, newline=None
+):
     """Return file-like object with plaintext; None if *raw* is plain."""
     if not raw.startswith(_MAGIC):
         return None
@@ -357,8 +361,13 @@ def _decrypt_if_needed(path: Path, raw: bytes, *, text_encoding: str | None):
     )
 
     buf = io.BytesIO(plain)
+    buf.name = str(path)
     return (
-        buf if text_encoding is None else io.TextIOWrapper(buf, encoding=text_encoding)
+        buf
+        if binary
+        else io.TextIOWrapper(
+            buf, encoding=text_encoding, errors=errors, newline=newline
+        )
     )
 
 
@@ -385,14 +394,33 @@ def _secure_open(
             file, mode, buffering, encoding, errors, newline, closefd, opener
         )
 
-    p = Path(file)
-    raw = _orig_open(file, "rb").read()
+    handle = _orig_open(
+        file, mode, buffering, encoding, errors, newline, closefd, opener
+    )
+    if isinstance(file, int) or not handle.seekable():
+        return handle
+    source = cast(BinaryIO, handle) if "b" in mode else cast(TextIO, handle).buffer
+    try:
+        prefix = source.read(len(_MAGIC))
+        handle.seek(0)
+        if prefix != _MAGIC:
+            return handle
+        raw = source.read()
+    except BaseException:
+        handle.close()
+        raise
+    handle.close()
 
     attempts = 3
     while True:
         try:
             replacement = _decrypt_if_needed(
-                p, raw, text_encoding=None if "b" in mode else encoding
+                file,
+                raw,
+                binary="b" in mode,
+                text_encoding=encoding,
+                errors=errors,
+                newline=newline,
             )
             break
         except IncorrectPassword as e:
@@ -403,11 +431,7 @@ def _secure_open(
             stdout.write(f"{e}, {attempts} attempts left\r\n")
             stdout.flush()
 
-    if replacement is None:
-        return _orig_open(
-            file, mode, buffering, encoding, errors, newline, closefd, opener
-        )
-
+    assert replacement is not None
     return replacement
 
 

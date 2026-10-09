@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import html
 import logging
 import sys
@@ -80,6 +79,7 @@ class InterceptHandler(logging.Handler):
 class Logger:
     def __init__(self, logger):
         self._logger = logger.opt(colors=True)
+        self._minimum_level = 0
 
     def __getattribute__(self, name):
         try:
@@ -132,14 +132,19 @@ class Logger:
             pass
 
     def _safe_log(self, method_name, msg, *args, **kwargs):
+        level_name = "ERROR" if method_name == "exception" else method_name.upper()
+        if self._logger.level(level_name).no < self._minimum_level:
+            return None
         return self._safe_invoke(
             getattr(self._delegate(), method_name), msg, *args, **kwargs
         )
 
     def setLevel(self, level):
-        """
-        Set the logging level of this logger.  level must be an int or a str.
-        """
+        self._minimum_level = (
+            self._logger.level(level.upper()).no
+            if isinstance(level, str)
+            else int(level)
+        )
 
     def debug(self, msg, *args, **kwargs):
         """
@@ -194,6 +199,9 @@ class Logger:
         """
         Log 'msg % args' with the integer or string severity 'level'.
         """
+        severity = self._logger.level(level).no if isinstance(level, str) else level
+        if severity < self._minimum_level:
+            return None
         log_method = self._delegate().log
         return self._safe_invoke(
             lambda m, *a, **kw: log_method(level, m, *a, **kw), msg, *args, **kwargs
@@ -248,16 +256,21 @@ def _patch_record(record: Record) -> None:
     record["extra"] = defaultdict(str, record["extra"])
 
 
-# to be able to copy loguru logger, all handlers should be removed
-_logger.remove()
-logger = Logger(copy.deepcopy(_logger).patch(_patch_record))
+# Share sinks with Loguru so defaults and dashboard capture also receive our logs.
+logger = Logger(_logger.patch(_patch_record))
 
-# setup default logger to the loguru again
-_logger.add(
-    sys.stderr,
-    level="INFO",
-    enqueue=True,
-    backtrace=False,
-    diagnose=False,
-    colorize=True,
-)
+# Preserve the bundled console format without printing exception-local values.
+# User-installed sinks remain registered.
+try:
+    _logger.remove(0)
+except ValueError:
+    pass
+else:
+    _logger.add(
+        sys.stderr,
+        level="INFO",
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        colorize=True,
+    )

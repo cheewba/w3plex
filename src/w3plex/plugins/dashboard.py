@@ -336,7 +336,7 @@ class DashboardLevel:
         self._parent_page = parent_page
         self._pages: list[DashboardPage] = []
         self._active_index: int = 0
-        self._child_level: DashboardLevel | None = None
+        self._child_levels: dict[DashboardPage, DashboardLevel] = {}
 
     @property
     def parent(self) -> DashboardLevel | None:
@@ -362,11 +362,11 @@ class DashboardLevel:
 
     @property
     def child_level(self) -> DashboardLevel | None:
-        return self._child_level
+        return self._child_levels.get(self.active_page) if self.active_page else None
 
     @property
     def has_child(self) -> bool:
-        return self._child_level is not None and len(self._child_level.pages) > 0
+        return self.child_level is not None and len(self.child_level.pages) > 0
 
     def add_page(self, page: DashboardPage) -> None:
         """Add a page to this level."""
@@ -378,6 +378,7 @@ class DashboardLevel:
         """Remove a page from this level."""
         if page in self._pages:
             self._pages.remove(page)
+            self._child_levels.pop(page, None)
             if self._active_index >= len(self._pages) and self._pages:
                 self._active_index = len(self._pages) - 1
             elif not self._pages:
@@ -406,12 +407,14 @@ class DashboardLevel:
 
     def create_child_level(self, parent_page: DashboardPage) -> DashboardLevel:
         """Create a child level under the given page."""
-        self._child_level = DashboardLevel(parent=self, parent_page=parent_page)
-        return self._child_level
+        child = DashboardLevel(parent=self, parent_page=parent_page)
+        self._child_levels[parent_page] = child
+        return child
 
     def clear_child_level(self) -> None:
         """Remove the child level."""
-        self._child_level = None
+        if self.active_page:
+            self._child_levels.pop(self.active_page, None)
 
     def get_depth(self) -> int:
         """Get the depth of this level in the hierarchy (0 = root)."""
@@ -691,14 +694,19 @@ class DashboardManager:
         return self._quit_requested
 
     def _get_deepest_level(self) -> DashboardLevel | None:
-        """Get the deepest level with pages in the hierarchy."""
+        """Return the focused level without discarding navigation history."""
         level = self._active_level
-        while level and level.has_child:
-            level = level.child_level
+        while (
+            level and level.parent and level.parent.active_page is not level.parent_page
+        ):
+            level = level.parent
+        self._active_level = level
         return level
 
     def set_refresh_rate(self, rate: float) -> None:
         """Set the refresh rate in Hz."""
+        if rate <= 0:
+            raise ValueError("Dashboard refresh rate must be positive")
         self._refresh_rate = rate
 
     def set_keyboard_enabled(self, enabled: bool) -> None:
@@ -724,9 +732,11 @@ class DashboardManager:
             return self._ensure_root_level()
 
         parent_level = parent_page.level
-        if parent_level.child_level is None:
-            parent_level.create_child_level(parent_page)
-        return parent_level.child_level  # type: ignore
+        child = parent_level._child_levels.get(parent_page)
+        if child is None:
+            child = parent_level.create_child_level(parent_page)
+        self._active_level = child
+        return child
 
     def _render_navigation_bar(self) -> RenderableType:
         """Render the navigation hints bar at the bottom."""
@@ -1031,7 +1041,7 @@ class DashboardManager:
         level = self._get_deepest_level()
 
         if level and level.parent:
-            level.parent.clear_child_level()
+            self._active_level = level.parent
             self.refresh()
             return True
         return False
@@ -1041,6 +1051,7 @@ class DashboardManager:
         level = self._get_deepest_level()
 
         if level and level.has_child and level.child_level:
+            self._active_level = level.child_level
             self.refresh()
             return True
         return False
@@ -1167,7 +1178,7 @@ async def dashboard_page(
     if current is None:
         level = manager.get_or_create_level(None)
     else:
-        current_page = current.active_page
+        current_page = _current_page.get()
         level = manager.get_or_create_level(current_page)
 
     page = DashboardPage(title, level)

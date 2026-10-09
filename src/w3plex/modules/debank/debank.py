@@ -3,6 +3,7 @@ import itertools
 from collections import defaultdict
 from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from decimal import Decimal
 from typing import Any, ClassVar, Self, cast
 
 import aiohttp
@@ -20,6 +21,7 @@ from .constants import (
 )
 
 DEFAULT_CURRENCY = "UNKNOWN"
+OPEN_API_URL = "https://pro-openapi.debank.com/v1"
 
 
 class ProxyConnector(_ProxyConnector):
@@ -65,20 +67,34 @@ class Debank:
         proxy: str | None = None,
         chains: list["Chain"] | None = None,
         threads: int | None = 1,
+        access_key: str | None = None,
     ) -> None:
         self._chains = {chain.chain_id: chain for chain in chains or []}
 
-        # setup session default args
-        session_kwargs = {}
-        if proxy:
-            session_kwargs["connector"] = ProxyConnector.from_url(proxy)
+        if threads is not None and (not isinstance(threads, int) or threads <= 0):
+            raise ValueError("threads must be positive or null")
         self._proxy = proxy
-        self._session = aiohttp.ClientSession(**session_kwargs)
+        self._session: aiohttp.ClientSession | None = None
         self._threads = threads
+        self.access_key = access_key
+        self._official_chains: dict[str, Chain] | None = None
 
     async def close(self):
         if self._session is not None:
             await self._session.close()
+            self._session = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
+
+    async def get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            connector = ProxyConnector.from_url(self._proxy) if self._proxy else None
+            self._session = aiohttp.ClientSession(connector=connector)
+        return self._session
 
     @classmethod
     def account_link(cls, address: str):
@@ -88,7 +104,12 @@ class Debank:
         self, data: dict, chain: Chain
     ) -> EstimatedCurrencyAmount | EstimatedTokenAmount | None:
         kwargs = {key: data[key] for key in ["name", "symbol", "decimals"]}
-        amount = data.get("raw_amount") or data["balance"]
+        amount = data.get("raw_amount")
+        if amount is None:
+            amount = int(
+                Decimal(str(data.get("amount", data.get("balance", 0))))
+                * 10 ** kwargs["decimals"]
+            )
         if data["id"].startswith("0x"):
             # process token
             token = await chain.load_token(data["id"], **kwargs)
@@ -103,6 +124,19 @@ class Debank:
             return EstimatedCurrencyAmount(currency, amount, data["price"])
 
     async def _get_chain(self, debank_id: str) -> "Chain":
+        if self.access_key:
+            if self._official_chains is None:
+                chains = await self._official_request("chain/list")
+                self._official_chains = {
+                    item["id"]: Chain(
+                        item["community_id"],
+                        Currency(DEFAULT_CURRENCY, item["native_token_id"].upper(), 18),
+                        name=item["id"],
+                    )
+                    for item in chains
+                }
+            chain = self._official_chains[debank_id]
+            return self._chains.get(chain.chain_id) or chain
         all_chains = getattr(self.__class__, "_all_chains", None)
         if all_chains is None:
             async with self._api_request("get", AWAILABLE_CHAINS_API_URL) as resp:
@@ -124,14 +158,24 @@ class Debank:
     @asynccontextmanager
     async def _api_request(self, method, url, *, headers=None, **kwargs):
         headers = await self.get_request_headers(method, url, headers=headers, **kwargs)
-        async with self._session.request(
-            method, url, headers=headers, **kwargs
-        ) as resp:
+        session = await self.get_session()
+        async with session.request(method, url, headers=headers, **kwargs) as resp:
             if not resp.status == 200:
                 raise ModuleError(
                     f"{self.name}: Can't retrieve {url} - `{resp.reason}`"
                 )
             yield resp
+
+    async def _official_request(self, path: str, **params) -> list:
+        if not self.access_key:
+            raise ModuleError("debank: access_key is required for the DeBank OpenAPI")
+        async with self._api_request(
+            "get",
+            f"{OPEN_API_URL}/{path}",
+            headers={"AccessKey": self.access_key},
+            params=params,
+        ) as response:
+            return await response.json()
 
     async def get_request_headers(self, method, url, headers=None, **kwargs) -> dict:
         return {
@@ -139,7 +183,6 @@ class Debank:
             "Referer": "https://debank.com/",
             "Source": "web",
             "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "en-US,en;q=0.9;q=0.8",
             "Cache-Control": "no-cache",
             "Origin": "https://debank.com",
@@ -156,7 +199,11 @@ class Debank:
     ) -> dict["Chain", list[EstimatedCurrencyAmount | EstimatedTokenAmount]]:
         address = str(address).lower()
 
-        if cached_only:
+        if self.access_key:
+            data = await self._official_request(
+                "user/all_token_list", id=address, is_all="true"
+            )
+        elif cached_only:
             async with self._api_request(
                 "get", CACHED_BALANCE_API_URL.format(address=address)
             ) as resp:
@@ -201,17 +248,20 @@ class Debank:
 
         result = defaultdict(list)
         for item in data:
-            balance = await self._format_balance_output(
-                item, chain := await self._get_chain(item["chain"])
-            )
+            chain = await self._get_chain(item["chain"])
+            if chains_filter is not None and not chains_filter(chain):
+                continue
+            balance = await self._format_balance_output(item, chain)
             if balance is not None:
                 result[chain].append(balance)
         return result
 
     async def get_nft(self, address: str) -> list:
-        # TODO: add functionality
-        return []
+        return await self._official_request(
+            "user/all_nft_list", id=str(address).lower(), is_all="true"
+        )
 
     async def get_projects(self, address: str) -> list:
-        # TODO: add functionality
-        return []
+        return await self._official_request(
+            "user/all_complex_protocol_list", id=str(address).lower()
+        )
