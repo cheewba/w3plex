@@ -1,22 +1,24 @@
-#!/usr/bin/env python
 import asyncio
 import os
 import sys
 from contextlib import contextmanager
-from inspect import iscoroutinefunction, isfunction, iscoroutine
-from typing import Any, Dict, Optional, Tuple, List
+from copy import deepcopy
+from inspect import iscoroutine, iscoroutinefunction, isfunction
+from typing import Any
 
 from lazyplex import Application as _Application
 from lazyplex import create_context
 
+from .config import ConfigTree, Lazy, config_loader
 from .constants import (
-    CONTEXT_CHAINS_KEY, CONTEXT_VARS_KEY, VARS_COLLECTION,
-    APPLICATIONS_CFG_KEY, ACTIONS_CFG_KEY,
+    ACTIONS_CFG_KEY,
+    APPLICATIONS_CFG_KEY,
+    CONTEXT_CHAINS_KEY,
+    CONTEXT_VARS_KEY,
+    VARS_COLLECTION,
 )
-from .utils import load_path
-from .config import config_loader, ConfigTree, Lazy
 from .log import logger
-
+from .utils import load_path
 
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
@@ -25,7 +27,7 @@ LOGGING_DEFAULT_FORMAT = (
     "<cyan>{extra[action]}</cyan> | "
     "{extra[item_index]}. <cyan>{extra[item]}</cyan> - <level>{message}</level>"
 )
-LOGGING_DEFAULT_LEVEL = 'INFO'
+LOGGING_DEFAULT_LEVEL = "INFO"
 
 
 class _AppProxy:
@@ -35,7 +37,7 @@ class _AppProxy:
         self.__cfg = cfg
 
     @property
-    def tree(self) -> Dict:
+    def tree(self) -> dict:
         return dict(self.__cfg)
 
     def __getattr__(self, name: str) -> Any:
@@ -43,27 +45,44 @@ class _AppProxy:
 
     def __call__(self, *args, **kwargs):
         def filter_key(key):
-            return (
-                not key.startswith('__')
-                and key not in [APPLICATIONS_CFG_KEY, ACTIONS_CFG_KEY]
-            )
+            return not key.startswith("__") and key not in [
+                APPLICATIONS_CFG_KEY,
+                ACTIONS_CFG_KEY,
+            ]
 
+        defaults = {key: value for key, value in self.__cfg.items() if filter_key(key)}
         a, kw = self.__app.update_args(
             [],
-            {key: value for key, value in self.__cfg.items() if filter_key(key)},
-            *args, **kwargs
+            defaults,
+            *args,
+            **kwargs,
         )
+        action_name, _ = self.__app.action_from_args(*a, **kw)
+        action_cfg = dict(self.__cfg.get(ACTIONS_CFG_KEY, {}).get(action_name) or {})
+        canonical = action_cfg.pop("action", action_name)
+        defaults.update(action_cfg)
+        a, kw = self.__app.update_args([], defaults, *args, **kwargs)
+        if canonical:
+            a, kw = self.__app.update_args(a, kw, action=canonical)
+            if self.__app.action_from_args(*a, **kw)[1] is None:
+                raise ValueError(f"Unknown action '{canonical}' for {self.__app.name}")
         return self.__runner.run_application(self.__app, *a, **kw)
 
 
 class Runner:
-    cfg: Optional[Dict] = None
-    cfg_path: Optional[str] = None
+    cfg: dict | None = None
+    cfg_path: str | None = None
 
-    _tree: Optional[ConfigTree] = None
+    _tree: ConfigTree | None = None
 
     def __init__(self, loop=None) -> None:
-        self.loop: asyncio.AbstractEventLoop = loop or asyncio.get_event_loop()
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+        self.loop: asyncio.AbstractEventLoop = loop
+        self._log_sinks: list[int] = []
 
     @property
     def is_initialized(self) -> bool:
@@ -71,6 +90,8 @@ class Runner:
 
     @property
     def tree(self) -> ConfigTree:
+        if self._tree is None:
+            raise RuntimeError("Runner is not initialized")
         return self._tree
 
     async def resolve_value(self, value) -> Any:
@@ -78,36 +99,32 @@ class Runner:
             # Lazy should be resolved on action level,
             # when action context is defined
             return value
-        if (iscoroutinefunction(value)
-                or isfunction(value)):
+        if iscoroutinefunction(value) or isfunction(value):
             value = value()
         if iscoroutine(value):
             value = await value
         return value
 
-    async def resolve_args(self, app: _Application, *args, **kwargs) -> Tuple[Tuple, Dict]:
+    async def resolve_args(
+        self, app: _Application, *args, **kwargs
+    ) -> tuple[list[Any], dict[str, Any]]:
         a, kw = (
             [await self.resolve_value(arg) for arg in args],
-            {key: (await self.resolve_value(value)) for key, value in kwargs.items()}
+            {key: (await self.resolve_value(value)) for key, value in kwargs.items()},
         )
-        action_name, _ = app.action_from_args(*a, **kw)
-        if action_name:
-            app_tree = self._tree.get(APPLICATIONS_CFG_KEY).get(app.name).tree
-            actions = app_tree.get(ACTIONS_CFG_KEY, {})
-            action_cfg = dict(actions.get(action_name) or {})  # create a copy to modify it
-            kw.update({key: (await self.resolve_value(value)) for key, value in action_cfg.items()})
-
-        if ('action' in kw and len(a) > 0 and a[0] == action_name):
-            # NOTE: specific case
-            # if there's `action` key in config, we have to replace name of the app
-            # as it is in config, to name as set by that `action` key
-            # lazyplex application doesn't know actions only defined in config file
-            a[0] = kw.pop('action')
-
         return a, kw
 
     def blocking_call(self, coro):
         if self.loop.is_running():
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if current_loop is self.loop:
+                coro.close()
+                raise RuntimeError(
+                    "Use await when calling from the runner's event loop"
+                )
             # If the loop is running, we should schedule the coroutine as a new task
             future = asyncio.run_coroutine_threadsafe(coro, self.loop)
             # Wait for the result to be available (this is blocking)
@@ -119,47 +136,56 @@ class Runner:
     async def run_application(self, app: _Application, *args, **kwargs):
         with self._app_context(app):
             args, kwargs = await self.resolve_args(app, *args, **kwargs)
-            await app(*args, **kwargs)
+            return await app(*args, **kwargs)
 
-    async def init_application(self, cfg: Dict, path: str):
+    async def init_application(self, cfg: dict, path: str):
         def wrap_app(app):
             return _AppProxy(app, self, cfg)
 
-        app_name = path.rsplit('.', 1)[-1]
-        if (app_module := cfg.get('__init__')) is None:
+        app_name = path.rsplit(".", 1)[-1]
+        if (app_module := cfg.get("__init__")) is None:
             raise AttributeError(f"{app_name}: field `__init__` is required")
         apps = load_applications(app_module)
         if not len(apps):
             raise ValueError(f"No applications found for path '{app_module}'")
-        (app := apps[0]).name = app_name
+        source = apps[0]
+        # lazyplex's __getattr__ depends on initialized state, so copy.copy()
+        # cannot reconstruct it. Copy the initialized state directly.
+        app = object.__new__(type(source))
+        app.__dict__.update(source.__dict__)
+        app.name = app_name
         return wrap_app(app)
 
-    async def init(self, cfg, cfg_path):
+    async def init(self, cfg: dict, cfg_path: str):
         assert self.cfg is None, "Already initialized. Finalize first."
 
-        # TODO: if there're more that one runner, will be conflict
-        config_loader.add_node(r"^logging$")(self.init_loggers)
-        config_loader.add_node(
-            r"^applications\.[^.]+$", 'applications'
-        )(self.init_application)
+        loader = config_loader.clone()
+        loader.add_node(r"^logging$")(self.init_loggers)
+        loader.add_node(r"^applications\.[^.]+$", "applications")(self.init_application)
 
-        self.cfg = cfg
+        self.cfg = deepcopy(cfg)
         self.cfg_path = cfg_path
-        self._tree = await config_loader.parse(cfg, cfg_path)
+        try:
+            self._tree = await loader.parse(cfg, cfg_path)
+        except BaseException:
+            await self.finalize()
+            raise
 
     def _parse_log_handler(self, config) -> Any:
-        if (handler := config.pop('handler', None)) is not None:
+        if (handler := config.pop("handler", None)) is not None:
             if isinstance(handler, str):
                 return load_path(handler)
             return handler
-        elif (filename := config.pop('file', None)) is not None:
+        elif (filename := config.pop("file", None)) is not None:
+            if self.cfg_path is None:
+                raise RuntimeError("Runner config path is not set")
             return os.path.join(os.path.dirname(self.cfg_path), filename)
         return sys.stderr
 
-    def init_loggers(self, loggers: List[Dict], path: str):
+    def init_loggers(self, loggers: list[dict], path: str):
         for log in loggers:
             log = log.copy()
-            is_file = 'file' in log
+            is_file = "file" in log
             kwargs = {
                 "sink": self._parse_log_handler(log),
                 "format": LOGGING_DEFAULT_FORMAT,
@@ -167,14 +193,20 @@ class Runner:
                 "colorize": not is_file,
             }
             kwargs.update(log)
-            logger.add(**kwargs)
+            self._log_sinks.append(logger.add(**kwargs))
         return loggers
 
     async def finalize(self):
-        assert self.cfg is not None, "Not initialized, to be finilized"
-
-        self.cfg = None
-        self.cfg_path = None
+        try:
+            if self._tree is not None:
+                await self._tree.close()
+        finally:
+            self._tree = None
+            self.cfg = None
+            self.cfg_path = None
+            for sink in self._log_sinks:
+                logger.remove(sink)
+            self._log_sinks.clear()
 
     @contextmanager
     def _app_context(self, app: _Application):
@@ -182,16 +214,20 @@ class Runner:
         # add appropriate package to the PATH
         from w3plex.constants import CONTEXT_CONFIG_KEY, CONTEXT_EXTRAS_KEY
 
+        if self.cfg is None:
+            raise RuntimeError("Runner is not initialized")
         cfg = dict(self.cfg)
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
-        with create_context({
-            CONTEXT_CONFIG_KEY: dict(app_cfg),
-            CONTEXT_EXTRAS_KEY: dict(cfg),
-            CONTEXT_CHAINS_KEY: dict(
-                chains if (chains := self.tree.get_collection('chains')) else {}
-            ),
-            CONTEXT_VARS_KEY: self._tree.get_collection(VARS_COLLECTION)
-        }):
+        with create_context(
+            {
+                CONTEXT_CONFIG_KEY: dict(app_cfg),
+                CONTEXT_EXTRAS_KEY: dict(cfg),
+                CONTEXT_CHAINS_KEY: dict(
+                    chains if (chains := self.tree.get_collection("chains")) else {}
+                ),
+                CONTEXT_VARS_KEY: self.tree.get_collection(VARS_COLLECTION),
+            }
+        ):
             yield app
 
 
@@ -199,5 +235,4 @@ def load_applications(name: str):
     loaded = load_path(name)
     if isinstance(loaded, _Application):
         return [loaded]
-    return [attr for attr in vars(loaded).values()
-            if isinstance(attr, _Application)]
+    return [attr for attr in vars(loaded).values() if isinstance(attr, _Application)]

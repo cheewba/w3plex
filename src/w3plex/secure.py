@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """secure.py - Password-protected keystore -> transparent encrypted I/O.
 
 Scenario
@@ -19,6 +18,7 @@ Scenario
 Only **pure read** modes are intercepted; write/append/update are
 forwarded untouched, so existing code is unaffected.
 """
+
 import base64
 import builtins
 import getpass
@@ -26,27 +26,28 @@ import io
 import json
 import os
 import secrets
-from hashlib import sha256, scrypt
+from hashlib import scrypt, sha256
 from pathlib import Path
-from typing import List, Optional, Union, Tuple
 from sys import stdout
+from typing import BinaryIO, TextIO, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 
 # ----------------------------------------------------------------------
 # Paths & constants
 # ----------------------------------------------------------------------
-_MAGIC = b"ENC1"                      # header for encrypted *files*
-_KS_MAGIC = b"KS01"                   # header for encrypted *keystore*
-# TODO: think about customized keystore path
-_KEYSTORE_PATH = Path.home() / ".keystore.bin"
-_SALT_LEN = 16                        # bytes reserved for salt at file start
+_MAGIC = b"ENC1"  # header for encrypted *files*
+_KS_MAGIC = b"KS01"  # header for encrypted *keystore*
+_KEYSTORE_PATH = Path(
+    os.environ.get("W3PLEX_KEYSTORE", str(Path.home() / ".keystore.bin"))
+).expanduser()
+_SALT_LEN = 16  # bytes reserved for salt at file start
 
 # scrypt work factors (adjust to taste)
-_SCRYPT_N = 2 ** 15
+_SCRYPT_N = 2**15
 _SCRYPT_R = 8
 _SCRYPT_P = 1
-_SCRYPT_WORK: Tuple[int, int, int] | None = None  # will hold the actual (N,r,p)
+_SCRYPT_WORK: tuple[int, int, int] | None = None  # will hold the actual (N,r,p)
 
 # ----------------------------------------------------------------------
 # Salt handling (salt lives as first 16 bytes of keystore)
@@ -89,7 +90,7 @@ def _adaptive_scrypt(password: str) -> bytes:
 
     global _SCRYPT_WORK
     n = _SCRYPT_N
-    while n >= 2 ** 12:  # 4096 is ~4 MiB with r=8
+    while n >= 2**12:  # 4096 is ~4 MiB with r=8
         try:
             key = scrypt(
                 password.encode(),
@@ -113,6 +114,7 @@ def _adaptive_scrypt(password: str) -> bytes:
 
 def _get_master_key() -> bytes:
     unlock_keystore()
+    assert _master_key is not None
     return _master_key
 
 
@@ -131,8 +133,10 @@ def unlock_keystore():
 # Keystore helpers (JSON list of base‑64 keys, encrypted with master key)
 # ----------------------------------------------------------------------
 
+
 def _keystore_exists() -> bool:
     return _KEYSTORE_PATH.exists()
+
 
 def _raw_keystore_bytes() -> bytes:
     """Keystore content without the leading salt (may be empty)."""
@@ -145,7 +149,7 @@ def _raw_keystore_bytes() -> bytes:
     return buf[_SALT_LEN:]
 
 
-def _load_keystore() -> List[str]:
+def _load_keystore() -> list[str]:
     """Return stored keys as base-64 strings."""
 
     raw = _raw_keystore_bytes()
@@ -159,7 +163,7 @@ def _load_keystore() -> List[str]:
         except (json.JSONDecodeError, KeyError):
             return []
 
-    cipher = raw[len(_KS_MAGIC):]
+    cipher = raw[len(_KS_MAGIC) :]
     f = Fernet(base64.urlsafe_b64encode(_get_master_key()))
     try:
         plain = f.decrypt(cipher)
@@ -171,7 +175,7 @@ def _load_keystore() -> List[str]:
         raise IncorrectPassword("Wrong master password for keystore") from exc
 
 
-def _save_keystore(keys: List[str]) -> None:
+def _save_keystore(keys: list[str]) -> None:
     """Write keys list back to disk (salt + magic + ciphertext)."""
 
     data = json.dumps({"keys": keys}).encode()
@@ -183,7 +187,7 @@ def _save_keystore(keys: List[str]) -> None:
     _KEYSTORE_PATH.write_bytes(payload)
 
 
-def _all_keys() -> List[bytes]:
+def _all_keys() -> list[bytes]:
     return [base64.urlsafe_b64decode(k) for k in _load_keystore()]
 
 
@@ -199,6 +203,7 @@ def _add_key(raw_key: bytes) -> None:
 # File‑password → key derivation (SHA‑256 for demo simplicity)
 # ----------------------------------------------------------------------
 
+
 def _derive_file_key(password: str) -> bytes:
     return sha256(password.encode()).digest()
 
@@ -206,6 +211,7 @@ def _derive_file_key(password: str) -> bytes:
 # ----------------------------------------------------------------------
 # Core encryption/decryption helpers
 # ----------------------------------------------------------------------
+
 
 def _encrypt_bytes(
     data: bytes,
@@ -232,7 +238,7 @@ def _encrypt_bytes(
 def _decrypt_bytes(
     data: bytes,
     *,
-    password: Optional[str] = None,
+    password: str | None = None,
     use_keystore: bool = True,
     ask_password: bool = False,
     prompt_context: str = "data",
@@ -249,9 +255,9 @@ def _decrypt_bytes(
     if not data.startswith(_MAGIC):
         raise ValueError(f"{prompt_context} is not encrypted")
 
-    cipher = data[len(_MAGIC):]
+    cipher = data[len(_MAGIC) :]
 
-    plain: Optional[bytes] = None
+    plain: bytes | None = None
     if use_keystore and not password:
         for k in _all_keys():
             try:
@@ -284,11 +290,12 @@ def _decrypt_bytes(
 # Public helper: encrypt_file
 # ----------------------------------------------------------------------
 
+
 def encrypt_file(
-    src: Union[str, Path],
+    src: str | Path,
     *,
-    password: Optional[str] = None,
-    dst: Optional[Union[str, Path]] = None,
+    password: str | None = None,
+    dst: str | Path | None = None,
     inplace: bool = False,
     add_to_keystore: bool = False,
 ) -> Path:
@@ -311,10 +318,10 @@ def encrypt_file(
 
 
 def decrypt_file(
-    src: Union[str, Path],
+    src: str | Path,
     *,
-    password: Optional[str] = None,
-    dst: Optional[Union[str, Path]] = None,
+    password: str | None = None,
+    dst: str | Path | None = None,
     inplace: bool = False,
     use_keystore: bool = False,
 ) -> Path:
@@ -327,11 +334,11 @@ def decrypt_file(
         password=password,
         use_keystore=use_keystore,
         ask_password=True,
-        prompt_context=str(src_path)
+        prompt_context=str(src_path),
     )
 
-    dst_path = src_path if inplace else (
-        Path(dst) if dst else src_path.with_suffix(".dec")
+    dst_path = (
+        src_path if inplace else (Path(dst) if dst else src_path.with_suffix(".dec"))
     )
     dst_path.write_bytes(plain)
     return dst_path
@@ -341,20 +348,27 @@ def decrypt_file(
 # Decryption helper used by patched open
 # ----------------------------------------------------------------------
 
-def _decrypt_if_needed(path: Path, raw: bytes, *, text_encoding: Optional[str]):
+
+def _decrypt_if_needed(
+    path, raw: bytes, *, binary=False, text_encoding=None, errors=None, newline=None
+):
     """Return file-like object with plaintext; None if *raw* is plain."""
     if not raw.startswith(_MAGIC):
         return None
 
     plain = _decrypt_bytes(
-        raw,
-        use_keystore=True,
-        ask_password=True,
-        prompt_context=str(path)
+        raw, use_keystore=True, ask_password=True, prompt_context=str(path)
     )
 
     buf = io.BytesIO(plain)
-    return buf if text_encoding is None else io.TextIOWrapper(buf, encoding=text_encoding)
+    buf.name = str(path)
+    return (
+        buf
+        if binary
+        else io.TextIOWrapper(
+            buf, encoding=text_encoding, errors=errors, newline=newline
+        )
+    )
 
 
 # ----------------------------------------------------------------------
@@ -367,7 +381,7 @@ def _secure_open(
     file,  # positional name preserved for compatibility
     mode: str = "r",
     buffering: int = -1,
-    encoding: Optional[str] = None,
+    encoding: str | None = None,
     errors=None,
     newline=None,
     closefd=True,
@@ -376,15 +390,38 @@ def _secure_open(
     """Transparent decryption for `ENC1` files when opened read-only."""
 
     if set(mode) - {"r", "b", "t"}:  # any write / update flag present
-        return _orig_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+        return _orig_open(
+            file, mode, buffering, encoding, errors, newline, closefd, opener
+        )
 
-    p = Path(file)
-    raw = _orig_open(file, "rb").read()
+    handle = _orig_open(
+        file, mode, buffering, encoding, errors, newline, closefd, opener
+    )
+    if isinstance(file, int) or not handle.seekable():
+        return handle
+    source = cast(BinaryIO, handle) if "b" in mode else cast(TextIO, handle).buffer
+    try:
+        prefix = source.read(len(_MAGIC))
+        handle.seek(0)
+        if prefix != _MAGIC:
+            return handle
+        raw = source.read()
+    except BaseException:
+        handle.close()
+        raise
+    handle.close()
 
     attempts = 3
     while True:
         try:
-            replacement = _decrypt_if_needed(p, raw, text_encoding=None if "b" in mode else encoding)
+            replacement = _decrypt_if_needed(
+                file,
+                raw,
+                binary="b" in mode,
+                text_encoding=encoding,
+                errors=errors,
+                newline=newline,
+            )
             break
         except IncorrectPassword as e:
             attempts -= 1
@@ -394,10 +431,7 @@ def _secure_open(
             stdout.write(f"{e}, {attempts} attempts left\r\n")
             stdout.flush()
 
-
-    if replacement is None:
-        return _orig_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
-
+    assert replacement is not None
     return replacement
 
 
@@ -409,12 +443,13 @@ builtins.open = _secure_open
 # Data encryption/decryption (for in-memory or stream data)
 # ----------------------------------------------------------------------
 
+
 def encrypt_data(
-    data: Union[str, bytes],
+    data: str | bytes,
     *,
-    password: Optional[str] = None,
+    password: str | None = None,
     add_to_keystore: bool = True,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Encrypt data and return (encrypted_data, password).
 
     Args:
@@ -429,22 +464,24 @@ def encrypt_data(
         ValueError: If neither password nor add_to_keystore is provided
     """
     if password is None and not add_to_keystore:
-        raise ValueError("Either password must be provided or add_to_keystore must be True")
+        raise ValueError(
+            "Either password must be provided or add_to_keystore must be True"
+        )
 
     if isinstance(data, str):
-        data = data.encode('utf-8')
+        data = data.encode("utf-8")
 
     if password is None:
         password = secrets.token_urlsafe(32)
 
     encrypted_bytes = _encrypt_bytes(data, password, add_to_keystore=add_to_keystore)
-    return base64.b64encode(encrypted_bytes).decode('ascii'), password
+    return base64.b64encode(encrypted_bytes).decode("ascii"), password
 
 
 def decrypt_data(
     encrypted: str,
     *,
-    password: Optional[str] = None,
+    password: str | None = None,
     use_keystore: bool = True,
 ) -> str:
     """Decrypt data that was encrypted with encrypt_data.
@@ -461,8 +498,8 @@ def decrypt_data(
         IncorrectPassword: If decryption fails or no key available
     """
     try:
-        raw = base64.b64decode(encrypted.encode('ascii'))
-    except Exception:
+        raw = base64.b64decode(encrypted.encode("ascii"))
+    except (ValueError, UnicodeEncodeError):
         raise ValueError("Invalid base64-encoded data")
 
     if not raw.startswith(_MAGIC):
@@ -473,16 +510,16 @@ def decrypt_data(
         password=password,
         use_keystore=use_keystore,
         ask_password=False,
-        prompt_context="encrypted data"
+        prompt_context="encrypted data",
     )
-    return plain.decode('utf-8')
+    return plain.decode("utf-8")
 
 
 __all__ = [
-    "encrypt_file",
+    "IncorrectPassword",
+    "SecureError",
+    "decrypt_data",
     "decrypt_file",
     "encrypt_data",
-    "decrypt_data",
-    "SecureError",
-    "IncorrectPassword",
+    "encrypt_file",
 ]

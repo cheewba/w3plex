@@ -1,11 +1,16 @@
-import copy
+from __future__ import annotations
+
+import html
 import logging
 import sys
 import warnings
-import html
 from collections import defaultdict
+from typing import TYPE_CHECKING
 
 from loguru import logger as _logger
+
+if TYPE_CHECKING:
+    from loguru import Record
 
 from . import get_context
 from .constants import CONTEXT_LOGGER_KEY
@@ -14,12 +19,14 @@ __all__ = ["logger"]
 
 
 class _Logger(logging.Logger):
+    # Pin these stdlib attributes with descriptors so third-party logging setup
+    # cannot replace the interception handlers or disable propagation.
     @property
     def handlers(self):
         return []
 
     @handlers.setter
-    def handlers(self, value):
+    def handlers(self, value):  # pyright: ignore[reportIncompatibleVariableOverride]
         pass
 
     @property
@@ -27,27 +34,27 @@ class _Logger(logging.Logger):
         return True
 
     @propagate.setter
-    def propagate(self, value):
+    def propagate(self, value):  # pyright: ignore[reportIncompatibleVariableOverride]
         pass
 
-    def addHandler(self, h):
+    def addHandler(self, hdlr):
         pass
 
 
 class _RootLogger(logging.RootLogger):
     @property
     def handlers(self):
-        handlers = getattr(self, '_hdl', None)
+        handlers = getattr(self, "_hdl", None)
         if handlers is None:
             handlers = [InterceptHandler()]
-            setattr(self, '_hdl', handlers)
+            self._hdl = handlers
         return handlers
 
     @handlers.setter
-    def handlers(self, value):
+    def handlers(self, value):  # pyright: ignore[reportIncompatibleVariableOverride]
         pass
 
-    def addHandler(self, h):
+    def addHandler(self, hdlr):
         pass
 
 
@@ -60,7 +67,9 @@ class InterceptHandler(logging.Handler):
             level = record.levelno
 
         try:
-            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+            logger.opt(depth=6, exception=record.exc_info).log(
+                level, record.getMessage()
+            )
         except Exception:
             logger.opt(depth=6, exception=record.exc_info).log(
                 level, html.escape(record.getMessage())
@@ -70,6 +79,7 @@ class InterceptHandler(logging.Handler):
 class Logger:
     def __init__(self, logger):
         self._logger = logger.opt(colors=True)
+        self._minimum_level = 0
 
     def __getattribute__(self, name):
         try:
@@ -108,7 +118,7 @@ class Logger:
             safe_args = tuple(self._escape_html_value(a) for a in args)
             safe_kwargs = {}
             for k, v in kwargs.items():
-                if k in ('exc_info', 'stack_info'):
+                if k in ("exc_info", "stack_info"):
                     safe_kwargs[k] = v
                 else:
                     safe_kwargs[k] = self._escape_html_value(v)
@@ -122,13 +132,19 @@ class Logger:
             pass
 
     def _safe_log(self, method_name, msg, *args, **kwargs):
-        return self._safe_invoke(getattr(self._delegate(), method_name), msg, *args, **kwargs)
+        level_name = "ERROR" if method_name == "exception" else method_name.upper()
+        if self._logger.level(level_name).no < self._minimum_level:
+            return None
+        return self._safe_invoke(
+            getattr(self._delegate(), method_name), msg, *args, **kwargs
+        )
 
     def setLevel(self, level):
-        """
-        Set the logging level of this logger.  level must be an int or a str.
-        """
-        ...
+        self._minimum_level = (
+            self._logger.level(level.upper()).no
+            if isinstance(level, str)
+            else int(level)
+        )
 
     def debug(self, msg, *args, **kwargs):
         """
@@ -183,8 +199,13 @@ class Logger:
         """
         Log 'msg % args' with the integer or string severity 'level'.
         """
-        log_method = getattr(self._delegate(), "log")
-        return self._safe_invoke(lambda m, *a, **kw: log_method(level, m, *a, **kw), msg, *args, **kwargs)
+        severity = self._logger.level(level).no if isinstance(level, str) else level
+        if severity < self._minimum_level:
+            return None
+        log_method = self._delegate().log
+        return self._safe_invoke(
+            lambda m, *a, **kw: log_method(level, m, *a, **kw), msg, *args, **kwargs
+        )
 
 
 def monkey_match_standard_logging():
@@ -197,12 +218,14 @@ def _patch_loggers():
 
     # lock the setter
     _orig_setLoggerClass = logging.setLoggerClass
+
     def _locked_setLoggerClass(cls):
         # allow re-setting to the same class; ignore anything else
         if cls is MY_LOGGER_CLASS:
             return _orig_setLoggerClass(cls)
         # optionally log a warning here
         return
+
     logging.setLoggerClass = _locked_setLoggerClass
 
     # pin the current manager too
@@ -228,15 +251,26 @@ logging.captureWarnings(True)
 # Actually enable DeprecationWarning (it is ignored by default)
 warnings.simplefilter("default", DeprecationWarning)
 
-# to be able to copy loguru logger, all handlers should be removed
-_logger.remove()
-logger = Logger(copy.deepcopy(_logger).patch(
-    lambda record: record.__setitem__(
-        "extra",
-        defaultdict(str, record["extra"])
-    ),
-))
 
-# setup default logger to the loguru again
-_logger.add(sys.stderr, level="INFO", enqueue=True,
-            backtrace=False, diagnose=False, colorize=True)
+def _patch_record(record: Record) -> None:
+    record["extra"] = defaultdict(str, record["extra"])
+
+
+# Share sinks with Loguru so defaults and dashboard capture also receive our logs.
+logger = Logger(_logger.patch(_patch_record))
+
+# Preserve the bundled console format without printing exception-local values.
+# User-installed sinks remain registered.
+try:
+    _logger.remove(0)
+except ValueError:
+    pass
+else:
+    _logger.add(
+        sys.stderr,
+        level="INFO",
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+        colorize=True,
+    )

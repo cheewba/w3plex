@@ -1,2 +1,3 @@
-from lazyplex.plugins import *  # noqa: F403
-from .dashboard import *   # noqa: F403
+from lazyplex.plugins import progress_bar as progress_bar
+
+from .dashboard import *

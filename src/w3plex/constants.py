@@ -1,8 +1,8 @@
-CONTEXT_CHAINS_KEY = '_chains'
-CONTEXT_CONFIG_KEY = '_config'
-CONTEXT_EXTRAS_KEY = '_extras'
-CONTEXT_LOGGER_KEY = '_logger'
-CONTEXT_VARS_KEY = '_vars'
-APPLICATIONS_CFG_KEY = 'applications'
-ACTIONS_CFG_KEY = 'actions'
-VARS_COLLECTION = '_vars'
+CONTEXT_CHAINS_KEY = "_chains"
+CONTEXT_CONFIG_KEY = "_config"
+CONTEXT_EXTRAS_KEY = "_extras"
+CONTEXT_LOGGER_KEY = "_logger"
+CONTEXT_VARS_KEY = "_vars"
+APPLICATIONS_CFG_KEY = "applications"
+ACTIONS_CFG_KEY = "actions"
+VARS_COLLECTION = "_vars"

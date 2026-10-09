@@ -1,11 +1,17 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Generic, TypeVar, Callable, overload, Any, Dict, Tuple
+from typing import Any, overload
 
 from lazyplex import (
     Application as _Application,
+)
+from lazyplex import (
     ApplicationAction as _ApplicationAction,
+)
+from lazyplex import (
     application as _application,
 )
+
 from ..config import Lazy
 from ..constants import CONTEXT_CONFIG_KEY, CONTEXT_LOGGER_KEY
 from ..exceptions import SkipItem, W3PlexError
@@ -13,47 +19,54 @@ from ..log import logger
 from ..utils import get_context
 
 
-T = TypeVar('T')
-
-
 class ApplicationAction(_ApplicationAction):
+    async def _process_action(self, item: Any, action: Any):
+        # lazyplex treats every iterable result as a collection of actions.
+        # Strings and bytes are complete values, not character-level actions.
+        if isinstance(action, (str, bytes)):
+            return action
+        return await super()._process_action(item, action)
+
     async def get_item_context(self, *args, **kwargs):
         ctx = await super().get_item_context(*args, **kwargs)
         logger = get_context()[CONTEXT_LOGGER_KEY]
-        logger = logger.bind(**{
-            "item": ctx[self.context_key],
-            "item_index": ctx[f"{self.context_key}_index"]
-        })
+        logger = logger.bind(
+            item=ctx[self.context_key], item_index=ctx[f"{self.context_key}_index"]
+        )
 
-        return {
-            CONTEXT_LOGGER_KEY: logger,
-            **ctx
-        }
+        return {CONTEXT_LOGGER_KEY: logger, **ctx}
 
     async def process_item(self, item: Any, *args, **kwargs):
         try:
             if isinstance(item, ActionData):
-                kwargs['index'] = item.index
+                kwargs["index"] = item.index
                 item = item.item
             return await super().process_item(item, *args, **kwargs)
         except SkipItem as e:
             return e.result
         except W3PlexError as e:
             logger.error(e)
+            raise
         except Exception as e:
             logger.exception(e)
             raise
 
-    async def parse_args(self, *args, **kwargs) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-        async def resolve_value(value):
+    async def parse_args(
+        self, *args, **kwargs
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        async def resolve_value(value: Any) -> Any:
             if isinstance(value, dict):
-                return {key: await resolve_value(subvalue) for key, subvalue in value.items()}
+                return {
+                    key: await resolve_value(subvalue)
+                    for key, subvalue in value.items()
+                }
             elif isinstance(value, (list, tuple, set)):
                 resolved = [await resolve_value(item) for item in value]
                 return type(value)(resolved)
             elif isinstance(value, Lazy) and not value.as_lazy:
                 return await value()
             return value
+
         args = await resolve_value(args)
         kwargs = await resolve_value(kwargs)
 
@@ -63,6 +76,11 @@ class ApplicationAction(_ApplicationAction):
 class Application(_Application):
     action_class = ApplicationAction
 
+    async def process_action_data(self, action, data, counter=None, kwargs=None):
+        if isinstance(data, (str, bytes)) and not self.protected_items:
+            data = [data]
+        return await super().process_action_data(action, data, counter, kwargs)
+
     async def update_application_context(self, ctx):
         await super().update_application_context(ctx)
         _logger = logger.bind(
@@ -70,10 +88,11 @@ class Application(_Application):
             application_config=ctx.get(CONTEXT_CONFIG_KEY),
         )
         ctx[CONTEXT_LOGGER_KEY] = _logger
+        return ctx
 
 
 @dataclass
-class ActionData(Generic[T]):
+class ActionData[T]:
     item: T
     index: int
 
@@ -81,15 +100,18 @@ class ActionData(Generic[T]):
 @overload
 def application(fn: Callable) -> Application: ...
 @overload
-def application(*, return_exceptions: bool = False) -> Callable[[Callable], Application]: ...
+def application(
+    *, return_exceptions: bool = False
+) -> Callable[[Callable], Application]: ...
+
 
 def application(*args, **kwargs):
-    """ Wrapper around ``lazyplex.application`` that accepts function as argument only.
+    """Wrapper around ``lazyplex.application`` that accepts function as argument only.
 
-        Threre's no need to pass name of the application, since
-        it's taken from the config file.
+    There's no need to pass the name of the application, since
+    it's taken from the config file.
     """
-    kwargs['application_class'] = Application
+    kwargs["application_class"] = Application
     if args and isinstance(args[0], Callable):
         return _application(**kwargs)(args[0])
     return _application(*args, **kwargs)
