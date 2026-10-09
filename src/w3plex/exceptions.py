@@ -1,5 +1,6 @@
 from typing import Any
 
+
 class W3PlexError(Exception):
     pass
 

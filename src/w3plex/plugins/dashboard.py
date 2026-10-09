@@ -36,24 +36,18 @@ import os
 import sys
 import threading
 from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    AsyncIterator,
     Protocol,
+    cast,
     runtime_checkable,
 )
 
-from w3plex import Plugin
 from rich import box
 from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
@@ -62,21 +56,23 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from w3plex import Plugin
+
 if TYPE_CHECKING:
     from w3plex import Action
 
 
-_current_level: ContextVar[Optional["DashboardLevel"]] = ContextVar(
+_current_level: ContextVar[DashboardLevel | None] = ContextVar(
     "_current_level", default=None
 )
-_current_page: ContextVar[Optional["DashboardPage"]] = ContextVar(
+_current_page: ContextVar[DashboardPage | None] = ContextVar(
     "_current_page", default=None
 )
 
-_dashboard_manager: Optional["DashboardManager"] = None
+_dashboard_manager: DashboardManager | None = None
 
 
-def _get_dashboard_manager() -> "DashboardManager":
+def _get_dashboard_manager() -> DashboardManager:
     """Get or create the global dashboard manager."""
     global _dashboard_manager
     if _dashboard_manager is None:
@@ -87,15 +83,17 @@ def _get_dashboard_manager() -> "DashboardManager":
 @dataclass
 class PanelDefinition:
     """Definition for a dashboard panel with key-value rows."""
+
     name: str
-    rows: List[Tuple[str, str]]
+    rows: list[tuple[str, str]]
 
 
 @dataclass
 class KeyEvent:
     """Normalized key events we care about."""
+
     kind: str  # "char" | "left" | "right" | "up" | "down" | "ctrl_c"
-    value: Optional[str] = None
+    value: str | None = None
 
 
 @runtime_checkable
@@ -111,26 +109,17 @@ class IDashboard(Protocol):
         """Page title displayed in navigation."""
         ...
 
-    def register_panel(
-        self,
-        name: str,
-        rows: List[Tuple[str, str]]
-    ) -> None:
+    def register_panel(self, name: str, rows: list[tuple[str, str]]) -> None:
         """Register a panel with key-value rows."""
         ...
 
     def register_custom_panel(
-        self,
-        name: str,
-        renderer: Callable[[Optional[Dict[str, Any]]], RenderableType]
+        self, name: str, renderer: Callable[[dict[str, Any] | None], RenderableType]
     ) -> None:
         """Register a custom panel with a render callback."""
         ...
 
-    def set_variable_provider(
-        self,
-        provider: Callable[[], Dict[str, Any]]
-    ) -> None:
+    def set_variable_provider(self, provider: Callable[[], dict[str, Any]]) -> None:
         """Set the variable provider for panel formatting."""
         ...
 
@@ -144,8 +133,8 @@ class IDashboard(Protocol):
 
     def set_panel_columns(
         self,
-        right_titles: List[str],
-        left_titles: Optional[List[str]] = None,
+        right_titles: list[str],
+        left_titles: list[str] | None = None,
     ) -> None:
         """Split panels into left/right columns by title."""
         ...
@@ -166,29 +155,27 @@ class DashboardPage:
     tables, and custom renderables.
     """
 
-    def __init__(self, title: str, level: "DashboardLevel") -> None:
+    def __init__(self, title: str, level: DashboardLevel) -> None:
         self._title = title
         self._level = level
-        self._panels: List[PanelDefinition] = []
-        self._custom_panels: Dict[str, Callable[[Optional[Dict[str, Any]]], RenderableType]] = {}
-        self._variable_provider: Optional[Callable[[], Dict[str, Any]]] = None
-        self._layout: Optional[Layout] = None
-        self._custom_renderable: Optional[RenderableType] = None
-        self._panel_columns: Optional[Dict[str, Optional[set[str]]]] = None
+        self._panels: list[PanelDefinition] = []
+        self._custom_panels: dict[
+            str, Callable[[dict[str, Any] | None], RenderableType]
+        ] = {}
+        self._variable_provider: Callable[[], dict[str, Any]] | None = None
+        self._layout: Layout | None = None
+        self._custom_renderable: RenderableType | None = None
+        self._panel_columns: dict[str, set[str] | None] | None = None
 
     @property
     def title(self) -> str:
         return self._title
 
     @property
-    def level(self) -> "DashboardLevel":
+    def level(self) -> DashboardLevel:
         return self._level
 
-    def register_panel(
-        self,
-        name: str,
-        rows: List[Tuple[str, str]]
-    ) -> None:
+    def register_panel(self, name: str, rows: list[tuple[str, str]]) -> None:
         """Register a panel with key-value rows.
 
         Args:
@@ -199,9 +186,7 @@ class DashboardPage:
         self._panels.append(PanelDefinition(name=name, rows=rows))
 
     def register_custom_panel(
-        self,
-        name: str,
-        renderer: Callable[[Optional[Dict[str, Any]]], RenderableType]
+        self, name: str, renderer: Callable[[dict[str, Any] | None], RenderableType]
     ) -> None:
         """Register a custom panel with a render callback.
 
@@ -211,10 +196,7 @@ class DashboardPage:
         """
         self._custom_panels[name] = renderer
 
-    def set_variable_provider(
-        self,
-        provider: Callable[[], Dict[str, Any]]
-    ) -> None:
+    def set_variable_provider(self, provider: Callable[[], dict[str, Any]]) -> None:
         """Set the variable provider for panel formatting.
 
         Args:
@@ -240,8 +222,8 @@ class DashboardPage:
 
     def set_panel_columns(
         self,
-        right_titles: List[str],
-        left_titles: Optional[List[str]] = None,
+        right_titles: list[str],
+        left_titles: list[str] | None = None,
     ) -> None:
         """Split panels into left/right columns by title."""
         self._panel_columns = {
@@ -258,13 +240,15 @@ class DashboardPage:
         self._custom_renderable = None
         self._panel_columns = None
 
-    def _get_variables(self) -> Dict[str, Any]:
+    def _get_variables(self) -> dict[str, Any]:
         """Get current variables from provider."""
         if self._variable_provider is None:
             return {}
         return self._variable_provider()
 
-    def _render_panel(self, panel_def: PanelDefinition, variables: Dict[str, Any]) -> Panel:
+    def _render_panel(
+        self, panel_def: PanelDefinition, variables: dict[str, Any]
+    ) -> Panel:
         """Render a single panel with variable substitution."""
         table = Table.grid(padding=(0, 1))
         table.add_column(justify="right", style="bold cyan", no_wrap=True)
@@ -288,10 +272,12 @@ class DashboardPage:
             return self._custom_renderable
 
         variables = self._get_variables()
-        renderables: List[Tuple[str, RenderableType]] = []
+        renderables: list[tuple[str, RenderableType]] = []
 
         for panel_def in self._panels:
-            renderables.append((panel_def.name, self._render_panel(panel_def, variables)))
+            renderables.append(
+                (panel_def.name, self._render_panel(panel_def, variables))
+            )
 
         for name, renderer in self._custom_panels.items():
             content = renderer(variables)
@@ -303,8 +289,8 @@ class DashboardPage:
         if self._panel_columns and self._panel_columns.get("right"):
             right_titles = self._panel_columns["right"] or set()
             left_titles = self._panel_columns.get("left")
-            left_renderables: List[RenderableType] = []
-            right_renderables: List[RenderableType] = []
+            left_renderables: list[RenderableType] = []
+            right_renderables: list[RenderableType] = []
             for title, renderable in renderables:
                 if left_titles is not None:
                     if title in left_titles:
@@ -325,7 +311,9 @@ class DashboardPage:
                     Layout(name="left", ratio=1),
                     Layout(name="right", ratio=1),
                 )
-                layout["left"].update(Group(*left_renderables) if left_renderables else Text(""))
+                layout["left"].update(
+                    Group(*left_renderables) if left_renderables else Text("")
+                )
                 layout["right"].update(Group(*right_renderables))
                 return layout
 
@@ -341,29 +329,29 @@ class DashboardLevel:
 
     def __init__(
         self,
-        parent: Optional["DashboardLevel"] = None,
-        parent_page: Optional[DashboardPage] = None
+        parent: DashboardLevel | None = None,
+        parent_page: DashboardPage | None = None,
     ) -> None:
         self._parent = parent
         self._parent_page = parent_page
-        self._pages: List[DashboardPage] = []
+        self._pages: list[DashboardPage] = []
         self._active_index: int = 0
-        self._child_level: Optional["DashboardLevel"] = None
+        self._child_level: DashboardLevel | None = None
 
     @property
-    def parent(self) -> Optional["DashboardLevel"]:
+    def parent(self) -> DashboardLevel | None:
         return self._parent
 
     @property
-    def parent_page(self) -> Optional[DashboardPage]:
+    def parent_page(self) -> DashboardPage | None:
         return self._parent_page
 
     @property
-    def pages(self) -> List[DashboardPage]:
+    def pages(self) -> list[DashboardPage]:
         return self._pages
 
     @property
-    def active_page(self) -> Optional[DashboardPage]:
+    def active_page(self) -> DashboardPage | None:
         if 0 <= self._active_index < len(self._pages):
             return self._pages[self._active_index]
         return None
@@ -373,7 +361,7 @@ class DashboardLevel:
         return self._active_index
 
     @property
-    def child_level(self) -> Optional["DashboardLevel"]:
+    def child_level(self) -> DashboardLevel | None:
         return self._child_level
 
     @property
@@ -389,35 +377,34 @@ class DashboardLevel:
     def remove_page(self, page: DashboardPage) -> None:
         """Remove a page from this level."""
         if page in self._pages:
-            idx = self._pages.index(page)
             self._pages.remove(page)
             if self._active_index >= len(self._pages) and self._pages:
                 self._active_index = len(self._pages) - 1
             elif not self._pages:
                 self._active_index = 0
 
-    def next_page(self) -> Optional[DashboardPage]:
+    def next_page(self) -> DashboardPage | None:
         """Switch to the next page. Returns the new active page."""
         if not self._pages:
             return None
         self._active_index = (self._active_index + 1) % len(self._pages)
         return self.active_page
 
-    def prev_page(self) -> Optional[DashboardPage]:
+    def prev_page(self) -> DashboardPage | None:
         """Switch to the previous page. Returns the new active page."""
         if not self._pages:
             return None
         self._active_index = (self._active_index - 1) % len(self._pages)
         return self.active_page
 
-    def goto_page(self, index: int) -> Optional[DashboardPage]:
+    def goto_page(self, index: int) -> DashboardPage | None:
         """Switch to a specific page by index. Returns the new active page."""
         if not self._pages:
             return None
         self._active_index = max(0, min(index, len(self._pages) - 1))
         return self.active_page
 
-    def create_child_level(self, parent_page: DashboardPage) -> "DashboardLevel":
+    def create_child_level(self, parent_page: DashboardPage) -> DashboardLevel:
         """Create a child level under the given page."""
         self._child_level = DashboardLevel(parent=self, parent_page=parent_page)
         return self._child_level
@@ -448,13 +435,13 @@ class KeyboardHandler:
       - Restores termios settings on exit.
     """
 
-    def __init__(self, manager: "DashboardManager") -> None:
+    def __init__(self, manager: DashboardManager) -> None:
         self._manager = manager
         self._running: bool = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
-        self._fd: Optional[int] = None
-        self._old_termios: Optional[list[int]] = None
+        self._fd: int | None = None
+        self._old_termios: list[int | list[bytes | int]] | None = None
 
         # Buffer for escape sequences (arrows)
         self._esc_buf: str = ""
@@ -464,7 +451,7 @@ class KeyboardHandler:
         if self._running:
             return
         # Use the real stdin if available; but we only need the FD to be a TTY
-        if not sys.__stdin__.isatty():
+        if sys.__stdin__ is None or not sys.__stdin__.isatty():
             return
 
         self._running = True
@@ -485,9 +472,11 @@ class KeyboardHandler:
     async def _listen_loop(self) -> None:
         import select
         import termios
-        import tty
         import time
+        import tty
 
+        if sys.__stdin__ is None:
+            return
         fd = sys.__stdin__.fileno()
         self._fd = fd
         self._old_termios = termios.tcgetattr(fd)
@@ -558,7 +547,7 @@ class KeyboardHandler:
         # Normal char
         await self._dispatch(KeyEvent(kind="char", value=ch))
 
-    def _try_parse_escape(self, buf: str) -> Optional[KeyEvent]:
+    def _try_parse_escape(self, buf: str) -> KeyEvent | None:
         """
         Typical arrow keys:
           ESC [ A  (up)
@@ -631,9 +620,10 @@ class KeyboardHandler:
                 return
 
             # Optional: pass through to manager for custom bindings
-            if hasattr(self._manager, "handle_key"):
+            handle_key = getattr(self._manager, "handle_key", None)
+            if handle_key is not None:
                 try:
-                    maybe = self._manager.handle_key(ch)
+                    maybe = handle_key(ch)
                     if asyncio.iscoroutine(maybe):
                         await maybe
                 except asyncio.CancelledError:
@@ -652,23 +642,23 @@ class DashboardManager:
 
     def __init__(self) -> None:
         self._console = Console()
-        self._live: Optional[Live] = None
-        self._root_level: Optional[DashboardLevel] = None
-        self._active_level: Optional[DashboardLevel] = None
+        self._live: Live | None = None
+        self._root_level: DashboardLevel | None = None
+        self._active_level: DashboardLevel | None = None
         self._refresh_rate: float = 4.0
         self._running: bool = False
-        self._update_task: Optional[asyncio.Task] = None
-        self._keyboard: Optional[KeyboardHandler] = None
+        self._update_task: asyncio.Task | None = None
+        self._keyboard: KeyboardHandler | None = None
         self._quit_requested: bool = False
-        self._quit_event: Optional[asyncio.Event] = None
+        self._quit_event: asyncio.Event | None = None
         self._keyboard_enabled: bool = True
 
         self._lock = asyncio.Lock()
 
         # --- Loguru capture (active only while dashboard is running) ---
         self._loguru_capture_enabled: bool = True
-        self._loguru_sink_id: Optional[int] = None
-        self._loguru_saved_console_handlers: List[Dict[str, Any]] = []
+        self._loguru_sink_id: int | None = None
+        self._loguru_saved_console_handlers: list[dict[str, Any]] = []
         self._log_lines = deque(maxlen=200)
         self._log_lock = threading.Lock()
 
@@ -677,15 +667,15 @@ class DashboardManager:
         return self._console
 
     @property
-    def root_level(self) -> Optional[DashboardLevel]:
+    def root_level(self) -> DashboardLevel | None:
         return self._root_level
 
     @property
-    def active_level(self) -> Optional[DashboardLevel]:
+    def active_level(self) -> DashboardLevel | None:
         return self._active_level
 
     @property
-    def active_page(self) -> Optional[DashboardPage]:
+    def active_page(self) -> DashboardPage | None:
         """Get the currently active page (deepest in hierarchy)."""
         level = self._get_deepest_level()
         if level:
@@ -700,7 +690,7 @@ class DashboardManager:
     def quit_requested(self) -> bool:
         return self._quit_requested
 
-    def _get_deepest_level(self) -> Optional[DashboardLevel]:
+    def _get_deepest_level(self) -> DashboardLevel | None:
         """Get the deepest level with pages in the hierarchy."""
         level = self._active_level
         while level and level.has_child:
@@ -722,7 +712,9 @@ class DashboardManager:
             self._active_level = self._root_level
         return self._root_level
 
-    def get_or_create_level(self, parent_page: Optional[DashboardPage] = None) -> DashboardLevel:
+    def get_or_create_level(
+        self, parent_page: DashboardPage | None = None
+    ) -> DashboardLevel:
         """Get existing level or create new one for the given context.
 
         If parent_page is None, returns/creates the root level.
@@ -760,8 +752,8 @@ class DashboardManager:
         """Render the breadcrumb navigation showing current position."""
         level = self._get_deepest_level()
 
-        breadcrumb_parts: List[str] = []
-        nav_level: Optional[DashboardLevel] = level
+        breadcrumb_parts: list[str] = []
+        nav_level: DashboardLevel | None = level
 
         while nav_level:
             page_title = nav_level.active_page.title if nav_level.active_page else "?"
@@ -796,7 +788,7 @@ class DashboardManager:
         except Exception:
             return False
 
-    def _loguru_snapshot_handler(self, handler: Any) -> Dict[str, Any]:
+    def _loguru_snapshot_handler(self, handler: Any) -> dict[str, Any]:
         """Snapshot enough handler config to restore it later (best-effort)."""
         sink = getattr(handler, "_sink", None)
         stream = getattr(sink, "_stream", None)
@@ -829,7 +821,7 @@ class DashboardManager:
             return
 
         try:
-            from loguru import logger  # type: ignore
+            from loguru import logger
         except Exception:
             return
 
@@ -837,10 +829,12 @@ class DashboardManager:
 
         # Remove only console stream sinks (stdout/stderr), keep file/network sinks intact
         try:
-            handlers = getattr(getattr(logger, "_core"), "handlers")
+            handlers = cast(Any, logger)._core.handlers
             for hid, h in list(handlers.items()):
                 if self._loguru_is_console_stream_handler(h):
-                    self._loguru_saved_console_handlers.append(self._loguru_snapshot_handler(h))
+                    self._loguru_saved_console_handlers.append(
+                        self._loguru_snapshot_handler(h)
+                    )
                     logger.remove(hid)
         except Exception:
             # If internals differ, do nothing (fail safe)
@@ -903,7 +897,7 @@ class DashboardManager:
 
         self._loguru_saved_console_handlers.clear()
 
-    def _render_logs_panel(self) -> Optional[RenderableType]:
+    def _render_logs_panel(self) -> RenderableType | None:
         """Render captured Loguru logs as a panel (if any)."""
         with self._log_lock:
             lines = list(self._log_lines)
@@ -1080,9 +1074,7 @@ class DashboardPlugin(Plugin):
     """
 
     def __init__(
-        self,
-        refresh_rate: float = 4.0,
-        keyboard_enabled: bool = True
+        self, refresh_rate: float = 4.0, keyboard_enabled: bool = True
     ) -> None:
         """Initialize dashboard plugin.
 
@@ -1092,7 +1084,7 @@ class DashboardPlugin(Plugin):
         """
         self._refresh_rate = refresh_rate
         self._keyboard_enabled = keyboard_enabled
-        self._manager: Optional[DashboardManager] = None
+        self._manager: DashboardManager | None = None
 
     @property
     def manager(self) -> DashboardManager:
@@ -1102,10 +1094,7 @@ class DashboardPlugin(Plugin):
         return self._manager
 
     async def process_action_data(
-        self,
-        process: Callable[["Action", Any], Awaitable],
-        action: "Action",
-        data: Any
+        self, process: Callable[[Action, Any], Awaitable], action: Action, data: Any
     ):
         """Process action data and initialize dashboard.
 
@@ -1124,7 +1113,7 @@ class DashboardPlugin(Plugin):
         return _get_dashboard_manager()
 
 
-def get_dashboard() -> Optional[IDashboard]:
+def get_dashboard() -> IDashboard | None:
     """Get the current context's dashboard page.
 
     Returns the active dashboard page for the current execution context,
@@ -1145,9 +1134,7 @@ def get_dashboard() -> Optional[IDashboard]:
 
 @asynccontextmanager
 async def dashboard_page(
-    title: str,
-    auto_start: bool = True,
-    auto_stop: bool = True
+    title: str, auto_start: bool = True, auto_stop: bool = True
 ) -> AsyncIterator[IDashboard]:
     """Context manager for creating a dashboard page.
 
@@ -1190,9 +1177,9 @@ async def dashboard_page(
     page_token = _current_page.set(page)
 
     is_first_page = (
-        manager.root_level is not None and
-        len(manager.root_level.pages) == 1 and
-        manager.root_level.child_level is None
+        manager.root_level is not None
+        and len(manager.root_level.pages) == 1
+        and manager.root_level.child_level is None
     )
 
     try:
@@ -1206,18 +1193,15 @@ async def dashboard_page(
         _current_level.reset(token)
         level.remove_page(page)
 
-        is_empty = (
-            manager.root_level is not None and
-            len(manager.root_level.pages) == 0
-        )
+        is_empty = manager.root_level is not None and len(manager.root_level.pages) == 0
 
         if auto_stop and is_empty and manager.is_running:
             await manager.stop()
 
 
 __all__ = [
-    "IDashboard",
     "DashboardPlugin",
+    "IDashboard",
     "dashboard_page",
     "get_dashboard",
 ]

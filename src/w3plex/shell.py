@@ -1,18 +1,18 @@
-#!/usr/bin/env python
 import asyncio
 import os
 import signal
 import textwrap
+from collections.abc import Awaitable
 from types import MethodType
-from typing import Any
+from typing import Any, cast
 
 from ptpython.repl import embed
 from rich import print
 from rich.text import Text
 
-from .utils import AttrDict
 from .log import logger
 from .runner import Runner
+from .utils import AttrDict
 
 
 class Shell:
@@ -43,11 +43,11 @@ class Shell:
             self.loop.run_until_complete(self._main_task)
         except KeyboardInterrupt:
             pass
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 -- report interactive shell failures
             logger.exception(e)
 
     async def _run_shell(self):
-        apps = self.runner.tree.get_collection("applications")
+        apps = self.runner.tree.get_collection("applications") or {}
 
         width, _ = os.get_terminal_size()
         banner = textwrap.dedent(f"""
@@ -64,10 +64,10 @@ class Shell:
         print(banner)
 
         globals = {
-            'cfg': dict(self.cfg),
-            'apps': apps,
-            'chains': AttrDict(self.runner.tree.get_collection('chains')),
-            'root': self.runner.tree,
+            "cfg": dict(self.cfg),
+            "apps": apps,
+            "chains": AttrDict(self.runner.tree.get_collection("chains") or {}),
+            "root": self.runner.tree,
         }
 
         async def eval_async(repl, text):
@@ -76,6 +76,7 @@ class Shell:
                 if asyncio.iscoroutine(result):
                     result = await result
                 return result
+
             task = asyncio.ensure_future(inner())
 
             self._active_tasks.add(task)
@@ -90,4 +91,8 @@ class Shell:
             # make the repl process Futures without explicit await
             repl.eval_async = MethodType(eval_async, repl)
 
-        await embed(globals=globals, return_asyncio_coroutine=True, configure=configure)
+        # ptpython annotates embed() as None even when returning its coroutine.
+        await cast(
+            Awaitable[None],
+            embed(globals=globals, return_asyncio_coroutine=True, configure=configure),
+        )

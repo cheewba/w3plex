@@ -1,6 +1,7 @@
 import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, TypedDict, Unpack, Optional
+from typing import TypedDict, Unpack
 
 from ..log import logger
 from ..utils import deprecated
@@ -14,26 +15,32 @@ class ProxiesConfig(TypedDict):
 class ProxyService:
     def __init__(self, **config: Unpack[ProxiesConfig]):
         self.config = config
-        self._proxies: Optional[asyncio.Queue[str]] = None
+        self._proxies: asyncio.Queue[str] | None = None
 
     async def init(self):
         self._proxies = asyncio.Queue()
-        with open(self.config['proxies'], 'r') as fr:
-            for line in fr.readlines():
-                if (proxy := line.strip()):
-                    await self._proxies.put(proxy)
+
+        def read_lines():
+            with open(self.config["proxies"], "r") as fr:
+                return list(fr)
+
+        for line in await asyncio.to_thread(read_lines):
+            if proxy := line.strip():
+                await self._proxies.put(proxy)
 
     @asynccontextmanager
     async def get_proxy(self) -> AsyncGenerator[str, None]:
         if self._proxies is None:
             await self.init()
+        proxies = self._proxies
+        assert proxies is not None
 
         proxy = None
         try:
-            if not self._proxies.qsize():
+            if not proxies.qsize():
                 logger.debug("Waiting for proxy...")
-            proxy = await self._proxies.get()
+            proxy = await proxies.get()
             yield proxy
         finally:
             if proxy is not None:
-                await self._proxies.put(proxy)
+                await proxies.put(proxy)

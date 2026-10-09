@@ -1,51 +1,54 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import re
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from inspect import isclass
 from typing import (
-    Dict, Optional, Type, TypeVar, overload, Any, Union,
-    List, Tuple, Awaitable,
+    Any,
+    cast,
+    overload,
 )
 
 from lazyplex import Application, ContextScope
 from w3ext import Chain
 
 from ..constants import (
-    CONTEXT_VARS_KEY, VARS_COLLECTION, ACTIONS_CFG_KEY, APPLICATIONS_CFG_KEY,
+    ACTIONS_CFG_KEY,
+    APPLICATIONS_CFG_KEY,
+    CONTEXT_VARS_KEY,
+    VARS_COLLECTION,
 )
-from ..utils import load_path, AttrDict, as_future, get_context, get_scope
 from ..exceptions import ConfigError
+from ..utils import AttrDict, as_future, get_context, get_scope, load_path
 
+__all__ = ["ConfigTree", "Lazy", "config_loader"]
 
-__all__ = ['config_loader', 'ConfigTree', 'Lazy']
-
-T = TypeVar("T")
-type NodeConfig = Dict[str, Any]
+type NodeConfig = dict[str, Any]
 type NodeFactoryOutput[R] = (
-    R
-    | Awaitable[R]
+    R | Awaitable[R]
     # TODO: add generators support
     # | Generator[R, object, object]
     # | AsyncGenerator[R, object]
 )
-type NodeFactory[R] = Callable[['NodeConfig', str], NodeFactoryOutput[R]]
+type NodeFactory[R] = Callable[[Any, str], NodeFactoryOutput[R]]
 type InitFactory[R] = Callable[..., NodeFactoryOutput[R]] | type[R]
 
-COLLECTIONS = (
-    ('chains', Chain),
+COLLECTIONS = (("chains", Chain),)
+
+IMPORT_KEY = "__init__"
+VAR_KEY = "__var__"
+AS_LAZY_KEY = "__lazy__"
+AS_FACTORY_KEY = "__factory__"
+ENTITY_RE = re.compile(r"\$([^.].*)$")
+LAZY_ITEM_RE = re.compile(r"\$\.(.+)$")
+
+APPLICATIONS_CFG_RE = re.compile(
+    (_app_re := r"^.*" + APPLICATIONS_CFG_KEY + r"\.[^.]*") + r"$"
 )
-
-IMPORT_KEY = '__init__'
-VAR_KEY = '__var__'
-AS_LAZY_KEY = '__lazy__'
-AS_FACTORY_KEY = '__factory__'
-ENTITY_RE = re.compile(r'\$([^.].*)$')
-LAZY_ITEM_RE = re.compile(r'\$\.(.+)$')
-
-APPLICATIONS_CFG_RE = re.compile((_app_re:=r'^.*' + APPLICATIONS_CFG_KEY + r'\.[^.]*') + r"$")
-ACTION_CONFIG_RE = re.compile(_app_re + r'\.' + ACTIONS_CFG_KEY + r'\.([^.]+)$')
+ACTION_CONFIG_RE = re.compile(_app_re + r"\." + ACTIONS_CFG_KEY + r"\.([^.]+)$")
 
 empty = object()
 
@@ -62,22 +65,21 @@ def validate_relative_path(path, root=None):
 
 
 def validate_relative_import(path, root=None):
-    if (not root
-            or not isinstance(path, str)
-            or not path.startswith('.')):
+    if not root or not isinstance(path, str) or not path.startswith("."):
         return path
 
-    level_up = len(path) - len(path.lstrip('.')) - 1
-    base_components = root.split('/')
+    level_up = len(path) - len(path.lstrip(".")) - 1
+    base_components = root.split("/")
     if level_up <= len(base_components):
-        base_components = base_components[:len(base_components) - level_up]
+        base_components = base_components[: len(base_components) - level_up]
     else:
-        raise ValueError(f"Too many leading dots in '{path}' "
-                         f"for the given base path '{root}'")
+        raise ValueError(
+            f"Too many leading dots in '{path}' for the given base path '{root}'"
+        )
 
-    relative_import = path[level_up + 1:]
-    full_import = '.'.join(base_components + relative_import.split('.'))
-    return full_import.rstrip('.')
+    relative_import = path[level_up + 1 :]
+    full_import = ".".join(base_components + relative_import.split("."))
+    return full_import.rstrip(".")
 
 
 class SkipNode(Exception):
@@ -102,87 +104,95 @@ class _Resolver:
         self._later[value].append(callback)
         return False
 
-    def get_unresolved(self) -> bool:
+    def get_unresolved(self) -> list[str]:
         return list(self._later.keys())
 
 
 class _ConfigLoader:
     def __init__(self) -> None:
-        self._filters: List[Tuple[
-            Callable[[Dict, str], bool] | str,
-            NodeFactory[Any],
-            Optional[Union[str, Callable[[Any], str]]]
-        ]] = []
+        self._filters: list[
+            tuple[
+                Callable[[Any, str], bool],
+                NodeFactory[Any],
+                str | Callable[[Any], str] | None,
+            ]
+        ] = []
 
-    def add_node[R](
+    def add_node[F: Callable[..., Any]](
         self,
-        flt: Callable[[Dict, str], bool] | str,
-        collection: Optional[Union[str, Callable[[R], str]]] = None
-    ) -> Callable[[NodeFactory[R]], NodeFactory[R]]:
-        def inner(fn: NodeFactory[R]) -> NodeFactory[R]:
-            nonlocal flt
-            if not isinstance(flt, Callable):
-                flt = self._regexp_flt(flt)
-            self._filters.append([flt, fn, collection])
+        flt: Callable[[Any, str], bool] | str,
+        collection: str | Callable[[Any], str] | None = None,
+    ) -> Callable[[F], F]:
+        predicate = self._regexp_flt(flt) if isinstance(flt, str) else flt
+
+        def inner(fn: F) -> F:
+            self._filters.append((predicate, fn, collection))
             return fn
+
         return inner
 
     def _regexp_flt(self, regexp: str):
         _regexp = re.compile(regexp)
+
         def _filter(cfg: dict, path: str) -> bool:
             return _regexp.match(path) is not None
+
         return _filter
 
     async def get_node(
         self,
-        cfg: Dict,
+        cfg: Any,
         path: str,
-        collections: Optional[defaultdict] = None,
-        relative_path: Optional[str] = None
-    ) -> NodeConfig | NodeFactoryOutput:
+        collections: defaultdict | None = None,
+        relative_path: str | None = None,
+    ) -> Any:
 
         node = cfg
         is_var = isinstance(cfg, dict) and cfg.pop(VAR_KEY, False)
         for flt, node_fn, collection in self._filters[::-1]:
             # check filters as LIFO
-            if (flt(cfg, path)):
+            if flt(cfg, path):
                 try:
                     node = await as_future(node_fn(cfg, path))
                     if node and collection and collections is not None:
                         if isinstance(collection, Callable):
                             collection = collection(node)
-                        collections[collection][path.rsplit('.', 1)[-1]] = node
+                        collections[collection][path.rsplit(".", 1)[-1]] = node
                     break
                 except SkipNode:
                     continue
 
         if is_var:
-            collections[VARS_COLLECTION][path.split('.')[-1]] = node
+            if collections is None:
+                raise ConfigError("Variables require a config collection")
+            collections[VARS_COLLECTION][path.split(".")[-1]] = node
 
         return node
 
-    async def parse(self, cfg: Dict, cfg_path: str) -> "ConfigTree":
+    async def parse(self, cfg: dict, cfg_path: str) -> ConfigTree:
         unresolved_states = []
 
-        def get_node_rel_path(node, root_path: str) -> str:
-            child = getattr(node, '__include_path__', None)
+        def get_node_rel_path(node, root_path: str) -> str | None:
+            child = getattr(node, "__include_path__", None)
             return os.path.relpath(os.path.dirname(child), root_path) if child else None
 
         def _resolve(collection, value, key, state):
             def callback(val):
                 collection[key] = val
-                state['unresolved'] -= 1
+                state["unresolved"] -= 1
 
             if isinstance(value, str) and (entity_match := ENTITY_RE.match(value)):
-                state['unresolved'] += 1
+                state["unresolved"] += 1
                 resolver.resolve_once_ready(entity_match.group(1), callback)
 
         async def _parse_item(key, value, state, path, relative_path):
             if isinstance(value, dict):
                 value_path = ".".join([path, str(key)]) if path else str(key)
                 entity = await _parse_cfg(
-                    value, value_path, collections,
-                    get_node_rel_path(value, relative_path) or relative_path
+                    value,
+                    value_path,
+                    collections,
+                    get_node_rel_path(value, relative_path) or relative_path,
                 )
                 if entity:
                     if not isinstance(entity, dict):
@@ -191,20 +201,25 @@ class _ConfigLoader:
             elif isinstance(value, list):
                 parsed = []
                 for i, item in enumerate(value):
-                    parsed.append(await _parse_item(i, item, state, path, relative_path))
+                    parsed.append(
+                        await _parse_item(i, item, state, path, relative_path)
+                    )
                     _resolve(value, item, i, state)
                 value = parsed
             elif isinstance(value, str):
-                _resolve(state['parsed'], value, key, state)
+                _resolve(state["parsed"], value, key, state)
 
             return value
 
-        async def _parse_cfg(cfg: Dict, path: str = "",
-                             collections: Optional[defaultdict] = None,
-                             relative_path: Optional[str] = None) -> Optional[Dict]:
+        async def _parse_cfg(
+            cfg: dict,
+            path: str = "",
+            collections: defaultdict | None = None,
+            relative_path: str | None = None,
+        ) -> Any:
             if collections is None:
                 collections = defaultdict(list)
-            state = {'parsed': (parsed := AttrDict()), 'unresolved': 0, 'path': path}
+            state = {"parsed": (parsed := AttrDict()), "unresolved": 0, "path": path}
             for key, value in cfg.items():
                 value = await _parse_item(key, value, state, path, relative_path)
                 if key not in parsed:
@@ -214,7 +229,9 @@ class _ConfigLoader:
 
                 if not path:
                     # on 0 level we can try to resolve node once it's parsed
-                    parsed[key] =  await self.get_node(value, key, collections, relative_path)
+                    parsed[key] = await self.get_node(
+                        parsed[key], key, collections, relative_path
+                    )
 
             if not path:
                 return parsed
@@ -227,21 +244,26 @@ class _ConfigLoader:
             return None
 
         resolver = _Resolver()
-        parsed = await _parse_cfg(cfg, "", collections := defaultdict(AttrDict),
-                                  get_node_rel_path(cfg, os.path.dirname(cfg_path)))
+        parsed = await _parse_cfg(
+            cfg,
+            "",
+            collections := defaultdict(AttrDict),
+            get_node_rel_path(cfg, os.path.dirname(cfg_path)),
+        )
+        assert isinstance(parsed, AttrDict)
 
         unresolved = resolver.get_unresolved()
         while True:
             i = 0
             while i < len(unresolved_states):
                 state = unresolved_states[i]
-                if state['unresolved'] == 0:
-                    path = state['path'].split('.')
+                if state["unresolved"] == 0:
+                    path = state["path"].split(".")
                     parent = parsed
                     for item in path[:-1]:
                         parent = parent[item]
                     parent[path[-1]] = await self.get_node(
-                        state['parsed'], state['path'], collections
+                        state["parsed"], state["path"], collections
                     )
                     unresolved_states.pop(i)
                     continue
@@ -249,16 +271,16 @@ class _ConfigLoader:
             if unresolved == resolver.get_unresolved():
                 break
 
-        if (unresolved := resolver.get_unresolved()):
+        if unresolved := resolver.get_unresolved():
             raise ConfigError(f"Can't resolve config items: {', '.join(unresolved)}")
 
         return ConfigTree(parsed, collections)
 
 
 class ConfigTree(AttrDict):
-    def __init__(self, tree, collections: Optional[Dict[str, list]]):
+    def __init__(self, tree, collections: dict[str, AttrDict] | None = None):
         super().__init__(tree)
-        self._collections = collections
+        self._collections = collections if collections is not None else {}
 
     def get_collection(self, name: str):
         return self._collections.get(name)
@@ -273,8 +295,8 @@ class ConfigTree(AttrDict):
 config_loader = _ConfigLoader()
 
 
-def _entity_filter(cfg: Dict, path: str) -> bool:
-    return IMPORT_KEY in cfg
+def _entity_filter(cfg: Any, path: str) -> bool:
+    return isinstance(cfg, dict) and IMPORT_KEY in cfg
 
 
 def _get_entity_collection(entity: Any) -> str:
@@ -285,60 +307,80 @@ def _get_entity_collection(entity: Any) -> str:
 
 
 @config_loader.add_node(_entity_filter, _get_entity_collection)
-async def entity_factory(cfg: 'NodeConfig', path: str) -> NodeFactoryOutput:
+async def entity_factory(cfg: NodeConfig, path: str) -> NodeFactoryOutput:
     conf = dict(cfg)  # create a copy to modify it
     init_path = conf.pop(IMPORT_KEY)
-    init: InitFactory = load_path(init_path)
+    init = load_path(init_path)
 
     if isinstance(init, Application):
         # for application there's another protocol
         raise SkipNode
 
     if isclass(init) and issubclass(init, Chain):
-        entity = await load_chain(cfg, path, init)
-    if len([val for val in cfg.values()
-            if isinstance(val, Lazy) and not val.as_lazy]) > 0:
+        return await load_chain(conf, path, init)
+    if (
+        len([val for val in cfg.values() if isinstance(val, Lazy) and not val.as_lazy])
+        > 0
+    ):
         entity = await lazy_factory(cfg, path)
     else:
+        if not callable(init):
+            raise ConfigError(f"Config initializer '{init_path}' is not callable")
         entity = await as_future(init(**conf))
 
     return entity
 
 
 @overload
-async def load_chain(cfg: 'NodeConfig', path: str) -> Chain: ...
+async def load_chain(cfg: NodeConfig, path: str) -> Chain: ...
+@overload
+async def load_chain[R: Chain](cfg: NodeConfig, path: str, cls: type[R]) -> R: ...
 
-@config_loader.add_node(r'^chains\.[^.]+$', 'chains')  # default location for chains in config file
-async def load_chain[R](cfg: 'NodeConfig', path: str, cls: Optional[Type[R]] = None) -> R:
+
+@config_loader.add_node(
+    r"^chains\.[^.]+$", "chains"
+)  # default location for chains in config file
+async def load_chain(
+    cfg: NodeConfig, path: str, cls: type[Chain] | None = None
+) -> Chain:
     cls = cls or Chain
-    erc20 = cfg.pop('erc20', None)
-    chain = await cls.connect(name=path.rsplit('.', 1)[-1], **cfg)
-    if (erc20):
-        await asyncio.gather(*[chain.load_token(token, cache_as=key)
-                                for key, token in erc20.items()])
+    erc20 = cfg.pop("erc20", None)
+    chain = await cls.connect(name=path.rsplit(".", 1)[-1], **cfg)
+    if erc20:
+        await asyncio.gather(
+            *[chain.load_token(token, cache_as=key) for key, token in erc20.items()]
+        )
     return chain
 
 
-def _lazy_filter(cfg: Dict, path: str) -> bool:
+def _lazy_filter(cfg: Any, path: str) -> bool:
+    if not isinstance(cfg, dict):
+        return False
     return (
         cfg.get(AS_LAZY_KEY, False)
         or cfg.get(AS_FACTORY_KEY, False)
         or (
-            len([val for val in cfg.values()
-                 if isinstance(val, str) and LAZY_ITEM_RE.match(val)]) > 0
+            len(
+                [
+                    val
+                    for val in cfg.values()
+                    if isinstance(val, str) and LAZY_ITEM_RE.match(val)
+                ]
+            )
+            > 0
         )
     )
 
 
 @config_loader.add_node(_lazy_filter)
-async def lazy_factory[R](cfg: 'NodeConfig', path: str) -> R:
-    if (APPLICATIONS_CFG_RE.match(path) or ACTION_CONFIG_RE.match(path)):
+async def lazy_factory(cfg: NodeConfig, path: str) -> dict[str, Any] | Lazy[Any]:
+    if APPLICATIONS_CFG_RE.match(path) or ACTION_CONFIG_RE.match(path):
         # Application and Action can't be Lazy instance
         # but seems they have a field expected to be a Lazy
         output = dict(cfg)
         for key, val in cfg.items():
             if isinstance(val, str) and LAZY_ITEM_RE.match(val):
-                output[key] = LazyVar(val, ".".join([path, key]))
+                output[key] = LazyVar(val, f"{path}.{key}")
         return output
 
     return Lazy(cfg, path)
@@ -348,7 +390,7 @@ class Lazy[T]:
     _as_factory = False
     _as_lazy = False
 
-    def __init__(self, cfg: 'NodeConfig', path: str):
+    def __init__(self, cfg: NodeConfig, path: str):
         self._as_lazy = cfg.pop(AS_LAZY_KEY, False)
         self._as_factory = cfg.pop(AS_FACTORY_KEY, False)
 
@@ -364,10 +406,10 @@ class Lazy[T]:
         return self._as_factory
 
     @property
-    def type(self) -> Type[T]:
-        pass
+    def type(self) -> type[T] | None:
+        return None
 
-    def _resolve_path(self, path: str, vars: Dict[str, Any]):
+    def _resolve_path(self, path: str, vars: dict[str, Any]) -> Any:
         """
         Resolves a dot-separated path against the provided vars.
         Each segment can resolve as:
@@ -397,8 +439,8 @@ class Lazy[T]:
                 return empty
 
         current = vars
-        for segment in path.split('.'):
-            if segment == '':
+        for segment in path.split("."):
+            if segment == "":
                 continue
 
             for resolver in (get_item, get_attr, get_index):
@@ -412,21 +454,24 @@ class Lazy[T]:
     def _set_cached(self, value: T):
         if get_scope() == ContextScope.action:
             ctx = get_context()
-            ctx.setdefault('_lazy_cache', {})[self.path] = value
+            if ctx is None:
+                raise ConfigError("Lazy action cache requires an application context")
+            ctx.setdefault("_lazy_cache", {})[self.path] = value
         else:
             # when scope is an application, behave like a singleton
-            setattr(self, '_cached', value)
+            self._cached = value
 
     def _get_cached(self) -> T | object:
         if get_scope() == ContextScope.action:
-            ctx = get_context()
-            return ctx.get('_lazy_cache', {}).get(self.path) or empty
+            ctx = get_context() or {}
+            cache = ctx.get("_lazy_cache") or {}
+            return cache.get(self.path, empty)
         else:
-            return getattr(self, '_cached', empty)
+            return getattr(self, "_cached", empty)
 
     async def __call__(self, **kwargs) -> T:
         if not self.as_factory and (value := self._get_cached()) is not empty:
-            return value
+            return cast(T, value)
 
         kw = dict(self.cfg)
         kw.update(kwargs)
@@ -434,21 +479,21 @@ class Lazy[T]:
         ctx = get_context() or {}
 
         vars = {
-            'vars': ctx.get(CONTEXT_VARS_KEY) or {},
-            'context': ctx,
+            "vars": ctx.get(CONTEXT_VARS_KEY) or {},
+            "context": ctx,
         }
         for key, value in kw.items():
             if isinstance(value, str) and (match := LAZY_ITEM_RE.match(value)):
                 kw[key] = value = self._resolve_path(match.group(1), vars)
             if isinstance(value, Lazy) and not value.as_lazy:
                 kw[key] = await value()
-        value = await config_loader.get_node(kw, self.path)
+        value = cast(T, await config_loader.get_node(kw, self.path))
         if not self.as_factory:
             self._set_cached(value)
         return value
 
 
-class LazyVar(Lazy[T]):
+class LazyVar[T](Lazy[T]):
     def __init__(self, var: str, path: str):
         self._as_lazy = False
 
@@ -457,17 +502,20 @@ class LazyVar(Lazy[T]):
 
     async def __call__(self, **kwargs) -> T:
         if (value := self._get_cached()) is not empty:
-            return value
+            return cast(T, value)
 
         ctx = get_context() or {}
 
         vars = {
-            'vars': ctx.get(CONTEXT_VARS_KEY) or {},
-            'context': ctx,
+            "vars": ctx.get(CONTEXT_VARS_KEY) or {},
+            "context": ctx,
         }
         match = LAZY_ITEM_RE.match(self.var)
+        if match is None:
+            raise ConfigError(f"Invalid lazy variable: {self.var}")
         value = self._resolve_path(match.group(1), vars)
         if isinstance(value, Lazy) and not value.as_lazy:
             value = await value()
-        self._set_cached(value)
-        return value
+        resolved = cast(T, value)
+        self._set_cached(resolved)
+        return resolved

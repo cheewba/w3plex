@@ -1,22 +1,23 @@
-#!/usr/bin/env python
 import asyncio
 import os
 import sys
 from contextlib import contextmanager
-from inspect import iscoroutinefunction, isfunction, iscoroutine
-from typing import Any, Dict, Optional, Tuple, List
+from inspect import iscoroutine, iscoroutinefunction, isfunction
+from typing import Any
 
 from lazyplex import Application as _Application
 from lazyplex import create_context
 
+from .config import ConfigTree, Lazy, config_loader
 from .constants import (
-    CONTEXT_CHAINS_KEY, CONTEXT_VARS_KEY, VARS_COLLECTION,
-    APPLICATIONS_CFG_KEY, ACTIONS_CFG_KEY,
+    ACTIONS_CFG_KEY,
+    APPLICATIONS_CFG_KEY,
+    CONTEXT_CHAINS_KEY,
+    CONTEXT_VARS_KEY,
+    VARS_COLLECTION,
 )
-from .utils import load_path
-from .config import config_loader, ConfigTree, Lazy
 from .log import logger
-
+from .utils import load_path
 
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
@@ -25,7 +26,7 @@ LOGGING_DEFAULT_FORMAT = (
     "<cyan>{extra[action]}</cyan> | "
     "{extra[item_index]}. <cyan>{extra[item]}</cyan> - <level>{message}</level>"
 )
-LOGGING_DEFAULT_LEVEL = 'INFO'
+LOGGING_DEFAULT_LEVEL = "INFO"
 
 
 class _AppProxy:
@@ -35,7 +36,7 @@ class _AppProxy:
         self.__cfg = cfg
 
     @property
-    def tree(self) -> Dict:
+    def tree(self) -> dict:
         return dict(self.__cfg)
 
     def __getattr__(self, name: str) -> Any:
@@ -43,24 +44,25 @@ class _AppProxy:
 
     def __call__(self, *args, **kwargs):
         def filter_key(key):
-            return (
-                not key.startswith('__')
-                and key not in [APPLICATIONS_CFG_KEY, ACTIONS_CFG_KEY]
-            )
+            return not key.startswith("__") and key not in [
+                APPLICATIONS_CFG_KEY,
+                ACTIONS_CFG_KEY,
+            ]
 
         a, kw = self.__app.update_args(
             [],
             {key: value for key, value in self.__cfg.items() if filter_key(key)},
-            *args, **kwargs
+            *args,
+            **kwargs,
         )
         return self.__runner.run_application(self.__app, *a, **kw)
 
 
 class Runner:
-    cfg: Optional[Dict] = None
-    cfg_path: Optional[str] = None
+    cfg: dict | None = None
+    cfg_path: str | None = None
 
-    _tree: Optional[ConfigTree] = None
+    _tree: ConfigTree | None = None
 
     def __init__(self, loop=None) -> None:
         self.loop: asyncio.AbstractEventLoop = loop or asyncio.get_event_loop()
@@ -71,6 +73,8 @@ class Runner:
 
     @property
     def tree(self) -> ConfigTree:
+        if self._tree is None:
+            raise RuntimeError("Runner is not initialized")
         return self._tree
 
     async def resolve_value(self, value) -> Any:
@@ -78,31 +82,39 @@ class Runner:
             # Lazy should be resolved on action level,
             # when action context is defined
             return value
-        if (iscoroutinefunction(value)
-                or isfunction(value)):
+        if iscoroutinefunction(value) or isfunction(value):
             value = value()
         if iscoroutine(value):
             value = await value
         return value
 
-    async def resolve_args(self, app: _Application, *args, **kwargs) -> Tuple[Tuple, Dict]:
+    async def resolve_args(
+        self, app: _Application, *args, **kwargs
+    ) -> tuple[list[Any], dict[str, Any]]:
         a, kw = (
             [await self.resolve_value(arg) for arg in args],
-            {key: (await self.resolve_value(value)) for key, value in kwargs.items()}
+            {key: (await self.resolve_value(value)) for key, value in kwargs.items()},
         )
         action_name, _ = app.action_from_args(*a, **kw)
         if action_name:
-            app_tree = self._tree.get(APPLICATIONS_CFG_KEY).get(app.name).tree
+            app_tree = self.tree.get(APPLICATIONS_CFG_KEY, {})[app.name].tree
             actions = app_tree.get(ACTIONS_CFG_KEY, {})
-            action_cfg = dict(actions.get(action_name) or {})  # create a copy to modify it
-            kw.update({key: (await self.resolve_value(value)) for key, value in action_cfg.items()})
+            action_cfg = dict(
+                actions.get(action_name) or {}
+            )  # create a copy to modify it
+            kw.update(
+                {
+                    key: (await self.resolve_value(value))
+                    for key, value in action_cfg.items()
+                }
+            )
 
-        if ('action' in kw and len(a) > 0 and a[0] == action_name):
+        if "action" in kw and len(a) > 0 and a[0] == action_name:
             # NOTE: specific case
             # if there's `action` key in config, we have to replace name of the app
             # as it is in config, to name as set by that `action` key
             # lazyplex application doesn't know actions only defined in config file
-            a[0] = kw.pop('action')
+            a[0] = kw.pop("action")
 
         return a, kw
 
@@ -121,12 +133,12 @@ class Runner:
             args, kwargs = await self.resolve_args(app, *args, **kwargs)
             await app(*args, **kwargs)
 
-    async def init_application(self, cfg: Dict, path: str):
+    async def init_application(self, cfg: dict, path: str):
         def wrap_app(app):
             return _AppProxy(app, self, cfg)
 
-        app_name = path.rsplit('.', 1)[-1]
-        if (app_module := cfg.get('__init__')) is None:
+        app_name = path.rsplit(".", 1)[-1]
+        if (app_module := cfg.get("__init__")) is None:
             raise AttributeError(f"{app_name}: field `__init__` is required")
         apps = load_applications(app_module)
         if not len(apps):
@@ -139,27 +151,29 @@ class Runner:
 
         # TODO: if there're more that one runner, will be conflict
         config_loader.add_node(r"^logging$")(self.init_loggers)
-        config_loader.add_node(
-            r"^applications\.[^.]+$", 'applications'
-        )(self.init_application)
+        config_loader.add_node(r"^applications\.[^.]+$", "applications")(
+            self.init_application
+        )
 
         self.cfg = cfg
         self.cfg_path = cfg_path
         self._tree = await config_loader.parse(cfg, cfg_path)
 
     def _parse_log_handler(self, config) -> Any:
-        if (handler := config.pop('handler', None)) is not None:
+        if (handler := config.pop("handler", None)) is not None:
             if isinstance(handler, str):
                 return load_path(handler)
             return handler
-        elif (filename := config.pop('file', None)) is not None:
+        elif (filename := config.pop("file", None)) is not None:
+            if self.cfg_path is None:
+                raise RuntimeError("Runner config path is not set")
             return os.path.join(os.path.dirname(self.cfg_path), filename)
         return sys.stderr
 
-    def init_loggers(self, loggers: List[Dict], path: str):
+    def init_loggers(self, loggers: list[dict], path: str):
         for log in loggers:
             log = log.copy()
-            is_file = 'file' in log
+            is_file = "file" in log
             kwargs = {
                 "sink": self._parse_log_handler(log),
                 "format": LOGGING_DEFAULT_FORMAT,
@@ -182,16 +196,20 @@ class Runner:
         # add appropriate package to the PATH
         from w3plex.constants import CONTEXT_CONFIG_KEY, CONTEXT_EXTRAS_KEY
 
+        if self.cfg is None:
+            raise RuntimeError("Runner is not initialized")
         cfg = dict(self.cfg)
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
-        with create_context({
-            CONTEXT_CONFIG_KEY: dict(app_cfg),
-            CONTEXT_EXTRAS_KEY: dict(cfg),
-            CONTEXT_CHAINS_KEY: dict(
-                chains if (chains := self.tree.get_collection('chains')) else {}
-            ),
-            CONTEXT_VARS_KEY: self._tree.get_collection(VARS_COLLECTION)
-        }):
+        with create_context(
+            {
+                CONTEXT_CONFIG_KEY: dict(app_cfg),
+                CONTEXT_EXTRAS_KEY: dict(cfg),
+                CONTEXT_CHAINS_KEY: dict(
+                    chains if (chains := self.tree.get_collection("chains")) else {}
+                ),
+                CONTEXT_VARS_KEY: self.tree.get_collection(VARS_COLLECTION),
+            }
+        ):
             yield app
 
 
@@ -199,5 +217,4 @@ def load_applications(name: str):
     loaded = load_path(name)
     if isinstance(loaded, _Application):
         return [loaded]
-    return [attr for attr in vars(loaded).values()
-            if isinstance(attr, _Application)]
+    return [attr for attr in vars(loaded).values() if isinstance(attr, _Application)]

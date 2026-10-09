@@ -1,1 +1,1 @@
-from .debank import Debank
+from .debank import Debank as Debank

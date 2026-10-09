@@ -1,12 +1,44 @@
-.env
-__pycache__
-.vscode
-.mypy_cache
+# Python bytecode and native extensions
+__pycache__/
+*.py[cod]
+*.so
+
+# Packaging output
 build/
 dist/
 *.egg-info/
-wallets.txt
-.DS_store
+*.egg
+.eggs/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
 .pyproject.toml
 *.local
+
+# Test, coverage, and type-checking output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors and operating system files
+.idea/
+.vscode/
+.DS_Store
+.DS_store
+.roo/
+
+# Local wallet and encryption data
+wallets.txt
 .keystore.bin

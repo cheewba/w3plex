@@ -1,28 +1,27 @@
 import asyncio
 import itertools
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import AsyncExitStack
-from typing import Union, List
+from typing import Any
 
+from eth_typing import HexAddress, HexStr
 from rich import print
-from rich.rule import Rule
 from rich.columns import Columns
 from rich.console import Group
 from rich.padding import Padding
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
+from w3ext import Chain, Currency, CurrencyAmount, Token
 
-from w3ext import Currency, CurrencyAmount, Account, Token, Chain
 from w3plex import application, apply_plugins
-from w3plex.utils import (
-    get_chains, get_context, execute_on_complete
-)
-from w3plex.utils.filter import AmountFilter, ChainFilter, join_filters, TokenLookup
-from w3plex.utils.loader import FileLoader
-from w3plex.plugins import progress_bar
 from w3plex.modules.debank import Debank
+from w3plex.plugins import progress_bar
+from w3plex.utils import execute_on_complete, get_chains, get_context
+from w3plex.utils.filter import AmountFilter, ChainFilter, TokenLookup, join_filters
 
 empty = object()
 
@@ -30,30 +29,40 @@ empty = object()
 def is_erc_address(address: str) -> bool:
     # ethereum address length is 20 bytes = 2 + 40 chars
     address = address.strip()
-    return address.startswith('0x') and len(address) == 42
+    return address.startswith("0x") and len(address) == 42
 
 
-async def balance_of(account: str, chain: Chain,
-                     *tokens: List[Union[Currency, str]]) -> List[CurrencyAmount]:
-    tokens = [token if isinstance(token, Currency)
-              else getattr(chain, token, None) or await chain.load_token(token)
-              for token in tokens]
+async def balance_of(
+    account: str, chain: Chain, *tokens: Currency | str
+) -> list[CurrencyAmount]:
+    resolved_tokens = [
+        token
+        if isinstance(token, Currency)
+        else getattr(chain, token, None)
+        or await chain.load_token(HexAddress(HexStr(token)))
+        for token in tokens
+    ]
 
     return await asyncio.gather(
-        *[chain.get_balance(account, token if isinstance(token, Token) else None)
-          for token in tokens]
+        *[
+            chain.get_balance(
+                HexAddress(HexStr(account)), token if isinstance(token, Token) else None
+            )
+            for token in resolved_tokens
+        ]
     )
 
 
-def _format_output(accounts, result, _filter, show_total=True) -> str:
+def _format_output(accounts, result, _filter, show_total=True) -> Group:
     duplicates = set()
 
     def format_row(account, item, i):
         if isinstance(item, Exception):
             # since application expect exceptions returned in result
             # lets show them for appropriate accounts
-            return Padding(Text(f"{account}: {type(item).__name__}({item})", "red"),
-                           (0, 0, 0, 3)), 0
+            return Padding(
+                Text(f"{account}: {type(item).__name__}({item})", "red"), (0, 0, 0, 3)
+            ), 0
 
         grid = Table(
             expand=True,
@@ -64,8 +73,9 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
             collapse_padding=True,
             pad_edge=False,
             padding=0,
-            show_edge=False)
-        grid.add_column(vertical='middle', min_width=30)
+            show_edge=False,
+        )
+        grid.add_column(vertical="middle", min_width=30)
         grid.add_column(justify="left")
 
         is_duplicate = str(account) in duplicates
@@ -73,36 +83,48 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
         if not is_duplicate:
             for chain, balances in item.items():
                 # sort balances by USD value
-                balances = sorted(balances, reverse=True,
-                                key=lambda item: getattr(item, 'usd_price', 0))
+                balances = sorted(
+                    balances,
+                    reverse=True,
+                    key=lambda item: getattr(item, "usd_price", 0),
+                )
                 columns, chain_total, chain_total_shown = [], 0, 0
                 for balance in balances:
-                    chain_total += (usd_price := getattr(balance, 'usd_price', 0))
-                    if (_filter is None or _filter(amount=balance, chain=chain)):
+                    chain_total += (usd_price := getattr(balance, "usd_price", 0))
+                    if _filter is None or _filter(amount=balance, chain=chain):
                         columns.append(Panel.fit(str(balance)))
                         chain_total_shown += usd_price
 
                 if columns:
                     grid.add_row(
-                        format_total(chain_total, chain_total_shown, f"{str(chain)}\n")
-                        if chain_total_shown else str(chain),
+                        format_total(chain_total, chain_total_shown, f"{chain!s}\n")
+                        if chain_total_shown
+                        else str(chain),
                         Columns(columns, expand=False),
-                        end_section=True
+                        end_section=True,
                     )
                 account_total += chain_total
                 account_total_shown += chain_total_shown
             duplicates.add(str(account))
 
         title = Text()
-        title.append(f"{i}. {account}",
-                     style=Style(bold=True, color="green" if not is_duplicate else "red",
-                                 link=Debank.account_link(account)))
+        title.append(
+            f"{i}. {account}",
+            style=Style(
+                bold=True,
+                color="green" if not is_duplicate else "red",
+                link=Debank.account_link(account),
+            ),
+        )
         if account_total:
             title.append(format_total(account_total, account_total_shown, " ", "bold"))
-        return (Panel(grid, title=title, title_align='left') if grid.rows else
-                Padding(title, (0, 0, 0, 3))), account_total
+        return (
+            Panel(grid, title=title, title_align="left")
+            if grid.rows
+            else Padding(title, (0, 0, 0, 3))
+        ), account_total
 
-    def format_total(total, total_shown, title="", style=None):
+    def format_total(total, total_shown, title="", style=""):
         output = Text(title, style)
         if total_shown > 0:
             output.append(Text(f"${round(total_shown, 2)}", style))
@@ -122,9 +144,12 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
             Rule(style="cyan"),
             *[Padding(row, (0, 0, 1, 0)) for row in rows],
             Padding(
-                Rule(format_total(total, 0, "Total: ", "bold"),
-                     style="cyan", align='left'),
-                (0, 0, 1, 3)
+                Rule(
+                    format_total(total, 0, "Total: ", "bold"),
+                    style="cyan",
+                    align="left",
+                ),
+                (0, 0, 1, 3),
             ),
         )
 
@@ -133,7 +158,7 @@ def _format_output(accounts, result, _filter, show_total=True) -> str:
 
 @application(return_exceptions=False)
 async def balance(action, **config):
-    input = config.get('wallets')
+    input = config.get("wallets") or []
     if isinstance(input, str):
         # in case of input provided via cmd line,
         # check there's a string and wrap it to the iterable
@@ -142,13 +167,13 @@ async def balance(action, **config):
     ctx = get_context()
     # debank can provide filters for results,
     # so add to context the field to keep it between iterations
-    ctx['result_filter'] = None
+    ctx["result_filter"] = None
 
     async with apply_plugins(
         progress_bar(len(input)),
     ):
         result = yield input
-        print(_format_output(input, result, ctx['result_filter']))
+        print(_format_output(input, result, ctx["result_filter"]))
 
 
 # @balance.input
@@ -159,61 +184,82 @@ async def balance(action, **config):
 #     )
 
 
-@balance.action('onchain', default=True)
+@balance.action("onchain", default=True)
 async def onchain_balance(account, **config):
-    threads = threads if (threads := config.get('threads', empty)) is not empty else 1
+    threads = threads if (threads := config.get("threads", empty)) is not empty else 1
     semaphore = asyncio.Semaphore(threads)
-    async def balance(chain, tokens):
+
+    async def balance(chain, tokens) -> tuple[Chain, list[CurrencyAmount]]:
         async with semaphore:
-            attempts = config.get('attempts') or 1
+            attempts = config.get("attempts") or 1
             while attempts > 0:
                 try:
                     return chain, await balance_of(account, chain, *tokens)
-                except Exception as err:
+                except Exception:
                     attempts -= 1
                     if attempts == 0:
-                        raise err
+                        raise
                     await asyncio.sleep(1)
+            raise ValueError("Balance attempts must be positive")
 
     chains = get_chains()
     found_tokens = itertools.chain(
-        *await asyncio.gather(*[
-            TokenLookup(lookup)(chains.values())
-            for lookup in config.get('tokens') or []
-        ])
+        *await asyncio.gather(
+            *[
+                TokenLookup(lookup)(chains.values())
+                for lookup in config.get("tokens") or []
+            ]
+        )
     )
     merged = defaultdict(list)
     for token, chain in found_tokens:
         merged[chain].append(token)
 
-    return dict(await asyncio.gather(*[
-        balance(chain, tokens) for chain, tokens in merged.items()
-    ]))
+    return dict(
+        await asyncio.gather(
+            *[balance(chain, tokens) for chain, tokens in merged.items()]
+        )
+    )
 
 
-@balance.action('debank')
-async def debank_balance(account, *, debank: Debank = None, **config):
+@balance.action("debank")
+async def debank_balance(account, *, debank: Debank | None = None, **config):
     ctx = get_context()
-    if not ctx.get('result_filter'):
-        filters = [AmountFilter(flt) for flt in config.get('filter') or []]
+    if not ctx.get("result_filter"):
+        filters: list[Callable[..., Any]] = [
+            AmountFilter(flt) for flt in config.get("filter") or []
+        ]
         if not filters:
             # if no filters provided, return total only
-            filters.append(lambda **kwargs: not config.get('total', False))
-        ctx['result_filter'] = join_filters(*filters)
+            filters.append(lambda **kwargs: not config.get("total", False))
+        ctx["result_filter"] = join_filters(*filters)
 
-    chains_filter = [ChainFilter(flt) for flt in config.get('filter') or []]
-    chains_filter = join_filters(*chains_filter) if chains_filter else None
+    chain_filters = [ChainFilter(flt) for flt in config.get("filter") or []]
+    chains_filter = join_filters(*chain_filters) if chain_filters else None
     # wrap the final filter to lambda, to be able to accept non keyword argument
-    debank_filter = (lambda chain: chains_filter(chain=chain)) if chains_filter else None
+    debank_filter = (
+        (lambda chain: chains_filter(chain=chain)) if chains_filter else None
+    )
 
     async with AsyncExitStack() as stack:
         if debank is None:
-            proxy_service = config.get('proxy')
-            proxy = (await stack.enter_async_context(proxy_service.get_proxy())
-                    if proxy_service is not None else None)
-            debank = Debank(chains=list(get_chains().values()), proxy=proxy,
-                            threads=threads if (threads := config.get('threads', empty)) is not empty else 1)
+            proxy_service = config.get("proxy")
+            proxy = (
+                await stack.enter_async_context(proxy_service.get_proxy())
+                if proxy_service is not None
+                else None
+            )
+            debank = Debank(
+                chains=list(get_chains().values()),
+                proxy=proxy,
+                threads=threads
+                if (threads := config.get("threads", empty)) is not empty
+                else 1,
+            )
             execute_on_complete(debank.close)
 
-        return await debank.get_balance(account, chains_filter=debank_filter,
-                                        cached_only=config.get('cache_only') or False)
+        return await debank.get_balance(
+            account,
+            chains_filter=debank_filter,
+            cached_only=config.get("cache_only") or False,
+        )

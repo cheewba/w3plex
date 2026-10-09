@@ -1,12 +1,11 @@
 from importlib import import_module
-from typing import Optional, Dict, TypeVar, Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
+from lazyplex import CTX_APPLICATION, ContextScope, get_context
 from w3ext import Chain
-from lazyplex import get_context, CTX_APPLICATION, ContextScope
 
-from ..constants import (
-    CONTEXT_CHAINS_KEY, CONTEXT_CONFIG_KEY
-)
+from ..constants import CONTEXT_CHAINS_KEY, CONTEXT_CONFIG_KEY
+
 if TYPE_CHECKING:
     from ..core import Application
 
@@ -14,19 +13,18 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+def get_chains() -> dict[str, Chain]:
+    """Return all loaded Chains."""
+    return (get_context() or {}).get(CONTEXT_CHAINS_KEY) or {}
 
-def get_chains() -> Optional[Dict[str, Chain]]:
-    """ Return all loaded Chains. """
-    return get_context().get(CONTEXT_CHAINS_KEY)
 
-
-def get_config() -> Optional[Dict[str, Any]]:
-    """ Return current Application's config. """
+def get_config() -> dict[str, Any] | None:
+    """Return current Application's config."""
     return get_context().get(CONTEXT_CONFIG_KEY)
 
 
-def get_application() -> "Application":
-    """ Return current Application. """
+def get_application() -> "Application | None":
+    """Return current Application."""
     return get_context().get(CTX_APPLICATION)
 
 

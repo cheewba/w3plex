@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import argparse
 import asyncio
 import getpass
@@ -8,45 +7,49 @@ import os
 import signal
 import sys
 from functools import partial
-from pathlib import Path
 from operator import itemgetter
-from typing import Any, Dict, Tuple
+from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from rich import print
 from rich.text import Text
 from ruamel.yaml import (
     dump as yaml_dump,
+)
+from ruamel.yaml import (
     load as yaml_load,
 )
 
+from w3plex.config import Dumper, Include
+from w3plex.config import Loader as YamlLoader
 from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
+from w3plex.secure import decrypt_file, encrypt_file
 from w3plex.shell import Shell
-from w3plex.secure import encrypt_file, decrypt_file
-from w3plex.config import Dumper, Include, Loader as YamlLoader
-
 
 load_dotenv()
 
-CHAINS_CONFIG_NAME = 'chains.yaml'
-DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'w3plex.yaml')
+CHAINS_CONFIG_NAME = "chains.yaml"
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "w3plex.yaml")
 
 
 def subdict(d, ks):
     return dict(zip(ks, itemgetter(*ks)(d)))
 
 
-def _get_base_args_parse(*args, **kwargs) -> Tuple[argparse.ArgumentParser]:
+def _get_base_args_parse(*args, **kwargs) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(*args, **kwargs)
-    parser.add_argument('--config', '-c', help='run using w3plex config file', default='w3plex.yaml')
+    parser.add_argument(
+        "--config", "-c", help="run using w3plex config file", default="w3plex.yaml"
+    )
 
     return parser
 
 
 def process_args():
     cfg_parser = _get_base_args_parse(add_help=False)
-    cfg_parser.add_argument('kwargs', nargs="*")
+    cfg_parser.add_argument("kwargs", nargs="*")
     cfg_args, _ = cfg_parser.parse_known_args()
 
     cfg_path = os.path.abspath(cfg_args.config)
@@ -54,81 +57,127 @@ def process_args():
 
     parser = _get_base_args_parse()
     actions = parser.add_subparsers(title="w3plex actions", required=False)
-    init = actions.add_parser('init', description="Initialize a new config")
+    init = actions.add_parser("init", description="Initialize a new config")
     init.set_defaults(func=init_cmd)
 
     empty_pass = "<!empty>"
     if cfg is not None:
-        shell = actions.add_parser('shell', description="Start w3ext shell for the current config")
+        shell = actions.add_parser(
+            "shell", description="Start w3ext shell for the current config"
+        )
         shell.set_defaults(func=partial(run_shell_cmd, cfg=cfg, cfg_path=cfg_path))
 
-        encrypt_cmd = actions.add_parser('encrypt', description="Encrypt provided file")
-        encrypt_cmd.add_argument('src', nargs="+", help='Path to the file to encrypt')
-        encrypt_cmd.add_argument('--password', '-p', nargs="?", const=empty_pass, dest='password',
-                                 help='Password to encrypt the file with')
-        encrypt_cmd.add_argument('--output', '-o', dest='dst', help='Output file path')
-        encrypt_cmd.add_argument('--overwrite', '-w', dest='inplace', action='store_true',
-                                 help='Overwrite the original file')
-        encrypt_cmd.add_argument('--add', '-a', dest='add_to_keystore', action='store_true',
-                                 help='Add provided encryption key to the keystore')
+        encrypt_cmd = actions.add_parser("encrypt", description="Encrypt provided file")
+        encrypt_cmd.add_argument("src", nargs="+", help="Path to the file to encrypt")
+        encrypt_cmd.add_argument(
+            "--password",
+            "-p",
+            nargs="?",
+            const=empty_pass,
+            dest="password",
+            help="Password to encrypt the file with",
+        )
+        encrypt_cmd.add_argument("--output", "-o", dest="dst", help="Output file path")
+        encrypt_cmd.add_argument(
+            "--overwrite",
+            "-w",
+            dest="inplace",
+            action="store_true",
+            help="Overwrite the original file",
+        )
+        encrypt_cmd.add_argument(
+            "--add",
+            "-a",
+            dest="add_to_keystore",
+            action="store_true",
+            help="Add provided encryption key to the keystore",
+        )
+
         def _encrypt_file(args):
-            kwargs = subdict(vars(args), ["src", "dst", "password", "inplace",
-                                          "add_to_keystore"])
-            files = set(itertools.chain(
-                *(list(Path().glob(src)) for src in kwargs.pop('src'))
-            ))
-            if kwargs.get('password') == empty_pass:
-                kwargs['password'] = getpass.getpass("Enter password: ")
+            kwargs = subdict(
+                vars(args), ["src", "dst", "password", "inplace", "add_to_keystore"]
+            )
+            files = set(
+                itertools.chain(*(list(Path().glob(src)) for src in kwargs.pop("src")))
+            )
+            if kwargs.get("password") == empty_pass:
+                kwargs["password"] = getpass.getpass("Enter password: ")
             if len(files) > 1:
                 # in case more than one file, --output won't work
-                kwargs.pop('dst', None)
+                kwargs.pop("dst", None)
             for path in files:
                 try:
                     encrypt_file(path, **kwargs)
                     print(f"File {path} encrypted")
-                except Exception as e:
-                    print(f"Failed to encrypt file {path}: {e}",
-                          file=sys.stderr)
+                except Exception as e:  # noqa: BLE001 -- report each file failure
+                    print(f"Failed to encrypt file {path}: {e}", file=sys.stderr)
+
         encrypt_cmd.set_defaults(func=_encrypt_file)
 
-        decrypt_cmd = actions.add_parser('decrypt', description="Decrypt provided file")
-        decrypt_cmd.add_argument('src', nargs="+", help='Path to the file to encrypt')
-        decrypt_cmd.add_argument('--password', '-p', nargs="?", const=empty_pass, dest='password',
-                                 help='Password to decrypt the file with')
-        decrypt_cmd.add_argument('--output', '-o', dest='dst', help='Output file path')
-        decrypt_cmd.add_argument('--overwrite', '-w', dest='inplace', action='store_true',
-                                 help='Overwrite the original file')
-        decrypt_cmd.add_argument('--keystore', '-k', dest='use_keystore', action='store_true',
-                                 help='Use keystore for encryption')
+        decrypt_cmd = actions.add_parser("decrypt", description="Decrypt provided file")
+        decrypt_cmd.add_argument("src", nargs="+", help="Path to the file to encrypt")
+        decrypt_cmd.add_argument(
+            "--password",
+            "-p",
+            nargs="?",
+            const=empty_pass,
+            dest="password",
+            help="Password to decrypt the file with",
+        )
+        decrypt_cmd.add_argument("--output", "-o", dest="dst", help="Output file path")
+        decrypt_cmd.add_argument(
+            "--overwrite",
+            "-w",
+            dest="inplace",
+            action="store_true",
+            help="Overwrite the original file",
+        )
+        decrypt_cmd.add_argument(
+            "--keystore",
+            "-k",
+            dest="use_keystore",
+            action="store_true",
+            help="Use keystore for encryption",
+        )
+
         def _decrypt_file(args):
-            kwargs = subdict(vars(args), ["src", "dst", "password", "inplace",
-                                          "use_keystore"])
-            files = set(itertools.chain(
-                *(list(Path().glob(src)) for src in kwargs.pop('src'))
-            ))
-            if kwargs.get('password') == empty_pass:
-                kwargs['password'] = getpass.getpass("Enter password: ")
+            kwargs = subdict(
+                vars(args), ["src", "dst", "password", "inplace", "use_keystore"]
+            )
+            files = set(
+                itertools.chain(*(list(Path().glob(src)) for src in kwargs.pop("src")))
+            )
+            if kwargs.get("password") == empty_pass:
+                kwargs["password"] = getpass.getpass("Enter password: ")
             if len(files) > 1:
                 # in case more than one file, --output won't work
-                kwargs.pop('dst', None)
+                kwargs.pop("dst", None)
             for path in files:
                 try:
                     decrypt_file(path, **kwargs)
                     print(f"File {path} decrypted")
-                except Exception as e:
-                    print(f"Failed to decrypt file {path}: {e}",
-                          file=sys.stderr)
+                except Exception as e:  # noqa: BLE001 -- report each file failure
+                    print(f"Failed to decrypt file {path}: {e}", file=sys.stderr)
+
         decrypt_cmd.set_defaults(func=_decrypt_file)
 
-        for app_name in cfg.get(APPLICATIONS_CFG_KEY, {}).keys():
-            cmd = actions.add_parser(app_name, description=f"Run `{app_name}` application")
-            cmd.add_argument("args", nargs='*', default=[], help="Single value or Key-value pairs separated by a comma. (e.g., value1 key2=value2)")
-            cmd.set_defaults(func=partial(run_app_cmd, name=app_name, cfg=cfg,
-                                          cfg_path=cfg_path))
+        for app_name in cfg.get(APPLICATIONS_CFG_KEY, {}):
+            cmd = actions.add_parser(
+                app_name, description=f"Run `{app_name}` application"
+            )
+            cmd.add_argument(
+                "args",
+                nargs="*",
+                default=[],
+                help="Single value or Key-value pairs separated by a comma. (e.g., value1 key2=value2)",
+            )
+            cmd.set_defaults(
+                func=partial(run_app_cmd, name=app_name, cfg=cfg, cfg_path=cfg_path)
+            )
 
     args = parser.parse_args(" ".join(sys.argv[1:]).split(" "))
 
-    func = getattr(args, 'func', None)
+    func = getattr(args, "func", None)
     if func is not None:
         return func(args)
 
@@ -139,11 +188,13 @@ def run_shell_cmd(args, *, cfg, cfg_path):
 
 def run_app_cmd(args, *, name, cfg, cfg_path):
     app_args, app_kwargs = [], {}
-    for item in getattr(args, 'args', []):
+    for item in getattr(args, "args", []):
         parts = item.split("=", 1)
         if len(parts) == 1:
-            if (len(app_kwargs)):
-                raise AttributeError("A key=value argument cannot be followed by a positional argument.")
+            if len(app_kwargs):
+                raise AttributeError(
+                    "A key=value argument cannot be followed by a positional argument."
+                )
             app_args.append(parts[0])
         else:
             app_kwargs[parts[0]] = parts[1]
@@ -151,9 +202,10 @@ def run_app_cmd(args, *, name, cfg, cfg_path):
     runner = Runner()
 
     coro = None
+
     async def command():
         await runner.init(cfg, cfg_path)
-        app = runner.tree.get(APPLICATIONS_CFG_KEY).get(name)
+        app = runner.tree.get(APPLICATIONS_CFG_KEY, {}).get(name)
         if app is None:
             raise AttributeError(f"Application {name} not found")
 
@@ -181,19 +233,19 @@ def run_app_cmd(args, *, name, cfg, cfg_path):
 def init_cmd(args):
     cfg = load_config(DEFAULT_CONFIG_PATH)
 
-    chains = cfg.get('chains')
+    chains = cfg.get("chains")
     # TODO: somehow comment in yaml doesn't work
-    cfg['chains'] = Include(CHAINS_CONFIG_NAME, {'items': 'items: ["ethereum"]'})
+    cfg["chains"] = Include(CHAINS_CONFIG_NAME, {"items": 'items: ["ethereum"]'})
 
     chains_path = os.path.join(os.path.dirname(args.config), CHAINS_CONFIG_NAME)
     if not os.path.exists(chains_path):
-        with open(chains_path, 'w') as fw:
+        with open(chains_path, "w") as fw:
             yaml_dump(chains, fw, Dumper)
-    with open(args.config, 'w') as fw:
+    with open(args.config, "w") as fw:
         yaml_dump(cfg, fw, Dumper)
 
 
-def load_config(filename: str) -> Dict[str, Any]:
+def load_config(filename: str) -> dict[str, Any]:
     with open(filename) as fr:
         raw = fr.read()
 
@@ -210,11 +262,11 @@ def main():
 
     try:
         process_args()
-    except Exception as err:
-        sys.stderr(err)
+    except Exception as err:  # noqa: BLE001 -- CLI reports application failures
+        print(str(err), file=sys.stderr)
         sys.stderr.flush()
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
