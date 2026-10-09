@@ -165,7 +165,7 @@ class Logger:
         Convenience method for logging an ERROR with exception information.
         """
         kwargs.setdefault("exc_info", exc_info)
-        return self._safe_log("error", msg, *args, **kwargs)
+        return self._safe_log("exception", msg, *args, **kwargs)
 
     def critical(self, msg, *args, **kwargs):
         """
