@@ -280,7 +280,11 @@ class LocalSigning:
             kind = SigningKind.PERSONAL
             # The convention is explicit: text means UTF-8, bytes are literal.
             # Unlike the legacy API, JSON strings are not silently typed data.
-            raw = message.encode("utf-8") if isinstance(message, str) else message
+            raw = (
+                _private(lambda: message.encode("utf-8"))
+                if isinstance(message, str)
+                else message
+            )
             material = canonical(
                 {
                     "encoding": "utf8" if isinstance(message, str) else "bytes",
