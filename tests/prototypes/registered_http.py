@@ -150,6 +150,8 @@ async def probe(certificate, keyfile):
     http = transport.ProtectedHTTP(
         vault, session, authorizer=Authorizer(), allow_local_tests=True
     )
+    # A host proxy environment must not affect the protected connection.
+    os.environ["HTTPS_PROXY"] = "http://wrong-proxy.invalid:9"
     origin = f"https://127.0.0.1:{port}"
     for path in ("ok", "echo", "redirect", "wait", "stream", "split"):
         stream = path in {"stream", "split"}
