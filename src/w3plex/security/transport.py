@@ -358,13 +358,22 @@ class ProtectedHTTP:
             spec.secret,
         )
         status = self._session.status()
-        if await self._authorizer.authorize(intent) is not True:
-            raise PermissionDenied()
         public_url = URL(spec.origin)
         host, port = public_url.host, public_url.port
         if host is None or port is None:
             raise PermissionDenied()
-        addresses = await self._resolve(host, port)
+        task = asyncio.current_task()
+        if spec.secret is not None:
+            if status.state is not SessionState.UNLOCKED or task is None:
+                raise PermissionDenied()
+            self._session.track(status.generation, task)
+        try:
+            if await self._authorizer.authorize(intent) is not True:
+                raise PermissionDenied()
+            addresses = await self._resolve(host, port)
+        finally:
+            if spec.secret is not None and task is not None:
+                self._session.untrack(task, close=None)
         if self._closed:
             raise PermissionDenied()
         connector = _PinnedConnector(host, addresses)
