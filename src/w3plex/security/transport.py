@@ -46,7 +46,14 @@ class ResponseType(StrEnum):
     NULL = "null"
 
 
-type ResponseShape = ResponseType | Mapping[str, ResponseShape] | tuple[ResponseShape]
+type ResponseShape = (
+    ResponseType | Mapping[str, ResponseShape] | tuple[ResponseShape] | NullableResponse
+)
+
+
+@dataclass(frozen=True)
+class NullableResponse:
+    shape: ResponseShape
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,7 @@ class RequestSpec:
     auth_name: str = "Authorization"
     auth_prefix: str = "Bearer "
     stream_text_path: tuple[str | int, ...] | None = None
+    body_constants: tuple[tuple[str, str], ...] = ()
 
     def __repr__(self):
         return "RequestSpec(<private registration>)"
@@ -87,6 +95,8 @@ class RequestSpec:
 def _project(value, shape, depth=0):
     if depth > 32:
         raise SecurityError()
+    if isinstance(shape, NullableResponse):
+        return None if value is None else _project(value, shape.shape, depth + 1)
     if isinstance(shape, Mapping):
         if not isinstance(value, dict):
             raise SecurityError()
@@ -285,6 +295,16 @@ class ProtectedHTTP:
             in {"host", "content-length", "transfer-encoding", "connection"}
         ):
             raise PermissionDenied()
+        constants = dict(spec.body_constants)
+        if (
+            len(constants) != len(spec.body_constants)
+            or set(constants) & set(spec.body_fields)
+            or not all(
+                type(key) is str and type(value) is str
+                for key, value in constants.items()
+            )
+        ):
+            raise PermissionDenied()
         self._registry[name] = spec
 
     async def _resolve(self, host: str, port: int) -> frozenset[str]:
@@ -323,6 +343,9 @@ class ProtectedHTTP:
             or not set(payload) <= set(spec.body_fields)
             or len(canonical(payload)) > 1024 * 1024
         ):
+            raise PermissionDenied()
+        payload.update(spec.body_constants)
+        if len(canonical(payload)) > 1024 * 1024:
             raise PermissionDenied()
         if spec.auth is AuthPlacement.QUERY and spec.auth_name in params:
             raise PermissionDenied()
