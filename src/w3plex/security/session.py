@@ -52,7 +52,7 @@ class Session:
         self._mutex = threading.RLock()
         self._timer: asyncio.Task[None] | None = None
         self._cleanup: asyncio.Task[None] | None = None
-        self._tasks: set[asyncio.Task] = set()
+        self._tasks: dict[asyncio.Task, set[Callable[[], Awaitable[None]] | None]] = {}
         self._closers: set[Callable[[], Awaitable[None]]] = set()
         self._closing = False
 
@@ -214,17 +214,27 @@ class Session:
         """Track credential work so lock cancels tasks and closes its resources."""
         with self._mutex:
             self._check_generation(generation)
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            if task not in self._tasks:
+                self._tasks[task] = set()
+                task.add_done_callback(self._forget_task)
+            self._tasks[task].add(close)
             if close is not None:
                 self._closers.add(close)
+
+    def _forget_task(self, task: asyncio.Task) -> None:
+        with self._mutex:
+            self._tasks.pop(task, None)
 
     def untrack(
         self, task: asyncio.Task, *, close: Callable[[], Awaitable[None]]
     ) -> None:
         """Release tracking after a disposable credential resource has closed."""
         with self._mutex:
-            self._tasks.discard(task)
+            resources = self._tasks.get(task)
+            if resources is not None:
+                resources.discard(close)
+                if not resources:
+                    self._tasks.pop(task, None)
             self._closers.discard(close)
 
     async def lock(self):

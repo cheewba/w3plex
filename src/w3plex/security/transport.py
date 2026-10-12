@@ -233,7 +233,8 @@ class ProtectedHTTP:
         self._vault, self._session, self._authorizer = vault, session, authorizer
         self._allow_local_tests = allow_local_tests
         self._registry: dict[str, RequestSpec] = {}
-        self._clients: set[aiohttp.ClientSession] = set()
+        self._clients: dict[aiohttp.ClientSession, asyncio.Task | None] = {}
+        self._closed = False
 
     def __repr__(self):
         return "ProtectedHTTP(<private>)"
@@ -310,7 +311,7 @@ class ProtectedHTTP:
         body: Mapping[str, Any] | None,
     ):
         spec = self._registry.get(name)
-        if spec is None or not operation or self._authorizer is None:
+        if self._closed or spec is None or not operation or self._authorizer is None:
             raise PermissionDenied()
         params = dict(parameters or {})
         payload = json.loads(canonical(dict(body or {})))
@@ -339,6 +340,8 @@ class ProtectedHTTP:
         if host is None or port is None:
             raise PermissionDenied()
         addresses = await self._resolve(host, port)
+        if self._closed:
+            raise PermissionDenied()
         connector = _PinnedConnector(host, addresses)
         client = aiohttp.ClientSession(
             connector=connector,
@@ -347,7 +350,7 @@ class ProtectedHTTP:
             auto_decompress=False,
             timeout=aiohttp.ClientTimeout(total=120, connect=15),
         )
-        self._clients.add(client)
+        self._clients[client] = asyncio.current_task()
         try:
             # aiohttp 3.11 may retry an idempotent request internally. Every
             # protected attempt must return through our session/destination guard.
@@ -377,7 +380,15 @@ class ProtectedHTTP:
                         elif spec.auth is AuthPlacement.PATH:
                             path = path.replace("{credential}", quote(text, safe=""))
                 url = public_url.with_path(path, encoded=True).with_query(params)
-                return spec, client, url, headers, payload, _SecretFilter(secret)
+                return (
+                    spec,
+                    client,
+                    url,
+                    headers,
+                    payload,
+                    _SecretFilter(secret),
+                    status.generation if spec.secret is not None else None,
+                )
 
             if spec.secret is None:
                 return authenticate(None)
@@ -403,7 +414,7 @@ class ProtectedHTTP:
         try:
             await client.close()
         finally:
-            self._clients.discard(client)
+            self._clients.pop(client, None)
             task = asyncio.current_task()
             if task is not None:
                 self._session.untrack(task, close=client.close)
@@ -417,7 +428,7 @@ class ProtectedHTTP:
         parameters: Mapping[str, str] | None = None,
         body: Mapping[str, Any] | None = None,
     ):
-        spec, client, url, headers, payload, filter_ = await self._prepare(
+        spec, client, url, headers, payload, filter_, generation = await self._prepare(
             name, operation=operation, parameters=parameters, body=body
         )
         try:
@@ -444,6 +455,10 @@ class ProtectedHTTP:
                     chunks.append(chunk)
                 result = _project(json.loads(b"".join(chunks)), spec.response_shape)
                 filter_.check(result)
+                if self._closed:
+                    raise PermissionDenied()
+                if generation is not None:
+                    self._session.check(generation)
                 return result
         finally:
             headers.clear()
@@ -456,7 +471,15 @@ class ProtectedHTTP:
         error = False
         cancelled = False
         try:
-            spec, client, url, headers, payload, filter_ = await self._prepare(
+            (
+                spec,
+                client,
+                url,
+                headers,
+                payload,
+                filter_,
+                generation,
+            ) = await self._prepare(
                 name, operation=operation, parameters=None, body=body
             )
             try:
@@ -478,6 +501,10 @@ class ProtectedHTTP:
                         raise SecurityError()
                     size = 0
                     async for line in response.content:
+                        if self._closed:
+                            raise PermissionDenied()
+                        if generation is not None:
+                            self._session.check(generation)
                         size += len(line)
                         if size > 2 * 1024 * 1024:
                             raise SecurityError()
@@ -496,6 +523,10 @@ class ProtectedHTTP:
                         if text:
                             yield ModelChunk(text)
                     tail = filter_.finish()
+                    if self._closed:
+                        raise PermissionDenied()
+                    if generation is not None:
+                        self._session.check(generation)
                     if tail:
                         yield ModelChunk(tail)
             finally:
@@ -510,6 +541,22 @@ class ProtectedHTTP:
         if error:
             raise SecurityError()
 
+    @private_async
     async def close(self):
-        clients, self._clients = tuple(self._clients), set()
-        await asyncio.gather(*(client.close() for client in clients))
+        self._closed = True
+        clients, self._clients = self._clients, {}
+        current = asyncio.current_task()
+        tasks = {
+            task
+            for task in clients.values()
+            if task is not None and task is not current
+        }
+        for task in tasks:
+            task.cancel()
+        results = await asyncio.gather(
+            *(client.close() for client in clients), return_exceptions=True
+        )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if any(isinstance(result, BaseException) for result in results):
+            raise SecurityError()
