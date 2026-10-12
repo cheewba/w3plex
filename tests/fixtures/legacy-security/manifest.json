@@ -1,0 +1,18 @@
+{
+  "revision": "5acf2761f8881bb96934fd14ffa9d8aa12fc370c",
+  "secure_source_sha256": "1e068a4eff080ffd4362f5cb0452013e20f73311229653b84ea322f4a11fe837",
+  "python": "3.12.12",
+  "master_password": "PUBLIC-TEST-master-password",
+  "file_password": "PUBLIC-TEST-file-password",
+  "plaintext_hex": "53796e74686574696320666978747572653a20636166c3a90d0a6e6578740a",
+  "scrypt_r": 8,
+  "scrypt_p": 1,
+  "generation": "Unchanged secure._encrypt_bytes and _save_keystore. Fixed synthetic salt. Per-file _SCRYPT_N. hashlib.scrypt maxmem=128 MiB only removes OpenSSL memory cap; algorithm/output unchanged. Fernet supplies random IV and current timestamp.",
+  "sha256": {
+    "ks01-16384.bin": "f98b9787d6720192a7af70cde7600d309f1df4f21104881396ba79d7c288618a",
+    "ks01-32768.bin": "04f26fed116906cfd3717caae032cca934500fa9e61de28617c12a1cad9f16a4",
+    "ks01-4096.bin": "01bb98d9ee48fe03350208d373689a2bf9e44aa9e01b0036edff1383cb9bf152",
+    "ks01-8192.bin": "a736c0c6e9a8b3efc10c30adbe20b870ca4c59a1a7fedd0bf1bfd22846b12585",
+    "sample.enc": "2b55057eff55db77e4a7f1e9ab0ec142a7e59e0d2a5d8674ffaf2d10efcedb99"
+  }
+}
