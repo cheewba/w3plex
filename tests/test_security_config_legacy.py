@@ -1,5 +1,6 @@
 """Additive API checks; fixed ciphertexts originate from the old implementation."""
 
+import base64
 import builtins
 import hashlib
 import importlib
@@ -9,8 +10,13 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
-from w3plex.security.errors import InteractionRequired, InvalidStore
+from w3plex.security.errors import (
+    AuthenticationFailed,
+    InteractionRequired,
+    InvalidStore,
+)
 from w3plex.security.legacy import LegacyContext
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
@@ -165,3 +171,55 @@ def test_bytes_filename_and_explicit_absence_of_keystore(tmp_path, monkeypatch):
         assert stream.read() == bytes.fromhex(manifest["plaintext_hex"])
     assert context.path is None
     context.lock()
+
+
+def test_encrypted_interfaces_retry_cache_and_close_source_before_input(tmp_path):
+    password = "PUBLIC-TEST-file-interface"
+    plaintext = b"caf\xe9\r\nline\r"
+    key = hashlib.sha256(password.encode()).digest()
+    path = tmp_path / "input.enc"
+    path.write_bytes(b"ENC1" + Fernet(base64.urlsafe_b64encode(key)).encrypt(plaintext))
+    opened = []
+    answers = iter(["PUBLIC-TEST-wrong", "PUBLIC-TEST-wrong", password])
+    prompts = []
+
+    def opener(*args, **kwargs):
+        stream = open(*args, **kwargs)  # noqa: SIM115 -- ownership passes to the reader
+        opened.append(stream)
+        return stream
+
+    def answer(request):
+        assert all(stream.closed for stream in opened)
+        prompts.append(request.kind)
+        return next(answers)
+
+    context = LegacyContext(None, input_handler=answer, opener=opener)
+    with context.open(path, encoding="latin-1", newline="") as stream:
+        assert stream.name == str(path)
+        assert stream.read().encode("latin-1") == plaintext
+    with context.open(path, "rb") as stream:
+        assert stream.read() == plaintext
+    with context.open(path, encoding="ascii", errors="replace", newline="") as stream:
+        assert stream.read() == "caf\ufffd\r\nline\r"
+    with (
+        pytest.raises(UnicodeDecodeError),
+        context.open(path, encoding="utf-8") as stream,
+    ):
+        stream.read()
+    assert prompts == ["file", "file", "file"]
+    assert all(stream.closed for stream in opened)
+    context.lock()
+
+
+def test_three_wrong_file_passwords_return_no_stream(tmp_path):
+    calls = []
+
+    def answer(request):
+        calls.append(request.kind)
+        return "PUBLIC-TEST-wrong"
+
+    context = LegacyContext(None, input_handler=answer)
+    with pytest.raises(AuthenticationFailed):
+        context.open(FIXTURES / "sample.enc", "rb")
+    assert calls == ["file", "file", "file"]
+    assert context._keys is None
