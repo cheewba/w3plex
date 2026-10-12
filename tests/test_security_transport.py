@@ -14,7 +14,11 @@ import pytest
 from test_security_interaction_session import make_session, unlock
 
 from w3plex.security.contracts import SecretKind, SecretUse
-from w3plex.security.errors import PermissionDenied, SecurityError
+from w3plex.security.errors import (
+    PermissionDenied,
+    SecurityError,
+    UnsupportedProtection,
+)
 from w3plex.security.transport import (
     AuthPlacement,
     ProtectedHTTP,
@@ -120,10 +124,12 @@ class Client:
         self.connector = kwargs["connector"]
         self.closed = False
         self.seen = []
+        self._retry_connection = True
         self.instances.append(self)
 
     def request(self, method, url, **kwargs):
         assert kwargs["allow_redirects"] is False
+        assert self._retry_connection is False
         assert "proxy" not in kwargs and "ssl" not in kwargs
         self.seen.append((method, url, dict(kwargs["headers"]), kwargs["json"]))
         return self.response
@@ -386,5 +392,82 @@ def test_pinned_dns_allows_only_registered_host(monkeypatch):
         records = await connector._resolver.resolve("public.example", 443)
         assert [item["host"] for item in records] == ["8.8.8.8"]
         await connector.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_redirects_are_not_followed_or_retried(tmp_path, status, monkeypatch):
+    async def check():
+        session, reference, _policy, http = await setup(tmp_path, monkeypatch)
+        Client.response = Response({}, status=status)
+        Client.response.headers["Location"] = (
+            "https://attacker.example/" + MARKER.decode()
+        )
+        http.register(
+            "read",
+            RequestSpec("https://public.example", "/read", "GET", {}, secret=reference),
+        )
+        with pytest.raises(SecurityError):
+            await http.request("read", operation="redirect")
+        assert len(Client.instances) == 1 and len(Client.instances[0].seen) == 1
+        assert Client.instances[0].closed
+        await session.close()
+
+    asyncio.run(check())
+
+
+def test_environment_proxy_is_ignored_and_unknown_fallback_is_not_used(
+    tmp_path, monkeypatch
+):
+    async def check():
+        session, reference, policy, http = await setup(tmp_path, monkeypatch)
+        monkeypatch.setenv(
+            "HTTPS_PROXY", "http://PUBLIC-TEST-private@attacker.invalid:9"
+        )
+        Client.response = Response({"result": "public"})
+        http.register(
+            "read",
+            RequestSpec(
+                "https://public.example",
+                "/read",
+                "GET",
+                {"result": ResponseType.TEXT},
+                secret=reference,
+            ),
+        )
+        assert await http.request("read", operation="proxy-env") == {"result": "public"}
+        for name in ("fallback", "https://attacker.example", "wss://attacker.example"):
+            with pytest.raises(PermissionDenied):
+                await http.request(name, operation="fallback")
+        assert len(Client.instances) == 1 and len(policy.requests) == 1
+        await session.close()
+
+    asyncio.run(check())
+
+
+def test_unknown_retry_control_refuses_credentials_before_use(tmp_path, monkeypatch):
+    async def check():
+        session, reference, _policy, http = await setup(tmp_path, monkeypatch)
+        original = Client.__init__
+
+        def init(client, **kwargs):
+            original(client, **kwargs)
+            del client._retry_connection
+
+        monkeypatch.setattr(Client, "__init__", init)
+        monkeypatch.setattr(
+            session._vault,
+            "_use_secret",
+            lambda *a: pytest.fail("No credential injection"),
+        )
+        http.register(
+            "read",
+            RequestSpec("https://public.example", "/read", "GET", {}, secret=reference),
+        )
+        with pytest.raises(UnsupportedProtection):
+            await http.request("read", operation="unknown-retry-abi")
+        assert Client.instances[0].closed and Client.instances[0].seen == []
+        await session.close()
 
     asyncio.run(check())

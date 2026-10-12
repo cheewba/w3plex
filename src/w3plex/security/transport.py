@@ -25,7 +25,7 @@ from yarl import URL
 
 from .contracts import Public, SecretKind, SecretRef, SecretUse
 from .diagnostics import private_async
-from .errors import PermissionDenied, SecurityError
+from .errors import PermissionDenied, SecurityError, UnsupportedProtection
 from .session import Session, SessionState
 from .vault import Vault
 from .vault_format import canonical
@@ -349,6 +349,11 @@ class ProtectedHTTP:
         )
         self._clients.add(client)
         try:
+            # aiohttp 3.11 may retry an idempotent request internally. Every
+            # protected attempt must return through our session/destination guard.
+            if type(getattr(client, "_retry_connection", None)) is not bool:
+                raise UnsupportedProtection()
+            client._retry_connection = False
 
             def authenticate(secret: bytes | None):
                 headers = {}
