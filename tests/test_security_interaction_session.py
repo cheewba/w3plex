@@ -245,3 +245,35 @@ def test_denied_consumer_does_not_refresh_idle_deadline(tmp_path):
         await session.close()
 
     asyncio.run(check())
+
+
+def test_shutdown_cancels_private_input_even_when_vault_is_already_locked(tmp_path):
+    async def check():
+        session, private, _ = make_session(tmp_path)
+        operation = private.begin_operation()
+        dialog = asyncio.create_task(
+            private.ask(
+                operation,
+                "setup",
+                (InputField("password", FieldKind.SECRET, "Private setup"),),
+            )
+        )
+        request = await pending(private.control_port())
+        assert session.status().state is SessionState.LOCKED
+        await session.close()
+        assert dialog.done() or not private._operations
+        with pytest.raises(asyncio.CancelledError):
+            await dialog
+        with pytest.raises(PermissionDenied):
+            private.control_port().answer(
+                PrivateReply(
+                    operation,
+                    "setup",
+                    request.identifier,
+                    {"password": "PUBLIC-TEST-stale"},
+                )
+            )
+        assert not private.control_port().pending()
+        assert session._vault._key is None and session._vault._storage._fd is None
+
+    asyncio.run(check())
