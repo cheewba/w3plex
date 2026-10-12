@@ -39,6 +39,14 @@ async def probe(certificate, keyfile):
     class FakeVault:
         def __init__(self):
             self.buffer = None
+            self.listener = None
+
+        def _bind_lock(self, callback):
+            self.listener = callback
+
+        @property
+        def is_unlocked(self):
+            return self.buffer is not None
 
         def unlock(self, password):
             assert password == b"PUBLIC-TEST-password"
@@ -53,6 +61,8 @@ async def probe(certificate, keyfile):
             if self.buffer is not None:
                 self.buffer.close()
                 self.buffer = None
+            if self.listener is not None:
+                self.listener()
 
         def close(self):
             self.lock()

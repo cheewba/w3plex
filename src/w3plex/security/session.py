@@ -4,6 +4,7 @@ import asyncio
 import secrets
 import threading
 import time
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -52,12 +53,22 @@ class Session:
         self._mutex = threading.RLock()
         self._timer: asyncio.Task[None] | None = None
         self._cleanup: asyncio.Task[None] | None = None
-        self._tasks: dict[asyncio.Task, set[Callable[[], Awaitable[None]] | None]] = {}
+        self._tasks: dict[
+            asyncio.Task, Counter[Callable[[], Awaitable[None]] | None]
+        ] = {}
         self._closers: set[Callable[[], Awaitable[None]]] = set()
         self._closing = False
+        self._vault._bind_lock(self._vault_locked)
+        self._vault.lock()
 
     def __repr__(self):
         return "Session(<private>)"
+
+    def _vault_locked(self) -> None:
+        # Session-owned vault operations run on the host event loop.
+        with self._mutex:
+            if self._state is SessionState.UNLOCKED:
+                self._start_lock()
 
     def _start_lock(self):
         """Called on the host event loop while holding the short mutex."""
@@ -95,19 +106,26 @@ class Session:
         async def close_one(close):
             await close()
 
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
         results = await asyncio.gather(
             *(close_one(close) for close in closers), return_exceptions=True
         )
+        # Closing a connection can be needed for a cancelled worker to finish.
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         with self._mutex:
+            try:
+                self._vault.lock()
+            except Exception:  # noqa: BLE001 -- finish invalidating the session after cleanup failure
+                failed = True
             self._state = SessionState.CLOSED if self._closing else SessionState.LOCKED
         if failed or any(isinstance(result, BaseException) for result in results):
             raise SecurityError()
 
     def status(self) -> SessionStatus:
         with self._mutex:
-            if self._state is SessionState.UNLOCKED and self._clock() >= self._deadline:
+            if self._state is SessionState.UNLOCKED and (
+                self._clock() >= self._deadline or not self._vault.is_unlocked
+            ):
                 self._start_lock()
             return SessionStatus(self._state, self._generation)
 
@@ -174,7 +192,9 @@ class Session:
             await asyncio.sleep(delay)
 
     def _check_generation(self, generation: str):
-        if self._state is SessionState.UNLOCKED and self._clock() >= self._deadline:
+        if self._state is SessionState.UNLOCKED and (
+            self._clock() >= self._deadline or not self._vault.is_unlocked
+        ):
             self._start_lock()
         if (
             self._state is not SessionState.UNLOCKED
@@ -193,8 +213,16 @@ class Session:
             self._check_generation(generation)
             if not operation:
                 raise PermissionDenied()
-            result = _private(consumer)
-            if operation not in self._used_operations:
+            try:
+                result = _private(consumer)
+            finally:
+                # Password changes and failed writes can lock Vault during use.
+                if not self._vault.is_unlocked:
+                    self._start_lock()
+            if (
+                self._state is SessionState.UNLOCKED
+                and operation not in self._used_operations
+            ):
                 self._used_operations.add(operation)
                 self._deadline = self._clock() + self._idle_seconds
             return result
@@ -215,9 +243,9 @@ class Session:
         with self._mutex:
             self._check_generation(generation)
             if task not in self._tasks:
-                self._tasks[task] = set()
+                self._tasks[task] = Counter()
                 task.add_done_callback(self._forget_task)
-            self._tasks[task].add(close)
+            self._tasks[task][close] += 1
             if close is not None:
                 self._closers.add(close)
 
@@ -226,16 +254,22 @@ class Session:
             self._tasks.pop(task, None)
 
     def untrack(
-        self, task: asyncio.Task, *, close: Callable[[], Awaitable[None]]
+        self, task: asyncio.Task, *, close: Callable[[], Awaitable[None]] | None
     ) -> None:
         """Release tracking after a disposable credential resource has closed."""
         with self._mutex:
             resources = self._tasks.get(task)
             if resources is not None:
-                resources.discard(close)
+                if resources[close] > 1:
+                    resources[close] -= 1
+                else:
+                    resources.pop(close, None)
                 if not resources:
                     self._tasks.pop(task, None)
-            self._closers.discard(close)
+            if close is not None and not any(
+                close in resource for resource in self._tasks.values()
+            ):
+                self._closers.discard(close)
 
     async def lock(self):
         with self._mutex:
@@ -261,5 +295,6 @@ class Session:
                 self._cancel_input()
             finally:
                 with self._mutex:
+                    self._vault._bind_lock(None)
                     self._vault.close()
                     self._state = SessionState.CLOSED

@@ -8,6 +8,7 @@ import base64
 import json
 import secrets
 import threading
+import weakref
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -161,9 +162,33 @@ class Vault:
         self._envelope: Envelope | None = None
         self._identity: FileIdentity | None = None
         self._closed = False
+        self._lock_listener: weakref.WeakMethod | None = None
 
     def __repr__(self):
         return "Vault(<private>)"
+
+    def _bind_lock(self, callback: Callable[[], None] | None) -> None:
+        """One host session owns lock notification; standalone vaults need none."""
+        with self._mutex:
+            if (
+                callback is not None
+                and self._lock_listener is not None
+                and self._lock_listener() is not None
+            ):
+                raise PermissionDenied()
+            self._lock_listener = (
+                None if callback is None else weakref.WeakMethod(callback)
+            )
+
+    @property
+    def is_unlocked(self) -> bool:
+        """Host-only state check; never returns unlock material."""
+        with self._mutex:
+            return (
+                not self._closed
+                and self._key is not None
+                and self._envelope is not None
+            )
 
     def _check(self):
         self._protection.check()
@@ -217,8 +242,15 @@ class Vault:
         with self._mutex:
             buffer, self._key = self._key, None
             self._envelope = self._identity = None
-            if buffer is not None:
-                buffer.close()
+            try:
+                if buffer is not None:
+                    buffer.close()
+            finally:
+                listener = (
+                    None if self._lock_listener is None else self._lock_listener()
+                )
+                if listener is not None:
+                    listener()
 
     def _records(self) -> list[dict[str, Any]]:
         envelope, key = self._unlocked()

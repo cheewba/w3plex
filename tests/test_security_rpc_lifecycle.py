@@ -7,8 +7,6 @@ from test_security_rpc import setup_rpc
 from test_security_transport import Client
 from web3.types import RPCEndpoint
 
-from w3plex.security.errors import PermissionDenied
-
 
 @pytest.mark.parametrize("action", ["disconnect", "lock"])
 def test_queued_rpc_is_cancelled_before_authentication(tmp_path, monkeypatch, action):
@@ -36,7 +34,7 @@ def test_queued_rpc_is_cancelled_before_authentication(tmp_path, monkeypatch, ac
         else:
             await session.lock()
             release.set()
-            with pytest.raises(PermissionDenied):
+            with pytest.raises(asyncio.CancelledError):
                 await task
         assert not requests and not http._clients and not provider._requests
         assert all(client.closed and not client.seen for client in Client.instances)
