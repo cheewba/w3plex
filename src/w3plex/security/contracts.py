@@ -56,5 +56,13 @@ class SafeStatus:
     code: Annotated[str, Public]
 
 
+@dataclass(frozen=True)
+class WalletInfo:
+    reference: Annotated[SecretRef, Public]
+    allowed_operations: Annotated[tuple[SecretUse, ...], Public]
+
+
 class PublicWallets(Protocol):
-    def wallets(self) -> Annotated[tuple[SecretRef, ...], Public, Read]: ...
+    def wallets(
+        self, *, operation: str
+    ) -> Annotated[tuple[WalletInfo, ...], Public, Read]: ...

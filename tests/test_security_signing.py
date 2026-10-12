@@ -336,3 +336,80 @@ def test_async_approval_waits_after_defaults_and_before_key_use(tmp_path, monkey
         await session.close()
 
     asyncio.run(check())
+
+
+def test_wallet_metadata_contains_only_reference_and_allowed_operations(tmp_path):
+    async def check():
+        session, wallet, _provider, chain, _authorizer, _journal, signer = await setup(
+            tmp_path
+        )
+        limited = session._vault.add(
+            SecretKind.WALLET, bytes.fromhex("02" * 32), uses=[SecretUse.MESSAGE]
+        )
+        session._vault.add(SecretKind.API, b"PUBLIC-TEST-API", uses=[SecretUse.HTTP])
+        metadata = signer.wallets(operation="wallet-metadata")
+        assert tuple(item.reference for item in metadata) == (wallet, limited)
+        assert set(metadata[0].allowed_operations) == {
+            SecretUse.TRANSACTION,
+            SecretUse.MESSAGE,
+            SecretUse.TYPED_MESSAGE,
+        }
+        assert metadata[1].allowed_operations == (SecretUse.MESSAGE,)
+        for item in metadata:
+            assert set(vars(item)) == {"reference", "allowed_operations"}
+            assert not hasattr(item, "key") and not hasattr(item, "_acc")
+        assert "PUBLIC-TEST-API" not in repr(metadata)
+        assert "01" * 32 not in repr(metadata) and "02" * 32 not in repr(metadata)
+        await session.lock()
+        with pytest.raises(PermissionDenied):
+            signer.wallets(operation="locked-metadata")
+        await session.close()
+        await chain.close()
+
+    asyncio.run(check())
+
+
+def test_wallet_operation_limits_and_forged_metadata_prevent_secret_use(tmp_path):
+    async def check():
+        session, wallet, provider, chain, _authorizer, _journal, signer = await setup(
+            tmp_path
+        )
+        limited = session._vault.add(
+            SecretKind.WALLET, bytes.fromhex("02" * 32), uses=[SecretUse.MESSAGE]
+        )
+        intent = await signer.prepare_transaction(
+            chain,
+            limited,
+            {"gas": 21000, "to": "0x" + "22" * 20},
+            operation="not-allowed",
+        )
+        with pytest.raises(PermissionDenied):
+            signer.sign_transaction(intent, await signer.authorize(intent))
+        forged = replace(wallet, address=limited.address)
+        intent = signer.prepare_message(forged, "test", operation="forged-reference")
+        with pytest.raises(PermissionDenied):
+            signer.sign_message(intent, await signer.authorize(intent))
+        assert provider.raw == []
+        await session.close()
+        await chain.close()
+
+    asyncio.run(check())
+
+
+def test_wallet_metadata_polling_does_not_extend_unlock(tmp_path):
+    async def check():
+        clock = [100.0]
+        session, private, _ = make_session(tmp_path, clock=lambda: clock[0])
+        await unlock(session, private)
+        session._vault.add(
+            SecretKind.WALLET, bytes.fromhex("01" * 32), uses=[SecretUse.MESSAGE]
+        )
+        signer = LocalSigning(session._vault, session, authorizer=None, journal=None)
+        clock[0] = 105.0
+        assert len(signer.wallets(operation="poll-one")) == 1
+        clock[0] = 110.0
+        with pytest.raises(PermissionDenied):
+            signer.wallets(operation="poll-two")
+        await session.close()
+
+    asyncio.run(check())

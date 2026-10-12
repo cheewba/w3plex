@@ -22,7 +22,15 @@ from web3._utils.async_transactions import async_fill_transaction_defaults
 from web3.middleware.signing import format_transaction
 from web3.types import TxParams
 
-from .contracts import Public, Secret, SecretKind, SecretRef, SecretUse
+from .contracts import (
+    Public,
+    Read,
+    Secret,
+    SecretKind,
+    SecretRef,
+    SecretUse,
+    WalletInfo,
+)
 from .diagnostics import private_async
 from .errors import PermissionDenied, SecurityError
 from .session import Session, SessionState
@@ -169,6 +177,16 @@ class LocalSigning:
 
     def __repr__(self):
         return "LocalSigning(<private>)"
+
+    def wallets(
+        self, *, operation: str
+    ) -> Annotated[tuple[WalletInfo, ...], Public, Read]:
+        if not operation:
+            raise PermissionDenied()
+        status = self._session.status()
+        self._session.check(status.generation)
+        # Public metadata polling is not qualifying secret-use activity.
+        return self._vault.wallets()
 
     def _current(self, intent: SigningIntent):
         status = self._session.status()
