@@ -10,6 +10,7 @@ from enum import StrEnum
 from typing import Annotated
 
 from .contracts import Public
+from .diagnostics import private_async
 from .errors import PermissionDenied, SecurityError
 from .interaction import FieldKind, InputField, PrivateInput
 from .vault import Vault, _private
@@ -239,12 +240,16 @@ class Session:
     async def resume(self):
         await self.lock()
 
+    @private_async
     async def close(self):
         with self._mutex:
             self._closing = True
         try:
             await self.lock()
         finally:
-            with self._mutex:
-                self._vault.close()
-                self._state = SessionState.CLOSED
+            try:
+                self._cancel_input()
+            finally:
+                with self._mutex:
+                    self._vault.close()
+                    self._state = SessionState.CLOSED
