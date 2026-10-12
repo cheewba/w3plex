@@ -134,10 +134,11 @@ class PrivateBroker:
 
     def finish_operation(self, operation: str):
         self._operations.discard(operation)
-        self._assistance.discard(operation)
         for pending in tuple(self._pending.values()):
-            if pending.request.operation == operation and not pending.future.done():
-                pending.future.cancel()
+            if pending.request.operation == operation:
+                self._assistance.discard(pending.request.identifier)
+                if not pending.future.done():
+                    pending.future.cancel()
 
     def cancel_all(self):
         for operation in tuple(self._operations):
@@ -201,6 +202,7 @@ class PrivateBroker:
                 return reply
             finally:
                 self._pending.pop(request.identifier, None)
+                self._assistance.discard(request.identifier)
                 await self._resume()
 
     def _answer(self, token: object, reply: PrivateReply):
@@ -262,10 +264,19 @@ class ControlPort:
     def allow_assistance(self, operation: str, *, allowed: bool):
         if type(allowed) is not bool or operation not in self._broker._operations:
             raise PermissionDenied()
+        current = {
+            pending.request.identifier
+            for pending in self._broker._pending.values()
+            if pending.request.operation == operation
+            and not pending.future.done()
+            and self._broker._clock() < pending.request.expires_at
+        }
         if allowed:
-            self._broker._assistance.add(operation)
+            if not current:
+                raise PermissionDenied()
+            self._broker._assistance.update(current)
         else:
-            self._broker._assistance.discard(operation)
+            self._broker._assistance.difference_update(current)
 
     def cancel(self, operation: str):
         self._broker.finish_operation(operation)
@@ -276,12 +287,11 @@ class AgentPort:
         self._broker = broker
 
     def assistance(self, operation: str) -> tuple[AssistanceField, ...]:
-        if operation not in self._broker._assistance:
-            return ()
         return tuple(
             AssistanceField(field.name, field.kind, field.prompt, field.choices)
             for pending in self._broker._pending.values()
             if pending.request.operation == operation
+            and pending.request.identifier in self._broker._assistance
             and not pending.future.done()
             and self._broker._clock() < pending.request.expires_at
             for field in pending.request.fields

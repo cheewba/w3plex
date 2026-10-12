@@ -267,3 +267,40 @@ def test_cancel_during_pause_cannot_publish_new_request():
         assert resumed == [True]
 
     asyncio.run(check())
+
+
+def test_assistance_consent_covers_only_current_selected_step():
+    async def check():
+        private, _ = broker()
+        control, agent = private.control_port(), private.agent_port()
+        operation = private.begin_operation()
+        with pytest.raises(PermissionDenied):
+            control.allow_assistance(operation, allowed=True)
+        field = InputField(
+            "choice",
+            FieldKind.CHOICE,
+            "Public choice",
+            choices=("one", "two"),
+            public=True,
+        )
+        first = asyncio.create_task(private.ask(operation, "first", (field,)))
+        request = await pending(control)
+        control.allow_assistance(operation, allowed=True)
+        assert [item.name for item in agent.assistance(operation)] == ["choice"]
+        control.answer(
+            PrivateReply(operation, "first", request.identifier, {"choice": "one"})
+        )
+        await first
+        second = asyncio.create_task(private.ask(operation, "second", (field,)))
+        await pending(control)
+        assert agent.assistance(operation) == ()
+        control.allow_assistance(operation, allowed=True)
+        assert len(agent.assistance(operation)) == 1
+        control.allow_assistance(operation, allowed=False)
+        assert agent.assistance(operation) == ()
+        control.cancel(operation)
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        assert agent.assistance(operation) == ()
+
+    asyncio.run(check())
