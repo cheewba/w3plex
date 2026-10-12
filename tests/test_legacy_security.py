@@ -9,11 +9,42 @@ import hashlib
 import importlib
 import io
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
+
+
+def test_legacy_import_preserves_custom_plain_opener(tmp_path):
+    script = """import builtins, io
+calls = []
+def custom(*args, **kwargs):
+    calls.append(args[0])
+    return io.open(*args, **kwargs)
+builtins.open = custom
+from w3plex import secure
+assert secure._orig_open is custom
+assert builtins.open is secure._secure_open
+calls.clear()
+with builtins.open("plain.txt", "w") as stream:
+    stream.write("plain")
+with builtins.open("plain.txt", "r") as stream:
+    assert stream.read() == "plain"
+assert calls == ["plain.txt", "plain.txt"]
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.fixture
@@ -181,3 +212,51 @@ def test_encryption_helpers_return_types_destinations_and_errors(
     )
     with pytest.raises(ValueError, match="base64"):
         legacy.decrypt_data("non-ascii: \u00e9")
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_encoding_errors_newlines_binary_and_name(
+    legacy, monkeypatch, tmp_path, encrypted
+):
+    raw = b"caf\xe9\r\nnext\rfinal\n"
+    path = tmp_path / "sample"
+    path.write_bytes(legacy._encrypt_bytes(raw, "file") if encrypted else raw)
+    monkeypatch.setattr(legacy, "_all_keys", lambda: [legacy._derive_file_key("file")])
+    with legacy._secure_open(path, encoding="latin-1", newline="") as stream:
+        assert stream.read() == "caf\u00e9\r\nnext\rfinal\n"
+        assert stream.name == str(path)
+    with legacy._secure_open(path, encoding="latin-1") as stream:
+        assert stream.read() == "caf\u00e9\nnext\nfinal\n"
+    with legacy._secure_open(path, encoding="ascii", errors="replace") as stream:
+        assert "caf\ufffd" in stream.read()
+    with (
+        legacy._secure_open(path, encoding="ascii", errors="strict") as stream,
+        pytest.raises(UnicodeDecodeError),
+    ):
+        stream.read()
+    with legacy._secure_open(path, "rb") as stream:
+        assert stream.read() == raw
+
+
+def test_descriptor_nonseekable_and_write_modes_are_untouched(legacy, tmp_path):
+    path = tmp_path / "sample"
+    raw = legacy._encrypt_bytes(b"hello", "file")
+    path.write_bytes(raw)
+    fd = os.open(path, os.O_RDONLY)
+    with legacy._secure_open(fd, "rb", closefd=False) as stream:
+        assert stream.read() == raw
+    os.close(fd)
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, raw)
+    os.close(write_fd)
+    with legacy._secure_open(read_fd, "rb") as stream:
+        assert not stream.seekable()
+        assert stream.read() == raw
+    with legacy._secure_open(path, "r+b") as stream:
+        assert stream.read() == raw
+    with legacy._secure_open(path, "ab") as stream:
+        stream.write(b"tail")
+    assert path.read_bytes() == raw + b"tail"
+    with legacy._secure_open(path, "wb") as stream:
+        stream.write(b"replacement")
+    assert path.read_bytes() == b"replacement"
