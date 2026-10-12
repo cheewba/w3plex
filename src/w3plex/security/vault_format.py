@@ -191,13 +191,29 @@ def _derive(password: bytes, header: dict[str, Any]) -> bytes:
 
 def _decrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
     plaintext = None
+    unsupported = False
     try:
         plaintext = AESGCM(key).decrypt(nonce, data, aad)
     except InvalidTag:
         pass
+    except UnsupportedAlgorithm:
+        unsupported = True
+    if unsupported:
+        raise UnsupportedProtection()
     if plaintext is None:
         raise AuthenticationFailed()
     return plaintext
+
+
+def _encrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
+    ciphertext = None
+    try:
+        ciphertext = AESGCM(key).encrypt(nonce, data, aad)
+    except UnsupportedAlgorithm:
+        pass
+    if ciphertext is None:
+        raise UnsupportedProtection()
+    return ciphertext
 
 
 def unwrap(envelope: Envelope, password: bytes) -> bytes:
@@ -258,8 +274,8 @@ def seal(
     }
     aad = canonical(header)
     wrapping_key = _derive(password, header)
-    wrapped = AESGCM(wrapping_key).encrypt(wrapping_nonce, key, _wrapping_aad(header))
-    payload = AESGCM(key).encrypt(data_nonce, plaintext, aad + b"\0records\0" + wrapped)
+    wrapped = _encrypt(wrapping_key, wrapping_nonce, key, _wrapping_aad(header))
+    payload = _encrypt(key, data_nonce, plaintext, aad + b"\0records\0" + wrapped)
     envelope = Envelope(header, wrapped, payload)
     # Apply the same bounded format validation to newly written files.
     parse(envelope.serialize())
@@ -278,8 +294,11 @@ def update_payload(envelope: Envelope, data_key: bytes, plaintext: bytes) -> Env
     }:
         raise UnsupportedProtection()
     header["data_nonce"] = _encode(nonce)
-    encrypted = AESGCM(data_key).encrypt(
-        nonce, plaintext, canonical(header) + b"\0records\0" + envelope.wrapped_key
+    encrypted = _encrypt(
+        data_key,
+        nonce,
+        plaintext,
+        canonical(header) + b"\0records\0" + envelope.wrapped_key,
     )
     result = Envelope(header, envelope.wrapped_key, encrypted)
     parse(result.serialize())
