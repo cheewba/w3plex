@@ -178,6 +178,11 @@ class LocalSigning:
     def __repr__(self):
         return "LocalSigning(<private>)"
 
+    async def _lock_resources(self) -> None:
+        with self._mutex:
+            self._permits.clear()
+            self._signed.clear()
+
     def wallets(
         self, *, operation: str
     ) -> Annotated[tuple[WalletInfo, ...], Public, Read]:
@@ -288,10 +293,15 @@ class LocalSigning:
             raise PermissionDenied()
         return SigningIntent(operation, status.generation, wallet, kind, material)
 
+    @private_async
     async def authorize(self, intent: SigningIntent) -> Permit:
         self._current(intent)
         if self._authorizer is None:
             raise PermissionDenied()
+        task = asyncio.current_task()
+        if task is None:
+            raise PermissionDenied()
+        self._session.track(intent.generation, task, close=self._lock_resources)
         approved = False
         try:
             approved = await self._authorizer.authorize(intent)
