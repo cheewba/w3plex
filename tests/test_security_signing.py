@@ -293,3 +293,46 @@ def test_unknown_send_result_keeps_exact_hash_and_safe_error(tmp_path):
         await session.close()
 
     asyncio.run(check())
+
+
+def test_async_approval_waits_after_defaults_and_before_key_use(tmp_path, monkeypatch):
+    async def check():
+        session, wallet, provider, chain, authorizer, _journal, signer = await setup(
+            tmp_path, dynamic=True
+        )
+        reached, release = asyncio.Event(), asyncio.Event()
+        uses = []
+        original = session._vault._use_secret
+
+        def use_secret(*args):
+            uses.append(True)
+            assert release.is_set()
+            return original(*args)
+
+        async def authorize(request):
+            fields = json.loads(request.payload)
+            assert fields["nonce"] == 3 and fields["chainId"] == 10
+            assert fields["maxFeePerGas"] == 125
+            reached.set()
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(session._vault, "_use_secret", use_secret)
+        monkeypatch.setattr(authorizer, "authorize", authorize)
+        task = asyncio.create_task(
+            signer.send(
+                chain,
+                wallet,
+                {"gas": 21000, "to": "0x" + "22" * 20},
+                operation="private-confirmation",
+            )
+        )
+        await asyncio.wait_for(reached.wait(), timeout=5)
+        assert uses == [] and provider.raw == []
+        release.set()
+        assert (await task).state is SubmissionState.SUBMITTED
+        assert uses == [True]
+        assert all(method != "eth_sendTransaction" for method, _ in provider.calls)
+        await session.close()
+
+    asyncio.run(check())
