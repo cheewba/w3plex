@@ -18,6 +18,10 @@ synchronous signing and automatic signing middleware keep their behavior for
 trusted legacy programs. Protected callers use the separate adapter explicitly.
 They must not register a legacy account on its RPC chain.
 
+Fee defaults use the existing AsyncWeb3 helper for the current RPC context.
+They do not reuse the fee-model cache on a shared Chain. Submission also checks
+that the destination Chain matches the chain ID authorized in the transaction.
+
 An authorization is tied to one request and unlocked session. It expires and
 can be used only once. Changed transaction fields or message data need another
 authorization. The host decides whether user confirmation or an admitted policy

@@ -20,13 +20,16 @@ from w3plex.security.signing import LocalSigning, SubmissionState
 
 
 class OfflineProvider(AsyncBaseProvider):
-    def __init__(self, *, dynamic=False, disconnect_on_send=False):
+    def __init__(
+        self, *, dynamic=False, disconnect_on_send=False, chain_id=10, nonce=3
+    ):
         super().__init__()
         self.calls = []
         self.raw = []
         self.dynamic = dynamic
         self.disconnect_on_send = disconnect_on_send
         self.closed = False
+        self.chain_id, self.nonce = chain_id, nonce
 
     async def disconnect(self):
         self.closed = True
@@ -34,8 +37,8 @@ class OfflineProvider(AsyncBaseProvider):
     async def make_request(self, method, params):
         self.calls.append((method, params))
         responses = {
-            "eth_chainId": "0xa",
-            "eth_getTransactionCount": "0x3",
+            "eth_chainId": hex(self.chain_id),
+            "eth_getTransactionCount": hex(self.nonce),
             "eth_gasPrice": "0x7",
             "eth_maxPriorityFeePerGas": "0x5",
             "eth_getBlockByNumber": {
@@ -92,7 +95,7 @@ async def setup(tmp_path, **provider_options):
         uses=[SecretUse.TRANSACTION, SecretUse.MESSAGE, SecretUse.TYPED_MESSAGE],
     )
     provider = OfflineProvider(**provider_options)
-    chain = Chain(10)
+    chain = Chain(provider.chain_id)
     await chain.connect_rpc(provider)
     authorizer, journal = Approve(), MemoryJournal()
     signer = LocalSigning(

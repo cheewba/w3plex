@@ -234,7 +234,8 @@ class LocalSigning:
         if tx.get("chainId") != int(chain.chain_id):
             raise PermissionDenied()
         tx = await fill_nonce(chain, tx)
-        tx = await fill_gas_price(chain, tx)
+        # Chain caches fee-model detection across its task-specific RPC routes.
+        tx = await fill_gas_price(chain._web3, tx)
         tx = await async_fill_transaction_defaults(chain._web3, tx)
         quantities = dict(format_transaction(tx))
         # Formatters may return hex quantities. Approval UI gets exact integers;
@@ -388,12 +389,14 @@ class LocalSigning:
 
         return self._session.use(intent.generation, intent.operation, sign)
 
+    @private_async
     async def submit(self, chain: Chain, signed: SignedTransaction) -> Submission:
         intent = signed.intent
         self._current(intent)
         if (
             self._journal is None
             or signed.transaction_hash != "0x" + Web3.keccak(signed.raw).hex()
+            or json.loads(intent.payload).get("chainId") != int(chain.chain_id)
         ):
             raise PermissionDenied()
         with self._mutex:
@@ -448,6 +451,7 @@ class LocalSigning:
             )
         return result
 
+    @private_async
     async def send(
         self,
         chain: Chain,
