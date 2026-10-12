@@ -289,6 +289,10 @@ def test_unknown_requests_input_fields_redirects_and_revoked_session_fail(
         "fe80::1",
         "224.0.0.1",
         "0.0.0.0",
+        "::ffff:10.0.0.1",
+        "64:ff9b::a00:1",
+        "64:ff9b::a9fe:a9fe",
+        "2002:0a00:0001::1",
     ],
 )
 def test_resolved_private_addresses_are_denied(tmp_path, address, monkeypatch):
@@ -332,6 +336,55 @@ def test_actual_peer_must_match_pinned_ip_before_http_write(monkeypatch):
         with pytest.raises(PermissionDenied):
             await connector._wrap_create_connection()
         assert transport.closed
+        await connector.close()
+
+    asyncio.run(check())
+
+
+def test_one_private_dns_answer_blocks_entire_request_before_injection(
+    tmp_path, monkeypatch
+):
+    async def check():
+        session, reference, _policy, http = await setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(http, "_resolve", ProtectedHTTP._resolve.__get__(http))
+        monkeypatch.setattr(
+            asyncio.get_running_loop(),
+            "getaddrinfo",
+            AsyncMock(
+                return_value=[
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        6,
+                        "",
+                        ("169.254.169.254", 443),
+                    ),
+                ]
+            ),
+        )
+        http.register(
+            "read",
+            RequestSpec("https://public.example", "/read", "GET", {}, secret=reference),
+        )
+        monkeypatch.setattr(
+            session._vault, "_use_secret", lambda *a: pytest.fail("No credential use")
+        )
+        with pytest.raises(PermissionDenied):
+            await http.request("read", operation="mixed-dns")
+        assert Client.instances == []
+        await session.close()
+
+    asyncio.run(check())
+
+
+def test_pinned_dns_allows_only_registered_host(monkeypatch):
+    async def check():
+        connector = _PinnedConnector("public.example", frozenset({"8.8.8.8"}))
+        with pytest.raises(PermissionDenied):
+            await connector._resolver.resolve("other.example", 443)
+        records = await connector._resolver.resolve("public.example", 443)
+        assert [item["host"] for item in records] == ["8.8.8.8"]
         await connector.close()
 
     asyncio.run(check())
