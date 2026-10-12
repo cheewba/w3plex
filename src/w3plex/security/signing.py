@@ -402,6 +402,10 @@ class LocalSigning:
         with self._mutex:
             if self._signed.pop(signed.transaction_hash, None) is not signed:
                 raise PermissionDenied()
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise PermissionDenied()
+        self._session.track(intent.generation, current_task, close=chain.close)
         prepared = Submission(
             intent.operation,
             intent.identity,
@@ -416,10 +420,6 @@ class LocalSigning:
         if committed is not True:
             raise SecurityError()
         self._session.check(intent.generation)
-        current_task = asyncio.current_task()
-        if current_task is None:
-            raise PermissionDenied()
-        self._session.track(intent.generation, current_task, close=chain.close)
         sent = False
         cancelled = False
         try:
