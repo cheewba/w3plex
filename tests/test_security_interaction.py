@@ -1,6 +1,7 @@
 """Private reply binding, terminal refusal and scoped nonsecret assistance."""
 
 import asyncio
+import getpass
 from unittest.mock import Mock
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from w3plex.security.errors import (
     InteractionRequired,
     PermissionDenied,
+    SecurityError,
     UnsupportedProtection,
 )
 from w3plex.security.interaction import (
@@ -46,6 +48,58 @@ async def pending(control):
             return requests[0]
         await asyncio.sleep(0)
     raise AssertionError("No private request")
+
+
+def test_noninteractive_input_has_no_stdin_or_getpass_fallback(monkeypatch):
+    stdin = Mock(side_effect=AssertionError("No echoed input"))
+    secret_input = Mock(side_effect=AssertionError("No secret input fallback"))
+    monkeypatch.setattr("builtins.input", stdin)
+    monkeypatch.setattr(getpass, "getpass", secret_input)
+
+    async def check():
+        private, hooks = broker(interactive=False)
+        with pytest.raises(InteractionRequired) as raised:
+            await private.ask(
+                private.begin_operation(),
+                "unlock",
+                (InputField("password", FieldKind.SECRET, "Private"),),
+            )
+        assert raised.value.code == "interaction_required"
+        assert raised.value.__cause__ is None and raised.value.__context__ is None
+        assert private.control_port().pending() == () and hooks == []
+
+    asyncio.run(check())
+    stdin.assert_not_called()
+    secret_input.assert_not_called()
+
+
+def test_private_pause_failure_resumes_and_exposes_only_safe_status(caplog):
+    async def check():
+        resumed = []
+
+        async def pause():
+            raise RuntimeError("PUBLIC-TEST-private-pause-value")
+
+        async def resume():
+            resumed.append(True)
+
+        controls = ProcessProtection()
+        controls.activate()
+        private = PrivateBroker(
+            interactive=True, pause=pause, resume=resume, protection=controls
+        )
+        with pytest.raises(SecurityError) as raised:
+            await private.ask(
+                private.begin_operation(),
+                "step",
+                (InputField("password", FieldKind.SECRET, "Private"),),
+            )
+        assert str(raised.value) == "security_error"
+        assert raised.value.__cause__ is None and raised.value.__context__ is None
+        assert private.control_port().pending() == () and resumed == [True]
+
+    asyncio.run(check())
+    assert "PUBLIC-TEST-private-pause-value" not in caplog.text
 
 
 def test_missing_process_controls_refuse_private_input_before_pause():
