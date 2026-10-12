@@ -13,7 +13,7 @@ from typing import Any
 
 from eth_account import Account as EthAccount
 
-from .contracts import SecretKind, SecretRef, SecretUse
+from .contracts import SecretKind, SecretRef, SecretUse, WalletInfo
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .memory import LockedBuffer, ProcessProtection
 from .storage import CiphertextFile, FileIdentity
@@ -228,6 +228,22 @@ class Vault:
 
     def references(self) -> tuple[SecretRef, ...]:
         return _private(lambda: tuple(_reference(record) for record in self._records()))
+
+    def wallets(self) -> tuple[WalletInfo, ...]:
+        """Public metadata for a separately admitted host session read."""
+
+        def operation():
+            with self._mutex:
+                return tuple(
+                    WalletInfo(
+                        _reference(record),
+                        tuple(SecretUse(use) for use in record["uses"]),
+                    )
+                    for record in self._records()
+                    if record["kind"] == SecretKind.WALLET.value
+                )
+
+        return _private(operation)
 
     def add(
         self, kind: SecretKind, value: bytes, *, uses: Iterable[SecretUse]
