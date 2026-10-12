@@ -336,7 +336,19 @@ def test_async_approval_waits_after_defaults_and_before_key_use(tmp_path, monkey
         release.set()
         assert (await task).state is SubmissionState.SUBMITTED
         assert uses == [True]
-        assert all(method != "eth_sendTransaction" for method, _ in provider.calls)
+        assert all(
+            method
+            in {
+                "eth_chainId",
+                "eth_getTransactionCount",
+                "eth_gasPrice",
+                "eth_maxPriorityFeePerGas",
+                "eth_feeHistory",
+                "eth_getBlockByNumber",
+                "eth_sendRawTransaction",
+            }
+            for method, _ in provider.calls
+        )
         await session.close()
 
     asyncio.run(check())
