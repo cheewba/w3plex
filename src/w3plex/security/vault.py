@@ -296,8 +296,13 @@ class Vault:
                 self._check()
                 data, identity = self._storage.read()
                 existing = parse(data)
-                key = unwrap(existing, current_password)
-                with LockedBuffer(key, protection=self._protection) as buffer:
+                with (
+                    LockedBuffer(bytes(32), protection=self._protection) as buffer,
+                    LockedBuffer(
+                        bytes(32), protection=self._protection
+                    ) as replacement_buffer,
+                ):
+                    buffer.replace(unwrap(existing, current_password))
                     plaintext = open_payload(existing, buffer.copy_bytes())
                     _parse_records(plaintext)
                     # Rotate the data key too; no old key is persisted.
@@ -307,10 +312,10 @@ class Vault:
                         settings=settings,
                         store_id=existing.header["store_id"],
                     )
-                    with LockedBuffer(replacement_key, protection=self._protection):
-                        self._storage.write(
-                            replacement_envelope.serialize(), expected=identity
-                        )
+                    replacement_buffer.replace(replacement_key)
+                    self._storage.write(
+                        replacement_envelope.serialize(), expected=identity
+                    )
                 self.lock()
 
         try:
@@ -321,8 +326,9 @@ class Vault:
     def backup(self, destination: CiphertextFile):
         def operation():
             with self._mutex:
-                envelope, key = self._unlocked()
-                _parse_records(open_payload(envelope, key))
+                self._check()
+                if self._key is None or self._envelope is None:
+                    raise PermissionDenied()
                 data, identity = self._storage.read()
                 if identity != self._identity:
                     raise AuthenticationFailed()
