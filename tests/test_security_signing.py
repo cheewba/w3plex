@@ -156,6 +156,7 @@ def test_real_defaults_authorized_before_local_signing_and_journal_before_send(
     "field,value",
     [
         ("nonce", 9),
+        ("chainId", 1),
         ("gasPrice", 9),
         ("gas", 30000),
         ("value", 5),
@@ -411,5 +412,124 @@ def test_wallet_metadata_polling_does_not_extend_unlock(tmp_path):
         with pytest.raises(PermissionDenied):
             signer.wallets(operation="poll-two")
         await session.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("change", ["expired", "operation", "wallet", "session"])
+def test_permits_bind_operation_wallet_expiry_and_unlocked_generation(tmp_path, change):
+    async def check():
+        session, wallet, provider, chain, authorizer, journal, _signer = await setup(
+            tmp_path
+        )
+        clock = [100.0]
+        signer = LocalSigning(
+            session._vault,
+            session,
+            authorizer=authorizer,
+            journal=journal,
+            permit_seconds=2,
+            clock=lambda: clock[0],
+        )
+        intent = signer.prepare_message(wallet, "exact message", operation="one")
+        permit = await signer.authorize(intent)
+        changed = intent
+        if change == "expired":
+            clock[0] = 102.0
+        elif change == "operation":
+            changed = replace(intent, operation="another-operation")
+        elif change == "wallet":
+            other = session._vault.add(
+                SecretKind.WALLET, bytes.fromhex("02" * 32), uses=[SecretUse.MESSAGE]
+            )
+            changed = replace(intent, wallet=other)
+        else:
+            await session.lock()
+            assert signer._permits == {} and signer._signed == {}
+            await unlock(session, session._input)
+            changed = replace(intent, generation=session.status().generation)
+        with pytest.raises(PermissionDenied):
+            signer.sign_message(changed, permit)
+        with pytest.raises(PermissionDenied):
+            signer.sign_message(intent, permit)
+        assert provider.raw == []
+        await session.close()
+        await chain.close()
+
+    asyncio.run(check())
+
+
+def test_lock_cancels_queued_authorization_before_signing(tmp_path, monkeypatch):
+    async def check():
+        session, wallet, provider, chain, authorizer, _journal, signer = await setup(
+            tmp_path
+        )
+        reached, release = asyncio.Event(), asyncio.Event()
+
+        async def authorize(_request):
+            reached.set()
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(authorizer, "authorize", authorize)
+        intent = signer.prepare_message(wallet, "pending", operation="pending")
+        task = asyncio.create_task(signer.authorize(intent))
+        await asyncio.wait_for(reached.wait(), timeout=5)
+        await session.lock()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert signer._permits == {} and provider.raw == []
+        await session.close()
+        await chain.close()
+
+    asyncio.run(check())
+
+
+def test_session_deadline_is_rechecked_after_consuming_valid_permit(
+    tmp_path, monkeypatch
+):
+    async def check():
+        session, wallet, provider, chain, _authorizer, _journal, signer = await setup(
+            tmp_path
+        )
+        intent = signer.prepare_message(wallet, "pending", operation="deadline-race")
+        permit = await signer.authorize(intent)
+        original = signer._consume
+
+        def consume(request, approval):
+            original(request, approval)
+            session._deadline = session._clock()
+
+        monkeypatch.setattr(signer, "_consume", consume)
+        monkeypatch.setattr(
+            session._vault, "_use_secret", lambda *a: pytest.fail("No key use")
+        )
+        with pytest.raises(PermissionDenied):
+            signer.sign_message(intent, permit)
+        assert provider.raw == []
+        await session.close()
+        await chain.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("approval", [False, 1, "yes", None])
+def test_signing_authorization_requires_exact_true(tmp_path, approval, monkeypatch):
+    async def check():
+        session, wallet, provider, chain, authorizer, _journal, signer = await setup(
+            tmp_path
+        )
+
+        async def authorize(_request):
+            return approval
+
+        monkeypatch.setattr(authorizer, "authorize", authorize)
+        intent = signer.prepare_message(wallet, "test", operation="denied")
+        with pytest.raises(PermissionDenied):
+            await signer.authorize(intent)
+        assert signer._permits == {} and provider.raw == []
+        await session.close()
+        await chain.close()
 
     asyncio.run(check())
