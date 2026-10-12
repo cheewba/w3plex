@@ -115,24 +115,26 @@ def _project(value, shape, depth=0):
 
 
 class _SecretFilter:
-    def __init__(self, secret: bytes | None):
+    def __init__(self, secret: bytes | None, authentication: bytes | None = None):
         values: set[str] = set()
-        if secret:
+        for value in (secret, authentication):
+            if not value:
+                continue
             values.update(
                 (
-                    secret.hex(),
-                    secret.hex().upper(),
-                    base64.b64encode(secret).decode(),
-                    base64.urlsafe_b64encode(secret).decode(),
+                    value.hex(),
+                    value.hex().upper(),
+                    base64.b64encode(value).decode(),
+                    base64.urlsafe_b64encode(value).decode(),
                 )
             )
             try:
-                text = secret.decode("utf-8")
+                text = value.decode("utf-8")
             except UnicodeError:
                 pass
             else:
                 values.update((text, quote(text, safe=""), quote_plus(text)))
-            values.update(value.rstrip("=") for value in tuple(values))
+        values.update(value.rstrip("=") for value in tuple(values))
         self._patterns = tuple(value for value in values if value)
         self._hold = max((len(value) for value in self._patterns), default=1) - 1
         self._tail = ""
@@ -380,13 +382,16 @@ class ProtectedHTTP:
                         elif spec.auth is AuthPlacement.PATH:
                             path = path.replace("{credential}", quote(text, safe=""))
                 url = public_url.with_path(path, encoded=True).with_query(params)
+                authentication = headers.get(spec.auth_name)
                 return (
                     spec,
                     client,
                     url,
                     headers,
                     payload,
-                    _SecretFilter(secret),
+                    _SecretFilter(
+                        secret, authentication.encode() if authentication else None
+                    ),
                     status.generation if spec.secret is not None else None,
                 )
 
