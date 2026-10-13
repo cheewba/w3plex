@@ -59,7 +59,7 @@ def test_enc1_is_captured_once_without_modifying_original(secret_store, tmp_path
     assert [value.ref(silent=True) for value in values] == ["one", "two"]
 
 
-def test_yaml_config_returns_refs_and_captures_expanded_included_values(secret_store):
+def test_captured_yaml_keeps_expansion_and_ordinary_config_values(secret_store):
     source = secret_store.capture(b"debank: !include debank.yaml\ncount: 3\n")
     included = secret_store.capture(b"api_key: ${TOKEN}\nwallet: 0x1234\n")
     config = load_reference_config(
@@ -68,12 +68,18 @@ def test_yaml_config_returns_refs_and_captures_expanded_included_values(secret_s
         includes={"debank.yaml": included},
         environment={"TOKEN": "PUBLIC-TEST-config-token"},
     )
-    assert isinstance(config.debank.api_key, SecretRef)
+    assert config.debank.api_key == "PUBLIC-TEST-config-token"
     assert config.count == 3
-    assert config.debank.wallet.ref(silent=True) == "0x1234"
+    assert config.debank.wallet == "0x1234"
     secret_store._vault.lock()
     secret_store._vault.unlock(PASSWORD)
-    assert config.debank.api_key.ref(silent=True) == "PUBLIC-TEST-config-token"
+    restored = load_reference_config(
+        source,
+        filename="w3plex.yaml",
+        includes={"debank.yaml": included},
+        environment={"TOKEN": "PUBLIC-TEST-config-token"},
+    )
+    assert restored.debank.api_key == config.debank.api_key
 
 
 def test_config_include_cannot_read_unregistered_file(secret_store, tmp_path):
