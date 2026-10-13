@@ -1,35 +1,62 @@
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, NotRequired, TypedDict, Unpack, overload
 
 from w3ext import Account
 from web3 import Web3
 
 from ..security import SecretRef, SecretString
+from ..security.errors import PermissionDenied
+from ..security.refs import _safe
 from .filter import TemplateFilter
+
+type FileOpener = Callable[[str | Path], SecretRef[bytes]]
+
+_FILE_OPENER: ContextVar[FileOpener | None] = ContextVar(
+    "w3plex_file_opener", default=None
+)
+
+
+@contextmanager
+def _using_file_opener(opener: FileOpener | None) -> Iterator[None]:
+    token = _FILE_OPENER.set(opener)
+    try:
+        yield
+    finally:
+        _FILE_OPENER.reset(token)
 
 
 class FileLoaderConfig(TypedDict):
-    file: str
+    file: str | Path | SecretRef[bytes]
     filter: NotRequired[str]
+    opener: NotRequired[FileOpener]
 
 
 class FileLoader[T]:
     def __init__(self, **config: Unpack[FileLoaderConfig]):
         self.config = config
+        self._opener = config.get("opener", _FILE_OPENER.get())
+        self._source: SecretRef[bytes] | None = None
+        self._source_lock = threading.Lock() if self._opener is not None else None
 
     def __call__(self, *args, **kwargs):
         return self.process(*args, **kwargs)
 
     @overload
-    async def process(self, fn: None = None) -> list[str]: ...
+    async def process(self, fn: None = None) -> list[str] | list[SecretString]: ...
     @overload
-    async def process(self, fn: Callable[[str], T]) -> list[T]: ...
     async def process(
-        self, fn: Callable[[str], T] | None = None
-    ) -> list[T] | list[str]:
-        transform: Callable[[str], T | str] = fn or (lambda item: item)
+        self, fn: Callable[[str], T] | Callable[[SecretString], T]
+    ) -> list[T]: ...
+    async def process(
+        self, fn: Callable[[str], T] | Callable[[SecretString], T] | None = None
+    ) -> list[T] | list[str] | list[SecretString]:
+        transform: Callable[[Any], Any] = fn or (lambda item: item)
 
         flt = (
             TemplateFilter(_f)
@@ -37,8 +64,20 @@ class FileLoader[T]:
             else lambda **kwargs: True
         )
 
+        file = self.config["file"]
+        if isinstance(file, SecretRef) or self._opener is not None:
+            source = await asyncio.to_thread(self._capture)
+            lines = source._use(lambda raw: self._reference_lines(source, raw, flt))
+            return _safe(
+                lambda: [
+                    value
+                    for line in lines
+                    if (value := self.process_line(line, transform)) is not None
+                ]
+            )
+
         def read_lines():
-            with open(self.config["file"], "r", encoding="utf-8-sig") as fr:
+            with open(file, "r", encoding="utf-8-sig") as fr:
                 return list(fr)
 
         lines = await asyncio.to_thread(read_lines)
@@ -50,8 +89,45 @@ class FileLoader[T]:
             and (val := self.process_line(line.strip(), transform)) is not None
         ]
 
-    def process_line(self, line: str, fn: Callable[[str], Any]) -> Any:
+    def process_line(self, line: str | SecretString, fn: Callable[[Any], Any]) -> Any:
         return fn(line)
+
+    def _capture(self) -> SecretRef[bytes]:
+        file = self.config["file"]
+        if isinstance(file, SecretRef):
+            return file
+        lock = self._source_lock
+        if lock is None:
+            raise PermissionDenied()
+        with lock:
+            if self._source is None:
+                opener = self._opener
+                if opener is None:
+                    raise PermissionDenied()
+                source = _safe(lambda: opener(file))
+                if not isinstance(source, SecretRef):
+                    raise PermissionDenied()
+                self._source = source
+            return self._source
+
+    @staticmethod
+    def _reference_lines(
+        source: SecretRef[bytes], raw: bytes, flt: Callable[..., bool]
+    ) -> list[SecretString]:
+        result = []
+        start = 3 if raw.startswith(b"\xef\xbb\xbf") else 0
+        for match in re.finditer(rb"[^\r\n]*(?:\r\n|\r|\n|$)", raw[start:]):
+            line = match[0].decode("utf-8")
+            value = line.strip()
+            if not value or line.lstrip().startswith("#"):
+                continue
+            normalized = line.replace("\r\n", "\n").replace("\r", "\n")
+            if not flt(line=normalized):
+                continue
+            left = len(line) - len(line.lstrip())
+            offset = start + match.start() + len(line[:left].encode("utf-8"))
+            result.append(SecretString(source, offset, len(value.encode("utf-8"))))
+        return result
 
     @staticmethod
     def from_secret(
@@ -61,54 +137,25 @@ class FileLoader[T]:
         return SecretFileLoader(source, filter=filter)
 
 
-class SecretFileLoader[T]:
-    """Read UTF-8 lines as immutable ranges in an encrypted source snapshot."""
+class SecretFileLoader[T](FileLoader[T]):
+    """Compatibility constructor for the reference path of FileLoader."""
 
     def __init__(self, file: SecretRef[bytes], *, filter: str | None = None):
         self.file = file
-        self._filter = TemplateFilter(filter) if filter is not None else None
-
-    def __call__(self, *args, **kwargs):
-        return self.process(*args, **kwargs)
-
-    @overload
-    async def process(self, fn: None = None) -> list[SecretString]: ...
-    @overload
-    async def process(self, fn: Callable[[SecretString], T]) -> list[T]: ...
-    async def process(
-        self, fn: Callable[[SecretString], T] | None = None
-    ) -> list[T] | list[SecretString]:
-        def read_lines(raw: bytes) -> list[SecretString]:
-            result = []
-            start = 3 if raw.startswith(b"\xef\xbb\xbf") else 0
-            for match in re.finditer(rb"[^\r\n]*(?:\r\n|\r|\n|$)", raw[start:]):
-                line = match[0].decode("utf-8")
-                value = line.strip()
-                if not value or line.lstrip().startswith("#"):
-                    continue
-                normalized = line.replace("\r\n", "\n").replace("\r", "\n")
-                if self._filter is not None and not self._filter(line=normalized):
-                    continue
-                left = len(line) - len(line.lstrip())
-                offset = start + match.start() + len(line[:left].encode("utf-8"))
-                result.append(
-                    SecretString(self.file, offset, len(value.encode("utf-8")))
-                )
-            return result
-
-        lines = self.file._use(read_lines)
-        if fn is None:
-            return lines
-        return [value for line in lines if (value := fn(line)) is not None]
+        config: FileLoaderConfig = {"file": file}
+        if filter is not None:
+            config["filter"] = filter
+        super().__init__(**config)
 
 
 def accounts_loader(
     **kwargs: Unpack[FileLoaderConfig],
 ) -> Callable[[], Awaitable[list[Account]]]:
+    def account(line: str) -> Account:
+        return Account.from_key(line)
+
     def wrapper():
-        return FileLoader[Account](**kwargs).process(
-            lambda item: Account.from_key(item)
-        )
+        return FileLoader[Account](**kwargs).process(account)
 
     return wrapper
 
