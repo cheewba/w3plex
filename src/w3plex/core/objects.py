@@ -4,11 +4,7 @@ from typing import Any, overload
 
 from lazyplex import (
     Application as _Application,
-)
-from lazyplex import (
     ApplicationAction as _ApplicationAction,
-)
-from lazyplex import (
     application as _application,
 )
 

@@ -43,7 +43,7 @@ def canonical(value: Any) -> bytes:
     ).encode("ascii")
 
 
-def _unique(pairs):
+def unique_fields(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
@@ -52,7 +52,7 @@ def _unique(pairs):
     return result
 
 
-def _invalid_constant(value: str):
+def reject_json_constant(value: str):
     raise ValueError("Invalid JSON constant")
 
 
@@ -107,8 +107,8 @@ def parse(data: bytes) -> Envelope:
     try:
         document = json.loads(
             data[len(MAGIC) :],
-            object_pairs_hook=_unique,
-            parse_constant=_invalid_constant,
+            object_pairs_hook=unique_fields,
+            parse_constant=reject_json_constant,
         )
     except (ValueError, UnicodeError, RecursionError):
         pass

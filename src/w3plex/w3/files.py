@@ -15,7 +15,7 @@ from ..security.errors import PermissionDenied, UnsupportedProtection
 from ..security.interaction import PrivateInput
 from ..security.legacy import LegacyContext
 from ..security.session import Session
-from ..security.snapshots import _Snapshot, _snapshot_file
+from ..security.snapshots import FileSnapshot, snapshot_file
 from ..security.storage import CiphertextFile
 
 
@@ -107,9 +107,9 @@ class FileExports:
         ):
             raise PermissionDenied()
 
-    def _snapshot(self, path: Path) -> _Snapshot:
+    def _snapshot(self, path: Path) -> FileSnapshot:
         self._check(path)
-        snapshot = _snapshot_file(path)
+        snapshot = snapshot_file(path)
         self._check(path)
         return snapshot
 

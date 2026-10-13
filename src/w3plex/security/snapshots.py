@@ -10,12 +10,12 @@ from .storage import CiphertextFile
 
 
 @dataclass(frozen=True, repr=False)
-class _Snapshot:
+class FileSnapshot:
     identity: tuple[int, int, int, int, int]
     raw: bytes
 
 
-def _snapshot_file(path: Path) -> _Snapshot:
+def snapshot_file(path: Path) -> FileSnapshot:
     parent = CiphertextFile._open_directory(path.parent)
     directory = os.fstat(parent)
     fd = None
@@ -62,7 +62,7 @@ def _snapshot_file(path: Path) -> _Snapshot:
                 raise PermissionDenied()
         finally:
             os.close(current)
-        return _Snapshot(identity(last), raw)
+        return FileSnapshot(identity(last), raw)
     finally:
         if fd is not None:
             os.close(fd)

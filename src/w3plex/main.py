@@ -11,11 +11,9 @@ from typing import Any, TextIO, cast
 
 from dotenv import load_dotenv
 from rich import print
-from ruamel.yaml import dump as yaml_dump
-from ruamel.yaml import load as yaml_load
+from ruamel.yaml import dump as yaml_dump, load as yaml_load
 
-from w3plex.config import Dumper, Include
-from w3plex.config import Loader as YamlLoader
+from w3plex.config import Dumper, Include, Loader as YamlLoader
 from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
 from w3plex.shell import Shell
@@ -215,9 +213,9 @@ def init_cmd(args):
 
 
 def load_config(filename: str) -> dict[str, Any]:
-    from w3plex.secure import _secure_open
+    from w3plex.secure import secure_open
 
-    with cast(TextIO, _secure_open(filename, encoding="utf-8")) as stream:
+    with cast(TextIO, secure_open(filename, encoding="utf-8")) as stream:
         expanded = os.path.expandvars(stream.read())
     named = io.StringIO(expanded)
     named.name = os.path.abspath(filename)

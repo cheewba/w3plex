@@ -17,8 +17,8 @@ from .errors import AuthenticationFailed, InvalidStore, PermissionDenied
 from .interaction import FieldKind, InputField, PrivateInput
 from .legacy import LegacyContext
 from .session import Session
-from .snapshots import _snapshot_file
-from .vault import Vault, _new_record
+from .snapshots import snapshot_file
+from .vault import Vault, new_record
 
 
 class LegacyImporter:
@@ -106,7 +106,7 @@ class LegacyImporter:
         ):
             raise PermissionDenied()
         normalized = Path(source.absolute())
-        snapshot = _snapshot_file(normalized)
+        snapshot = snapshot_file(normalized)
         if not await self._confirm(
             operation,
             "legacy-source",
@@ -119,7 +119,7 @@ class LegacyImporter:
             if kind is SecretKind.LEGACY_FILE_KEY:
                 raise PermissionDenied()
             keystore = Path(legacy_keystore.absolute())
-            keystore_snapshot = _snapshot_file(keystore)
+            keystore_snapshot = snapshot_file(keystore)
             if not await self._confirm(
                 operation,
                 "legacy-keystore",
@@ -132,8 +132,8 @@ class LegacyImporter:
         if task is None:
             raise PermissionDenied()
         self._session.track(status.generation, task)
-        if _snapshot_file(normalized) != snapshot or (
-            keystore is not None and _snapshot_file(keystore) != keystore_snapshot
+        if snapshot_file(normalized) != snapshot or (
+            keystore is not None and snapshot_file(keystore) != keystore_snapshot
         ):
             raise PermissionDenied()
         addresses: tuple[str, ...] = ()
@@ -181,7 +181,7 @@ class LegacyImporter:
                     if not selected:
                         raise InvalidStore()
                     addresses = tuple(
-                        _new_record(record_kind, value, uses)["address"]
+                        new_record(record_kind, value, uses)["address"]
                         for record_kind, value, uses in selected
                     )
                     if expected_addresses is not None and tuple(
@@ -198,7 +198,7 @@ class LegacyImporter:
                 context.lock()
         # Validate every record before final consent or any destination write.
         for record_kind, value, uses in selected:
-            _new_record(record_kind, value, uses)
+            new_record(record_kind, value, uses)
         summary = f"Save {len(selected)} validated {kind.value} record(s)"
         if kind is SecretKind.WALLET:
             summary += ": " + ", ".join(addresses)
@@ -208,8 +208,8 @@ class LegacyImporter:
             summary,
         ):
             raise PermissionDenied()
-        if _snapshot_file(normalized) != snapshot or (
-            keystore is not None and _snapshot_file(keystore) != keystore_snapshot
+        if snapshot_file(normalized) != snapshot or (
+            keystore is not None and snapshot_file(keystore) != keystore_snapshot
         ):
             raise PermissionDenied()
         return self._session.use(

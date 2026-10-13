@@ -15,7 +15,7 @@ from w3plex.security.errors import PermissionDenied
 from w3plex.security.memory import ProcessProtection
 from w3plex.security.storage import CiphertextFile
 from w3plex.security.vault import Vault
-from w3plex.utils.loader import _FILE_OPENER, FileLoader
+from w3plex.utils.loader import FileLoader, get_file_opener
 
 PASSWORD = b"PUBLIC-TEST-snapshot-password"
 
@@ -58,7 +58,7 @@ def test_plain_yaml_keeps_factories_references_and_include_paths(
             assert isinstance(values[0], SecretRef)
             assert values[0]._store is secret_store
             assert values[0].ref(silent=True) == "PUBLIC-TEST-private-line"
-            assert _FILE_OPENER.get() is None
+            assert get_file_opener() is None
         finally:
             await runner.finalize()
 
@@ -81,7 +81,7 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
             cfg, str(tmp_path / "w3plex.yaml"), file_opener=secret_store.capture_file
         )
         try:
-            assert _FILE_OPENER.get() is None
+            assert get_file_opener() is None
             reader = await tree.reader()
             value = (await reader())[0]
             assert isinstance(value, SecretRef)
@@ -127,7 +127,7 @@ def test_concurrent_factories_and_later_reads_keep_owner(
             assert second[0]._store is other_store
             assert first[0].ref(silent=True) == "first"
             assert second[0].ref(silent=True) == "second"
-            assert _FILE_OPENER.get() is None
+            assert get_file_opener() is None
         finally:
             await asyncio.gather(*(runner.finalize() for runner in runners))
 
@@ -182,7 +182,7 @@ def test_failed_protected_factory_restores_context_and_runner_state(
                 file_opener=denied,
             )
         assert not runner.is_initialized
-        assert _FILE_OPENER.get() is None
+        assert get_file_opener() is None
         assert await FileLoader(file=data)() == ["ordinary read"]
 
     asyncio.run(check())
@@ -218,7 +218,7 @@ def test_application_created_reader_uses_runner_opener(
             assert isinstance(received[0], SecretRef)
             assert received[0]._store is secret_store
             assert received[0].ref(silent=True) == "application read"
-            assert _FILE_OPENER.get() is None
+            assert get_file_opener() is None
         finally:
             await runner.finalize()
 

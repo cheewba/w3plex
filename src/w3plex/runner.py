@@ -6,8 +6,7 @@ from copy import deepcopy
 from inspect import iscoroutine, iscoroutinefunction, isfunction
 from typing import Any
 
-from lazyplex import Application as _Application
-from lazyplex import create_context
+from lazyplex import Application as _Application, create_context
 
 from .config import ConfigTree, Lazy, config_loader
 from .constants import (
@@ -19,7 +18,7 @@ from .constants import (
 )
 from .log import logger
 from .utils import load_path
-from .utils.loader import FileOpener, _using_file_opener
+from .utils.loader import FileOpener, using_file_opener
 
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
@@ -225,7 +224,7 @@ class Runner:
         cfg = dict(self.cfg)
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
         with (
-            _using_file_opener(self._file_opener),
+            using_file_opener(self._file_opener),
             create_context(
                 {
                     CONTEXT_CONFIG_KEY: dict(app_cfg),

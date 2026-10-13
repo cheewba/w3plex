@@ -7,8 +7,7 @@ from pathlib import Path
 import pytest
 from test_security_files import setup as setup_files
 from test_security_interaction_session import make_session, pending, unlock
-from test_security_transport import Client, Response
-from test_security_transport import setup as setup_http
+from test_security_transport import Client, Response, setup as setup_http
 
 from w3plex.security.contracts import SecretKind, SecretUse
 from w3plex.security.errors import PermissionDenied, SecurityError

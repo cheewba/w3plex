@@ -13,7 +13,7 @@ from w3plex.config.yaml import Dumper, Loader
 
 from ..security import SecretRef
 from ..security.errors import InvalidStore, PermissionDenied
-from ..security.refs import _safe
+from ..security.refs import safe_call
 from ..utils.dist import AttrDict
 
 Opener = Callable[..., TextIO]
@@ -114,4 +114,4 @@ def load_reference_config(
 
         return cast(AttrDict, bind(values))
 
-    return _safe(operation)
+    return safe_call(operation)

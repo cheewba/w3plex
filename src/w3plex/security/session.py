@@ -14,7 +14,7 @@ from .contracts import Public
 from .diagnostics import private_async
 from .errors import PermissionDenied, SecurityError
 from .interaction import FieldKind, InputField, PrivateInput
-from .vault import Vault, _private
+from .vault import Vault, private_call
 
 
 class SessionState(StrEnum):
@@ -214,7 +214,7 @@ class Session:
             if not operation:
                 raise PermissionDenied()
             try:
-                result = _private(consumer)
+                result = private_call(consumer)
             finally:
                 # Password changes and failed writes can lock Vault during use.
                 if not self._vault.is_unlocked:

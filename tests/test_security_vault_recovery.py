@@ -6,11 +6,10 @@ import subprocess
 import sys
 
 import pytest
-from test_security_vault import PASSWORD, VALUE
 from test_security_vault import (
+    PASSWORD,
+    VALUE,
     protection as protection,  # noqa: PLC0414 -- pytest fixture re-export
-)
-from test_security_vault import (
     vault as vault,  # noqa: PLC0414 -- pytest fixture re-export
 )
 
