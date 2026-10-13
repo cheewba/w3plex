@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "generator": "Independent direct cryptography 45.0.7 Argon2id/AESGCM calls; no w3plex codec imports. Fixed PUBLIC TEST values only.",
+  "password": "PUBLIC-TEST-file-v1-password",
+  "plaintext_hex": "5055424c49432d544553542d62696e6172792d66696c6500fffe0d0a68656c6c6f20e4b896e7958c0a",
+  "file_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "salt_hex": "000102030405060708090a0b0c0d0e0f",
+  "wrap_nonce_hex": "000102030405060708090a0b",
+  "data_nonce_hex": "0c0d0e0f1011121314151617",
+  "sha256": "edb07bea3f06d23d27fce2a38e71e098f3ecaa46c07832626dee6bfdd08b6628"
+}

@@ -1,77 +1,26 @@
 """Version 1 vault codec; never uses or changes the legacy ENC1/KS01 format."""
 
-import base64
 import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
 
-from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
-
-from .errors import AuthenticationFailed, InvalidStore, UnsupportedProtection
+from .crypto import (
+    DEFAULT_KDF as DEFAULT_KDF,
+    KdfSettings as KdfSettings,
+    canonical as canonical,
+    decode_bytes,
+    decrypt,
+    derive_key,
+    encode_bytes,
+    encrypt,
+    reject_json_constant as reject_json_constant,
+    unique_fields as unique_fields,
+)
+from .errors import InvalidStore, UnsupportedProtection
 
 MAGIC = b"W3VAULT1\n"
 MAXIMUM_SIZE = 8 * 1024 * 1024
-
-
-@dataclass(frozen=True)
-class KdfSettings:
-    memory_kib: int = 65536
-    iterations: int = 3
-    lanes: int = 4
-
-    def validate(self):
-        if not all(
-            type(value) is int
-            for value in (self.memory_kib, self.iterations, self.lanes)
-        ) or not (
-            65536 <= self.memory_kib <= 262144
-            and 3 <= self.iterations <= 10
-            and 1 <= self.lanes <= 8
-        ):
-            raise InvalidStore()
-
-
-DEFAULT_KDF = KdfSettings()
-
-
-def canonical(value: Any) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
-    ).encode("ascii")
-
-
-def unique_fields(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate field")
-        result[key] = value
-    return result
-
-
-def reject_json_constant(value: str):
-    raise ValueError("Invalid JSON constant")
-
-
-def _encode(value: bytes) -> str:
-    return base64.b64encode(value).decode("ascii")
-
-
-def _decode(value: Any, *, size: int | None = None) -> bytes:
-    success = False
-    decoded = b""
-    try:
-        if isinstance(value, str):
-            decoded = base64.b64decode(value, validate=True)
-            success = size is None or len(decoded) == size
-    except (ValueError, UnicodeError):
-        pass
-    if not success:
-        raise InvalidStore()
-    return decoded
 
 
 @dataclass(frozen=True, repr=False)
@@ -87,8 +36,8 @@ class Envelope:
         data = MAGIC + canonical(
             {
                 "header": self.header,
-                "wrapped_key": _encode(self.wrapped_key),
-                "payload": _encode(self.payload),
+                "wrapped_key": encode_bytes(self.wrapped_key),
+                "payload": encode_bytes(self.payload),
             }
         )
         if len(data) > MAXIMUM_SIZE:
@@ -157,70 +106,23 @@ def parse(data: bytes) -> Envelope:
     ):
         raise InvalidStore()
     KdfSettings(kdf["memory_kib"], kdf["iterations"], kdf["lanes"]).validate()
-    _decode(header["salt"], size=16)
-    wrapping_nonce = _decode(header["wrap_nonce"], size=12)
-    data_nonce = _decode(header["data_nonce"], size=12)
+    decode_bytes(header["salt"], size=16)
+    wrapping_nonce = decode_bytes(header["wrap_nonce"], size=12)
+    data_nonce = decode_bytes(header["data_nonce"], size=12)
     if wrapping_nonce == data_nonce:
         raise InvalidStore()
-    wrapped_key = _decode(document["wrapped_key"], size=48)
-    payload = _decode(document["payload"])
+    wrapped_key = decode_bytes(document["wrapped_key"], size=48)
+    payload = decode_bytes(document["payload"])
     if len(payload) < 16:
         raise InvalidStore()
     return Envelope(header, wrapped_key, payload)
 
 
-def _derive(password: bytes, header: dict[str, Any]) -> bytes:
-    if not isinstance(password, bytes) or not 1 <= len(password) <= 4096:
-        raise AuthenticationFailed()
-    settings = header["kdf"]
-    derived = None
-    try:
-        derived = Argon2id(
-            salt=_decode(header["salt"], size=16),
-            length=32,
-            iterations=settings["iterations"],
-            lanes=settings["lanes"],
-            memory_cost=settings["memory_kib"],
-        ).derive(password)
-    except UnsupportedAlgorithm:
-        pass
-    if derived is None:
-        raise UnsupportedProtection()
-    return derived
-
-
-def _decrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
-    plaintext = None
-    unsupported = False
-    try:
-        plaintext = AESGCM(key).decrypt(nonce, data, aad)
-    except InvalidTag:
-        pass
-    except UnsupportedAlgorithm:
-        unsupported = True
-    if unsupported:
-        raise UnsupportedProtection()
-    if plaintext is None:
-        raise AuthenticationFailed()
-    return plaintext
-
-
-def _encrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
-    ciphertext = None
-    try:
-        ciphertext = AESGCM(key).encrypt(nonce, data, aad)
-    except UnsupportedAlgorithm:
-        pass
-    if ciphertext is None:
-        raise UnsupportedProtection()
-    return ciphertext
-
-
 def unwrap(envelope: Envelope, password: bytes) -> bytes:
-    key = _derive(password, envelope.header)
-    return _decrypt(
+    key = derive_key(password, envelope.header)
+    return decrypt(
         key,
-        _decode(envelope.header["wrap_nonce"], size=12),
+        decode_bytes(envelope.header["wrap_nonce"], size=12),
         envelope.wrapped_key,
         _wrapping_aad(envelope.header),
     )
@@ -233,9 +135,9 @@ def _wrapping_aad(header: dict[str, Any]) -> bytes:
 
 
 def open_payload(envelope: Envelope, data_key: bytes) -> bytes:
-    return _decrypt(
+    return decrypt(
         data_key,
-        _decode(envelope.header["data_nonce"], size=12),
+        decode_bytes(envelope.header["data_nonce"], size=12),
         envelope.payload,
         canonical(envelope.header) + b"\0records\0" + envelope.wrapped_key,
     )
@@ -262,9 +164,9 @@ def seal(
         "cipher": "AES-256-GCM",
         "context": "w3plex.vault",
         "store_id": store_id or secrets.token_hex(16),
-        "salt": _encode(secrets.token_bytes(16)),
-        "wrap_nonce": _encode(wrapping_nonce),
-        "data_nonce": _encode(data_nonce),
+        "salt": encode_bytes(secrets.token_bytes(16)),
+        "wrap_nonce": encode_bytes(wrapping_nonce),
+        "data_nonce": encode_bytes(data_nonce),
         "kdf": {
             "name": "argon2id",
             "memory_kib": settings.memory_kib,
@@ -273,9 +175,9 @@ def seal(
         },
     }
     aad = canonical(header)
-    wrapping_key = _derive(password, header)
-    wrapped = _encrypt(wrapping_key, wrapping_nonce, key, _wrapping_aad(header))
-    payload = _encrypt(key, data_nonce, plaintext, aad + b"\0records\0" + wrapped)
+    wrapping_key = derive_key(password, header)
+    wrapped = encrypt(wrapping_key, wrapping_nonce, key, _wrapping_aad(header))
+    payload = encrypt(key, data_nonce, plaintext, aad + b"\0records\0" + wrapped)
     envelope = Envelope(header, wrapped, payload)
     # Apply the same bounded format validation to newly written files.
     parse(envelope.serialize())
@@ -289,12 +191,12 @@ def update_payload(envelope: Envelope, data_key: bytes, plaintext: bytes) -> Env
     header = dict(envelope.header)
     nonce = secrets.token_bytes(12)
     if nonce in {
-        _decode(header["data_nonce"], size=12),
-        _decode(header["wrap_nonce"], size=12),
+        decode_bytes(header["data_nonce"], size=12),
+        decode_bytes(header["wrap_nonce"], size=12),
     }:
         raise UnsupportedProtection()
-    header["data_nonce"] = _encode(nonce)
-    encrypted = _encrypt(
+    header["data_nonce"] = encode_bytes(nonce)
+    encrypted = encrypt(
         data_key,
         nonce,
         plaintext,
