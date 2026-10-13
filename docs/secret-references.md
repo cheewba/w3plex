@@ -124,6 +124,9 @@ Optional encrypted YAML uses `load_reference_config` with approved captured
 include sources. Constructor names, paths, `$...` references and include metadata
 remain ordinary config values. The standalone CLI delegates to the same config
 reader and supplies its legacy opener, environment and include encoding.
+File encryption now lives in security; `secure.py` is removed in 0.1.0.
+See [the migration guide](security-migration.md) for replacement imports and
+explicit transparent-read activation.
 
 ## SDK objects retain references
 

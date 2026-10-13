@@ -9,6 +9,11 @@ The included balance application reads public wallet addresses and displays
 native-token or ERC-20 balances. You can also write your own Python applications,
 use the interactive shell, and share configured chains, clients, and proxies.
 
+Version 0.1 moves file encryption to `w3plex.security` and removes `w3plex.secure`.
+Existing encrypted files and CLI commands remain supported. Scripts must update
+their imports and explicitly enable transparent reads; see
+[the migration guide](docs/security-migration.md).
+
 ## Install
 
 You need Python **3.12 or newer** and Git. CI currently checks Python 3.12.
