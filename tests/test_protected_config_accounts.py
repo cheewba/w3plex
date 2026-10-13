@@ -13,7 +13,7 @@ from web3 import Web3
 
 from w3plex.config.reading import load_config
 from w3plex.runner import Runner
-from w3plex.security import SecretRef
+from w3plex.security import ISecretRef
 from w3plex.security.errors import PermissionDenied, SecurityError
 from w3plex.security.legacy import LegacyContext
 from w3plex.utils.loader import accounts_loader
@@ -60,7 +60,7 @@ def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
         try:
             account = (await runner.tree.accounts.main())[0]
             assert type(account) is Account
-            assert isinstance(account.key, SecretRef)
+            assert isinstance(account.key, ISecretRef)
             assert "_acc" not in vars(account)
             assert KEY not in repr(vars(account))
             assert data.read_bytes() == original
@@ -156,7 +156,7 @@ def test_existing_account_loader_accepts_a_reference_without_disclosure(secret_s
     source = secret_store.capture((KEY + "\n").encode())
     accounts = asyncio.run(accounts_loader(file=source)())
     assert type(accounts[0]) is Account
-    assert isinstance(accounts[0].key, SecretRef)
+    assert isinstance(accounts[0].key, ISecretRef)
     assert accounts[0].address == EthAccount.from_key(KEY).address
 
 

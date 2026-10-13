@@ -4,7 +4,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
     Any,
     Never,
     Protocol,
@@ -26,12 +25,6 @@ from .memory import LockedBuffer
 from .snapshots import snapshot_file
 from .vault import Vault
 
-if TYPE_CHECKING:
-    from .adapters import (
-        SecretJson as SecretJson,  # noqa: PLC0414 -- compatible re-export
-        SecretString as SecretString,  # noqa: PLC0414 -- compatible re-export
-    )
-
 MAX_SNAPSHOT_SIZE = 1024 * 1024
 _SAFE_ERRORS = {
     AuthenticationFailed,
@@ -46,10 +39,6 @@ _SAFE_ERRORS = {
 @runtime_checkable
 class ISecretRef[T](Protocol):
     def ref(self, *, silent: bool = False) -> T: ...
-
-
-# Compatibility type name; concrete adapters do not inherit it.
-SecretRef = ISecretRef
 
 
 @dataclass(frozen=True)
@@ -167,12 +156,3 @@ class SecretStore:
                 return value
 
         return safe_call(operation)
-
-
-def __getattr__(name: str):
-    # Preserve the former adapter import path without a concrete reference base.
-    if name in {"SecretString", "SecretJson"}:
-        from .adapters import SecretJson, SecretString
-
-        return {"SecretString": SecretString, "SecretJson": SecretJson}[name]
-    raise AttributeError(name)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from w3plex.security.config import create_config, load_config
+from w3plex.config import create_config, load_config
 
 
 def test_fresh_security_import_has_no_global_effects(tmp_path):
