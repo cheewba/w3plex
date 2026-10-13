@@ -14,10 +14,10 @@ from cryptography.fernet import Fernet, InvalidToken
 from .contracts import SecretKind, SecretRef, SecretUse
 from .diagnostics import private_async
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied
-from .files import _snapshot_file
 from .interaction import FieldKind, InputField, PrivateInput
 from .legacy import LegacyContext
 from .session import Session
+from .snapshots import _snapshot_file
 from .vault import Vault, _new_record
 
 
