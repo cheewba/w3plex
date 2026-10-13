@@ -9,6 +9,7 @@ import secrets
 import threading
 import weakref
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
@@ -56,9 +57,15 @@ class Vault:
         self._closed = False
         self._generation = 0
         self._lock_listener: weakref.WeakMethod | None = None
+        self._lock_observers: list[weakref.WeakMethod] = []
 
     def __repr__(self):
         return "Vault(<private>)"
+
+    @property
+    def path(self) -> Path:
+        """Trusted storage location for private input; never a public RPC field."""
+        return self._storage.path
 
     def bind_lock(self, callback: Callable[[], None] | None) -> None:
         """One host session owns lock notification; standalone vaults need none."""
@@ -72,6 +79,18 @@ class Vault:
             self._lock_listener = (
                 None if callback is None else weakref.WeakMethod(callback)
             )
+
+    def add_lock_listener(self, callback: Callable[[], None]) -> None:
+        """Notify borrowed data owners without replacing the primary host owner."""
+        with self._mutex:
+            self._lock_observers = [
+                reference
+                for reference in self._lock_observers
+                if reference() is not None
+            ]
+            reference = weakref.WeakMethod(callback)
+            if reference not in self._lock_observers:
+                self._lock_observers.append(reference)
 
     @property
     def is_unlocked(self) -> bool:
@@ -132,6 +151,8 @@ class Vault:
         return private_call(operation)
 
     def lock(self):
+        failure: type[SecurityError] | None = None
+        interruption: BaseException | None = None
         with self._mutex:
             self._generation += 1
             buffer, self._key = self._key, None
@@ -139,12 +160,30 @@ class Vault:
             try:
                 if buffer is not None:
                     buffer.close()
-            finally:
-                listener = (
-                    None if self._lock_listener is None else self._lock_listener()
-                )
+            except SecurityError as exc:
+                failure = type(exc)
+            except Exception:  # noqa: BLE001 -- still notify data owners
+                failure = SecurityError
+            except BaseException as exc:  # finish cleanup before cancellation
+                interruption = exc
+            references = (
+                [] if self._lock_listener is None else [self._lock_listener]
+            ) + self._lock_observers
+            for reference in references:
+                listener = reference()
                 if listener is not None:
-                    listener()
+                    try:
+                        listener()
+                    except SecurityError as exc:
+                        failure = type(exc)
+                    except Exception:  # noqa: BLE001 -- notify every data owner
+                        failure = SecurityError
+                    except BaseException as exc:  # finish notifying every data owner
+                        interruption = exc
+        if interruption is not None:
+            raise interruption
+        if failure is not None:
+            raise failure()
 
     def _records(self) -> list[dict[str, Any]]:
         envelope, key = self._unlocked()
@@ -217,6 +256,32 @@ class Vault:
                             if key not in {"id", "value"}
                         }
                 raise PermissionDenied()
+
+        return private_call(operation)
+
+    def find_metadata(self, criteria: dict[str, str]) -> tuple[str, ...]:
+        """Find opaque metadata without repeatedly decrypting the entire store."""
+
+        def operation():
+            if (
+                type(criteria) is not dict
+                or not criteria
+                or any(
+                    type(name) is not str
+                    or name in {"id", "value"}
+                    or type(value) is not str
+                    for name, value in criteria.items()
+                )
+            ):
+                raise InvalidStore()
+            with self._mutex:
+                return tuple(
+                    record["id"]
+                    for record in self._records()
+                    if all(
+                        record.get(name) == value for name, value in criteria.items()
+                    )
+                )
 
         return private_call(operation)
 
