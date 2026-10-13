@@ -11,10 +11,9 @@ from ruamel import yaml
 
 from w3plex.config.yaml import Dumper, Loader
 
-from ..security import SecretJson, SecretRef
+from ..security import SecretRef
 from ..security.errors import InvalidStore, PermissionDenied
 from ..security.refs import _safe
-from ..security.vault_format import canonical
 from ..utils.dist import AttrDict
 
 Opener = Callable[..., TextIO]
@@ -78,12 +77,12 @@ def load_reference_config(
     filename: str | Path = "w3plex.yaml",
     includes: Mapping[str | Path, SecretRef[bytes]] | None = None,
 ) -> AttrDict:
-    """Read trusted YAML snapshots and replace string values with local references.
+    """Read optional captured YAML through the existing configuration loader.
 
     Includes must be preloaded explicitly; this function never reads a source
-    path from disk. Parsed/expanded values are encrypted as one new snapshot.
-    Temporary Python parser objects cannot be reliably erased. The resulting
-    config is private service data, not a model serialization format.
+    path from disk. Constructor names, paths and object references stay ordinary
+    strings. External-file readers obtain references separately. Parsed config
+    is private service data; Python parser objects cannot be reliably erased.
     """
 
     def operation():
@@ -101,30 +100,18 @@ def load_reference_config(
 
         values = load_config(root, opener=opener, environment=environment)
 
-        def validate(value):
+        def bind(value):
             if isinstance(value, dict):
                 if any(type(key) is not str for key in value):
                     raise InvalidStore()
-                for item in value.values():
-                    validate(item)
-            elif isinstance(value, list):
-                for item in value:
-                    validate(item)
-
-        validate(values)
-        captured = source._store.capture(canonical(values))
-
-        def bind(value, path):
-            if isinstance(value, str):
-                return SecretJson[str](captured, path)
-            if isinstance(value, dict):
-                return AttrDict(
-                    {key: bind(item, (*path, key)) for key, item in value.items()}
-                )
+                result = AttrDict({key: bind(item) for key, item in value.items()})
+                if included := getattr(value, "__include_path__", None):
+                    result.__include_path__ = included
+                return result
             if isinstance(value, list):
-                return [bind(item, (*path, index)) for index, item in enumerate(value)]
+                return [bind(item) for item in value]
             return value
 
-        return cast(AttrDict, bind(values, ()))
+        return cast(AttrDict, bind(values))
 
     return _safe(operation)
