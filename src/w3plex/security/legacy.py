@@ -258,6 +258,8 @@ class LegacyContext:
             raise MemoryError("Unable to derive master key: scrypt N fell below 2**12")
 
     def _save_keys(self, keys: list[bytes]) -> None:
+        if not self._compatibility and len(keys) > 4096:
+            raise InvalidStore()
         self.unlock_keystore()
         assert (
             self.path is not None
@@ -306,9 +308,13 @@ class LegacyContext:
     def _encrypt_bytes(
         self, data: bytes, password: str, *, add_to_keystore: bool
     ) -> bytes:
+        if not self._compatibility and len(data) > _MAX_FILE:
+            raise InvalidStore()
         with self._lock:
             key = hashlib.sha256(password.encode()).digest()
             ciphertext = b"ENC1" + Fernet(base64.urlsafe_b64encode(key)).encrypt(data)
+            if not self._compatibility and len(ciphertext) > _MAX_FILE:
+                raise InvalidStore()
             if add_to_keystore:
                 self._add_key(key, persist=True)
             return ciphertext
@@ -363,6 +369,10 @@ class LegacyContext:
             self._decrypt_bytes(raw, source=source) if raw.startswith(b"ENC1") else raw
         )
 
+    def _read_file(self, source: Path) -> bytes:
+        with source.open("rb") as stream:
+            return stream.read() if self._compatibility else stream.read(_MAX_FILE + 1)
+
     def encrypt_file(
         self,
         src: str | Path,
@@ -373,7 +383,7 @@ class LegacyContext:
         add_to_keystore: bool = False,
     ) -> Path:
         source = Path(src)
-        data = source.read_bytes()
+        data = self._read_file(source)
         if data.startswith(b"ENC1"):
             raise ValueError(f"{source} is already encrypted")
         password = password or self._password("file", source)
@@ -399,7 +409,7 @@ class LegacyContext:
     ) -> Path:
         source = Path(src)
         plain = self._decrypt_bytes(
-            source.read_bytes(),
+            self._read_file(source),
             source=source,
             password=password,
             use_keystore=use_keystore,

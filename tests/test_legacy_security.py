@@ -317,3 +317,27 @@ def test_noninteractive_standalone_password_never_falls_back_to_echo(
     with pytest.raises(InteractionRequired):
         legacy.unlock_keystore()
     assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
+
+
+def test_strict_encryption_limits_preserve_files_and_store(tmp_path, monkeypatch):
+    from w3plex.security import legacy as legacy_format
+    from w3plex.security.errors import InvalidStore
+
+    def forbidden(_):
+        raise AssertionError("Over-limit writes must fail before requesting a password")
+
+    store = tmp_path / "keys"
+    context = security.LegacyContext(store, input_handler=forbidden)
+    context.install_keys([b"a" * 32] * 4096)
+    with pytest.raises(InvalidStore):
+        context.encrypt_data("PUBLIC-TEST", password="file", add_to_keystore=True)
+    assert not store.exists()
+    source, destination = tmp_path / "input", tmp_path / "output"
+    source.write_text("PUBLIC-TEST-input")
+    destination.write_text("PUBLIC-TEST-previous-output")
+    monkeypatch.setattr(legacy_format, "_MAX_FILE", 8)
+    with pytest.raises(InvalidStore):
+        context.encrypt_file(source, password="file", dst=destination)
+    assert source.read_text() == "PUBLIC-TEST-input"
+    assert destination.read_text() == "PUBLIC-TEST-previous-output"
+    assert not store.exists()
