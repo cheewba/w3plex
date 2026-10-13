@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Never, SupportsIndex, cast
+from typing import Any, Never, Self, SupportsIndex, cast
 
 from .contracts import SecretKind, SecretUse
 from .contracts import SecretRef as SecretId
@@ -87,6 +87,11 @@ class SecretRef[T]:
 
     def __reduce_ex__(self, protocol: SupportsIndex) -> Never:
         raise PermissionDenied()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        # Configuration copies retain this immutable local handle and its owner.
+        memo[id(self)] = self
+        return self
 
     def _restore(self, value: bytes) -> T:
         # The root handle's value is bytes. Typed children override this method.
