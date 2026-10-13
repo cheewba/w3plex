@@ -10,6 +10,7 @@ import aiohttp
 from aiohttp_socks import ProxyConnector as _ProxyConnector
 from w3ext import Chain, Currency, CurrencyAmount, Token, TokenAmount
 
+from ...security import ISecretRef
 from ..module import ModuleError
 from .constants import (
     AWAILABLE_CHAINS_API_URL,
@@ -67,7 +68,7 @@ class Debank:
         proxy: str | None = None,
         chains: list["Chain"] | None = None,
         threads: int | None = 1,
-        access_key: str | None = None,
+        access_key: str | ISecretRef[str] | None = None,
     ) -> None:
         self._chains = {chain.chain_id: chain for chain in chains or []}
 
@@ -172,7 +173,11 @@ class Debank:
         async with self._api_request(
             "get",
             f"{OPEN_API_URL}/{path}",
-            headers={"AccessKey": self.access_key},
+            headers={
+                "AccessKey": self.access_key.ref(silent=True)
+                if isinstance(self.access_key, ISecretRef)
+                else self.access_key
+            },
             params=params,
         ) as response:
             return await response.json()
