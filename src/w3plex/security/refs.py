@@ -297,13 +297,18 @@ class SecretStore:
         """
 
         def operation():
+            with self._vault._mutex:
+                stamp = self._stamp()
             path = Path(filename).absolute()
             raw = _snapshot_file(path).raw
             if raw.startswith(b"ENC1"):
                 if legacy is None:
                     raise InteractionRequired()
                 raw = legacy.decrypt_bytes(raw, source=path)
-            return self.capture(raw)
+            with self._vault._mutex:
+                if self._stamp() is not stamp:
+                    raise PermissionDenied()
+                return self.capture(raw)
 
         return _safe(operation)
 
