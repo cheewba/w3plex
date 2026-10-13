@@ -26,6 +26,7 @@ class Sign:
 
 
 class SecretKind(StrEnum):
+    DATA = "data"
     WALLET = "wallet"
     SEED = "seed"
     PASSWORD = "password"

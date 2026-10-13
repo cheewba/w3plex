@@ -31,6 +31,7 @@ from .vault_format import (
 )
 
 _USES = {
+    SecretKind.DATA: {SecretUse.DECRYPT},
     SecretKind.WALLET: {
         SecretUse.TRANSACTION,
         SecretUse.MESSAGE,
@@ -43,6 +44,10 @@ _USES = {
     SecretKind.MODEL: {SecretUse.HTTP},
     SecretKind.LEGACY_FILE_KEY: {SecretUse.DECRYPT},
 }
+
+
+def _valid_size(kind: SecretKind, size: int) -> bool:
+    return 0 <= size <= 1024 * 1024 if kind is SecretKind.DATA else 1 <= size <= 65536
 
 
 def _private[T](function: Callable[[], T]) -> T:
@@ -68,7 +73,7 @@ def _new_record(
     if (
         not isinstance(kind, SecretKind)
         or not isinstance(value, bytes)
-        or not 1 <= len(value) <= 65536
+        or not _valid_size(kind, len(value))
         or not allowed
         or any(not isinstance(use, SecretUse) for use in allowed)
         or not allowed <= _USES[kind]
@@ -126,7 +131,7 @@ def _parse_records(plaintext: bytes) -> list[dict[str, Any]]:
                 if len(uses) != len(item["uses"]) or not uses <= _USES[kind]:
                     break
                 value = base64.b64decode(item["value"], validate=True)
-                if not 1 <= len(value) <= 65536:
+                if not _valid_size(kind, len(value)):
                     break
                 if kind is SecretKind.LEGACY_FILE_KEY and len(value) != 32:
                     break

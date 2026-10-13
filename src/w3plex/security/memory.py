@@ -104,9 +104,17 @@ class LockedBuffer:
     security boundary. Close explicitly; do not rely on finalizers for locking.
     """
 
-    def __init__(self, value: bytes, *, protection: ProcessProtection):
+    def __init__(
+        self,
+        value: bytes,
+        *,
+        protection: ProcessProtection,
+        max_size: int = 65536,
+    ):
         protection.check()
-        if not value or len(value) > 65536:
+        if type(max_size) is not int or not 1 <= max_size <= 1024 * 1024:
+            raise ValueError("Invalid secret buffer limit")
+        if not value or len(value) > max_size:
             raise ValueError("Invalid secret buffer size")
         self._size = len(value)
         self._capacity = (
