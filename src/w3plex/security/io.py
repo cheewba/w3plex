@@ -49,7 +49,7 @@ def default_context() -> LegacyContext:
                 ).expanduser(),
                 input_handler=_terminal_password,
                 opener=opener,
-                compatibility=True,
+                persist_keys=True,
             )
         return _CONTEXT
 
@@ -68,21 +68,6 @@ def disable_encrypted_io() -> None:
         if _CONTEXT is None:
             raise ActivationConflict()
         _CONTEXT.disable()
-
-
-def secure_open(
-    file,
-    mode="r",
-    buffering=-1,
-    encoding=None,
-    errors=None,
-    newline=None,
-    closefd=True,
-    opener=None,
-):
-    return default_context().open(
-        file, mode, buffering, encoding, errors, newline, closefd, opener
-    )
 
 
 def unlock_keystore() -> None:

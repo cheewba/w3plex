@@ -24,7 +24,7 @@ def test_new_file_and_keystore_are_readable_by_frozen_baseline(tmp_path, n):
         store.write_bytes((FIXTURES / f"ks01-{n}.bin").read_bytes())
     replies = iter([master, master])
     encryption = LegacyContext(
-        store, input_handler=lambda _: next(replies), compatibility=True
+        store, input_handler=lambda _: next(replies), persist_keys=True
     )
     source = tmp_path / "input.txt"
     source.write_text("PUBLIC-TEST-value\r\n", encoding="utf-8", newline="")

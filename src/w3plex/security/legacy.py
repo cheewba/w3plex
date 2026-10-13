@@ -1,7 +1,7 @@
-"""Instance-scoped ENC1/KS01 compatibility, without import-time activation.
+"""Instance-scoped ENC1/KS01 support, without import-time activation.
 
 Ordinary contexts keep discovered keys in memory and never rewrite sources.
-The standalone compatibility context retains the old prompts and key persistence.
+The CLI explicitly enables persistence of discovered keys.
 These formats retain their historical protection; new protected storage uses Vault.
 """
 
@@ -29,7 +29,6 @@ from .errors import (
     InteractionRequired,
     InvalidStore,
     PermissionDenied,
-    SecurityError,
 )
 
 _ACTIVATION_LOCK = threading.RLock()
@@ -37,15 +36,6 @@ _ACTIVE: "LegacyContext | None" = None
 _HISTORICAL_N = (32768, 16384, 8192, 4096)
 _MAX_STORE = 1024 * 1024
 _MAX_FILE = 64 * 1024 * 1024
-
-SecureError = SecurityError
-
-
-class IncorrectPassword(AuthenticationFailed):
-    """Compatibility error for standalone encryption helpers."""
-
-    def __init__(self, message: str = "Wrong password"):
-        Exception.__init__(self, message)
 
 
 @dataclass(frozen=True, repr=False)
@@ -66,12 +56,12 @@ class LegacyContext:
         *,
         input_handler: Callable[[LegacyPasswordRequest], str] | None = None,
         opener: Callable[..., Any] = io.open,
-        compatibility: bool = False,
+        persist_keys: bool = False,
     ):
         self.path = None if keystore_path is None else Path(keystore_path)
         self._input = input_handler
         self._opener = opener
-        self._compatibility = compatibility
+        self._persist_keys = persist_keys
         self._keys: list[bytes] | None = None
         self._salt: bytes | None = None
         self._master_key: bytes | None = None
@@ -126,24 +116,17 @@ class LegacyContext:
             raise InteractionRequired()
         return value
 
-    def _authentication_error(self, message: str) -> AuthenticationFailed:
-        return (
-            IncorrectPassword(message)
-            if self._compatibility
-            else AuthenticationFailed()
-        )
-
     @staticmethod
-    def parse_keys(plain: bytes, *, compatibility: bool = False) -> list[bytes]:
+    def parse_keys(plain: bytes) -> list[bytes]:
         valid = False
         keys: list[bytes] = []
         try:
             data = json.loads(plain)
             if (
                 isinstance(data, dict)
-                and (compatibility or set(data) == {"keys"})
+                and set(data) == {"keys"}
                 and isinstance(data.get("keys"), list)
-                and (compatibility or len(data["keys"]) <= 4096)
+                and len(data["keys"]) <= 4096
             ):
                 for value in data["keys"]:
                     if not isinstance(value, str):
@@ -165,18 +148,12 @@ class LegacyContext:
             return None
         try:
             with self._opener(self.path, "rb") as stream:
-                raw = (
-                    stream.read()
-                    if self._compatibility
-                    else stream.read(_MAX_STORE + 1)
-                )
+                raw = stream.read(_MAX_STORE + 1)
         except FileNotFoundError:
             return None
         if len(raw) < 16:
-            if self._compatibility:
-                raise ValueError("Keystore too small / corrupt")
             raise InvalidStore()
-        if not self._compatibility and len(raw) > _MAX_STORE:
+        if len(raw) > _MAX_STORE:
             raise InvalidStore()
         return raw
 
@@ -188,13 +165,7 @@ class LegacyContext:
             return []
         self._salt, payload = raw[:16], raw[16:]
         if not payload.startswith(b"KS01"):
-            try:
-                keys = self.parse_keys(payload, compatibility=self._compatibility)
-            except InvalidStore:
-                if not self._compatibility:
-                    raise
-                # The pre-0.1 standalone reader treats missing/malformed JSON as empty.
-                keys = []
+            keys = self.parse_keys(payload)
         else:
             assert self.path is not None
             password = self._password("master", self.path)
@@ -215,13 +186,13 @@ class LegacyContext:
                     )
                 except InvalidToken:
                     continue
-                keys = self.parse_keys(plain, compatibility=self._compatibility)
-                if self._compatibility or keep_master:
+                keys = self.parse_keys(plain)
+                if self._persist_keys or keep_master:
                     self._master_key = derived
                 break
             if keys is None:
                 self._master_key = None
-                raise self._authentication_error("Wrong master password for keystore")
+                raise AuthenticationFailed()
         self._keys = keys
         return keys
 
@@ -239,7 +210,7 @@ class LegacyContext:
                     return
             password = self._password("master", self.path)
             if raw is None and password != self._password("master_confirm", self.path):
-                raise self._authentication_error("Master passwords don't match")
+                raise AuthenticationFailed()
             if self._salt is None:
                 self._salt = os.urandom(16)
             # KS01 omitted work settings. Retain its historical adaptive writer.
@@ -258,7 +229,7 @@ class LegacyContext:
             raise MemoryError("Unable to derive master key: scrypt N fell below 2**12")
 
     def _save_keys(self, keys: list[bytes]) -> None:
-        if not self._compatibility and len(keys) > 4096:
+        if len(keys) > 4096:
             raise InvalidStore()
         self.unlock_keystore()
         assert (
@@ -302,18 +273,18 @@ class LegacyContext:
                 self._save_keys(updated)
             else:
                 self._keys = updated
-        elif persist and not self._compatibility:
+        elif persist and not self._persist_keys:
             self._save_keys(keys)
 
     def _encrypt_bytes(
         self, data: bytes, password: str, *, add_to_keystore: bool
     ) -> bytes:
-        if not self._compatibility and len(data) > _MAX_FILE:
+        if len(data) > _MAX_FILE:
             raise InvalidStore()
         with self._lock:
             key = hashlib.sha256(password.encode()).digest()
             ciphertext = b"ENC1" + Fernet(base64.urlsafe_b64encode(key)).encrypt(data)
-            if not self._compatibility and len(ciphertext) > _MAX_FILE:
+            if len(ciphertext) > _MAX_FILE:
                 raise InvalidStore()
             if add_to_keystore:
                 self._add_key(key, persist=True)
@@ -330,7 +301,7 @@ class LegacyContext:
     ) -> bytes:
         if not raw.startswith(b"ENC1"):
             raise ValueError(f"{source} is not encrypted")
-        if not self._compatibility and len(raw) > _MAX_FILE:
+        if len(raw) > _MAX_FILE:
             raise InvalidStore()
         with self._lock:
             token = raw[4:]
@@ -358,9 +329,9 @@ class LegacyContext:
             except InvalidToken:
                 pass
             if not success:
-                raise self._authentication_error("Wrong password")
+                raise AuthenticationFailed()
             if not password and use_keystore:
-                self._add_key(key, persist=self._compatibility)
+                self._add_key(key, persist=self._persist_keys)
             return plain
 
     def decrypt_bytes(self, raw: bytes, *, source: str | Path) -> bytes:
@@ -371,7 +342,7 @@ class LegacyContext:
 
     def _read_file(self, source: Path) -> bytes:
         with source.open("rb") as stream:
-            return stream.read() if self._compatibility else stream.read(_MAX_FILE + 1)
+            return stream.read(_MAX_FILE + 1)
 
     def encrypt_file(
         self,
@@ -483,25 +454,27 @@ class LegacyContext:
             handle.seek(0)
             if prefix != b"ENC1":
                 return handle
-            raw = stream.read() if self._compatibility else stream.read(_MAX_FILE + 1)
+            raw = stream.read(_MAX_FILE + 1)
         except BaseException:
             handle.close()
             raise
         handle.close()
-        if not self._compatibility and len(raw) > _MAX_FILE:
+        if len(raw) > _MAX_FILE:
             raise InvalidStore()
         plain = b""
         for attempt in range(3):
             try:
                 plain = self.decrypt_bytes(raw, source=os.fsdecode(file))
                 break
-            except AuthenticationFailed as error:
-                if not self._compatibility:
+            except AuthenticationFailed:
+                if not self._persist_keys:
                     self.lock()
                 if attempt == 2:
                     raise
-                if self._compatibility:
-                    sys.stdout.write(f"{error}, {2 - attempt} attempts left\r\n")
+                if self._persist_keys:
+                    sys.stdout.write(
+                        f"Incorrect password, {2 - attempt} attempts left\r\n"
+                    )
                     sys.stdout.flush()
         buffer = io.BytesIO(plain)
         buffer.name = str(file)
