@@ -3,10 +3,8 @@
 import base64
 import builtins
 import hashlib
-import importlib
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -18,22 +16,18 @@ from w3plex.security.errors import (
     InvalidStore,
 )
 from w3plex.security.legacy import LegacyContext
+from w3plex.security import io as encryption_io
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 
 
 def test_new_reader_does_not_touch_legacy_global_state(monkeypatch):
     previous = builtins.open
-    try:
-        old = importlib.import_module("w3plex.secure")
-    finally:
-        builtins.open = previous
-    before = (old._KEYSTORE_PATH, old._salt, old._master_key)
 
     def forbidden(prompt):
         raise AssertionError("New context must not use global legacy input")
 
-    monkeypatch.setattr(old.getpass, "getpass", forbidden)
+    monkeypatch.setattr(encryption_io.getpass, "getpass", forbidden)
     manifest = json.loads((FIXTURES / "manifest.json").read_text())
     context = LegacyContext(
         FIXTURES / "ks01-4096.bin",
@@ -41,7 +35,6 @@ def test_new_reader_does_not_touch_legacy_global_state(monkeypatch):
     )
     with context.open(FIXTURES / "sample.enc", "rb") as stream:
         assert stream.read() == bytes.fromhex(manifest["plaintext_hex"])
-    assert (old._KEYSTORE_PATH, old._salt, old._master_key) == before
     assert builtins.open is previous
     context.lock()
 
@@ -83,11 +76,6 @@ def test_contexts_and_legacy_global_are_independent(tmp_path):
     with pytest.raises(InteractionRequired):
         b.open(FIXTURES / "sample.enc", "rb")
     assert b._keys is None
-    # The legacy API is tested in its own process and is never imported here.
-    assert (
-        "w3plex.secure" not in sys.modules
-        or a._keys is not sys.modules["w3plex.secure"]._master_key
-    )
 
 
 def test_no_stdin_fallback_and_damaged_store_is_not_empty_success(tmp_path):

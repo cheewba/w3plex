@@ -1,4 +1,4 @@
-"""Exclusive encrypted-open activation and the legacy automatic facade."""
+"""Exclusive encrypted-open activation and explicit standalone activation."""
 
 import builtins
 import subprocess
@@ -10,7 +10,7 @@ from w3plex.security.errors import ActivationConflict
 from w3plex.security.legacy import LegacyContext
 
 
-def test_legacy_import_cannot_capture_an_active_new_context(tmp_path):
+def test_standalone_activation_cannot_capture_an_active_context(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
@@ -18,19 +18,24 @@ def test_legacy_import_cannot_capture_an_active_new_context(tmp_path):
             """import builtins
 from w3plex.security.legacy import LegacyContext
 previous = builtins.open
+from w3plex.security import enable_encrypted_io, disable_encrypted_io
+from w3plex.security.errors import ActivationConflict
 context = LegacyContext("missing-keystore")
 with context.activated():
     owned = builtins.open
     try:
-        import w3plex.secure
-    except Exception as error:
-        assert type(error).__name__ == "SecureError"
+        enable_encrypted_io()
+    except ActivationConflict:
+        pass
     else:
         raise AssertionError("Legacy import must reject a conflicting context")
     assert builtins.open is owned
 assert builtins.open is previous
-from w3plex import secure
-assert builtins.open is secure._secure_open
+standalone = enable_encrypted_io()
+assert builtins.open.__self__ is standalone
+assert enable_encrypted_io() is standalone
+disable_encrypted_io()
+assert builtins.open is previous
 """,
         ],
         cwd=tmp_path,
