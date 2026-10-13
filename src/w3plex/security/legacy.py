@@ -16,11 +16,10 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from .diagnostics import private_async
 from .errors import (
     ActivationConflict,
     AuthenticationFailed,
@@ -28,10 +27,6 @@ from .errors import (
     InvalidStore,
     PermissionDenied,
 )
-from .interaction import FieldKind, InputField, PrivateInput
-
-if TYPE_CHECKING:
-    from .session import Session
 
 _ACTIVATION_LOCK = threading.RLock()
 _ACTIVE: "LegacyContext | None" = None
@@ -76,92 +71,6 @@ class LegacyContext:
             self._keys = None
             self._epoch += 1
 
-    @private_async
-    async def decrypt_private(
-        self,
-        raw: bytes,
-        *,
-        source: str | Path,
-        private_input: PrivateInput,
-        operation: str,
-        session: "Session | None" = None,
-        generation: str | None = None,
-    ) -> bytes:
-        """Async service read with private input and invalidation across lock.
-
-        A separate working context avoids replacing this context's input handler
-        while a dialog is pending. Passwords stay local to this one operation.
-        """
-        if (session is None) != (generation is None):
-            raise PermissionDenied()
-        source_path = Path(source)
-        answers: dict[tuple[str, Path], str] = {}
-        last = None
-        requested = None
-
-        def answer(request):
-            nonlocal last, requested
-            last = (request.kind, request.source)
-            if last not in answers:
-                requested = request
-                raise InteractionRequired()
-            return answers[last]
-
-        working = LegacyContext(self.path, input_handler=answer, opener=self._opener)
-        with self._lock:
-            epoch = self._epoch
-            working._keys = None if self._keys is None else list(self._keys)
-        step = 0
-        for _attempt in range(3):
-            while True:
-                requested = None
-                wrong = False
-                plaintext = b""
-                try:
-                    if session is not None and generation is not None:
-                        plaintext = session.use(
-                            generation,
-                            operation,
-                            lambda: working.decrypt_bytes(raw, source=source_path),
-                        )
-                    else:
-                        plaintext = working.decrypt_bytes(raw, source=source_path)
-                except InteractionRequired:
-                    if requested is None:
-                        raise
-                except AuthenticationFailed:
-                    wrong = True
-                if requested is not None:
-                    step += 1
-                    reply = await private_input.ask(
-                        operation,
-                        f"legacy-{requested.kind}-{step}",
-                        (
-                            InputField(
-                                "password",
-                                FieldKind.SECRET,
-                                "Unlock legacy encrypted input",
-                            ),
-                        ),
-                    )
-                    value = reply.values.get("password")
-                    if not isinstance(value, str):
-                        raise InteractionRequired()
-                    answers[(requested.kind, requested.source)] = value
-                    with self._lock:
-                        if self._epoch != epoch:
-                            raise PermissionDenied()
-                    continue
-                if wrong:
-                    if last is not None:
-                        answers.pop(last, None)
-                    break
-                with self._lock:
-                    if self._epoch != epoch:
-                        raise PermissionDenied()
-                    self._keys = working._keys
-                return plaintext
-        raise AuthenticationFailed()
 
     def _password(self, kind: str, source: Path) -> str:
         if self._input is None:

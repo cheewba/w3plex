@@ -1,4 +1,4 @@
-"""Opt-in consumers and compatibility imports share one implementation."""
+"""SDK exports stay compatible; experimental application policy moved out."""
 
 import importlib
 
@@ -16,10 +16,9 @@ def test_unadapted_exports_keep_identity(name):
 @pytest.mark.parametrize(
     "name", ["signing", "transport", "rpc", "integrations", "settings", "files"]
 )
-def test_old_consumer_imports_alias_new_module(name):
-    old = importlib.import_module(f"w3plex.security.{name}")
-    new = importlib.import_module(f"w3plex.w3.{name}")
-    assert old is new
+def test_application_policy_is_absent_from_library_namespace(name):
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(f"w3plex.security.{name}")
 
 
 def test_old_config_import_aliases_public_reader():
