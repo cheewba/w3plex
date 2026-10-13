@@ -2,8 +2,39 @@
 
 `W3FILE1` stores one authenticated text or binary payload. It differs from
 `W3VAULT1`, which stores records and metadata. The low-level codec is in
-`w3plex.security.file_format`; automatic open and CLI integration are separate
-work and must not be assumed from the codec alone.
+`w3plex.security.file_format`. The explicit `EncryptedIOContext` recognizes
+ordinary files, ENC1 and W3FILE1. Default CLI/helper integration is separate work
+and must not be assumed from the codec alone.
+
+For trusted standalone code, establish process protection before requesting a
+modern file password:
+
+```python
+from w3plex.security import EncryptedIOContext
+from w3plex.security.io import request_password
+from w3plex.security.memory import ProcessProtection
+
+protection = ProcessProtection()
+protection.activate()
+context = EncryptedIOContext(
+    protection=protection,
+    input_handler=lambda request: request_password("Encrypted file password: "),
+)
+try:
+    with context.activated():
+        with open("data.enc", "rb") as stream:
+            value = stream.read()
+finally:
+    context.close()
+```
+
+Activation intercepts `builtins.open`; `io.open` and `Path.open` remain ordinary
+readers. Conflicting contexts are refused, and disabling restores the previous
+opener. Plain files, descriptors, pipes and write modes keep their existing
+behavior. Vaults and recognized unsupported file versions are refused.
+Contexts reuse modern file keys in owned locked buffers, up to 1024 cached keys.
+Locking clears those buffers and invalidates a pending password response.
+Ordinary returned bytes and strings remain plaintext after locking.
 
 The on-disk layout is:
 
