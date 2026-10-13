@@ -22,9 +22,9 @@ def test_source_change_and_delete_do_not_change_snapshot(secret_store, tmp_path)
     source.write_bytes(b"PUBLIC-TEST-replacement")
     source.unlink()
     with pytest.raises(PermissionDenied):
-        ref._use(lambda value: value)
+        ref.ref(silent=True)
     secret_store._vault.unlock(PASSWORD)
-    assert ref._use(lambda value: value) == VALUE
+    assert ref.ref(silent=True) == VALUE
     assert ref.identifier == secret_store.reference(ref.identifier).identifier
 
 
@@ -37,7 +37,7 @@ def test_reopen_does_not_need_source_file(secret_store):
     try:
         reopened.unlock(PASSWORD)
         restored = SecretStore(reopened).reference(identifier)
-        assert restored._use(lambda value: value) == VALUE
+        assert restored.ref(silent=True) == VALUE
     finally:
         reopened.close()
 
@@ -57,20 +57,20 @@ def test_capture_is_encrypted_and_recapture_has_a_new_id(secret_store):
 
 
 def test_empty_and_large_data_preserve_existing_record_size_rules(secret_store):
-    assert secret_store.capture(b"")._use(lambda value: value) == b""
+    assert secret_store.capture(b"").ref(silent=True) == b""
     value = b"x" * 70000
-    assert secret_store.capture(value)._use(len) == len(value)
+    assert len(secret_store.capture(value).ref(silent=True)) == len(value)
     with pytest.raises(InvalidStore):
         secret_store.capture(b"x" * (1024 * 1024 + 1))
 
 
-def test_unknown_id_and_host_check_refuse_use(secret_store):
+def test_unknown_id_and_locked_store_refuse_read(secret_store):
     with pytest.raises(PermissionDenied):
-        secret_store.reference("0" * 32)._use(lambda value: value)
+        secret_store.reference("0" * 32).ref(silent=True)
     ref = secret_store.capture(VALUE)
-    secret_store._check_host = lambda: (_ for _ in ()).throw(PermissionDenied())
+    secret_store._vault.lock()
     with pytest.raises(PermissionDenied):
-        ref._use(lambda value: value)
+        ref.ref(silent=True)
 
 
 def test_failed_capture_keeps_previous_encrypted_snapshot(secret_store, monkeypatch):
@@ -87,4 +87,4 @@ def test_failed_capture_keeps_previous_encrypted_snapshot(secret_store, monkeypa
         assert "PUBLIC-TEST-private-error" not in str(caught.value)
     assert secret_store._vault._storage.path.read_bytes() == original
     secret_store._vault.unlock(PASSWORD)
-    assert ref._use(lambda value: value) == VALUE
+    assert ref.ref(silent=True) == VALUE

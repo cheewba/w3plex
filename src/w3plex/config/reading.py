@@ -11,7 +11,7 @@ from ruamel import yaml
 
 from w3plex.config.yaml import Dumper, Loader
 
-from ..security import SecretRef
+from ..security import ISecretRef
 from ..security.errors import InvalidStore, PermissionDenied
 from ..security.refs import safe_call
 from ..utils.dist import AttrDict
@@ -28,7 +28,11 @@ def _expand(text: str, environment: Mapping[str, str]) -> str:
 
 
 def load_config(
-    filename: str | Path, *, opener: Opener, environment: Mapping[str, str]
+    filename: str | Path,
+    *,
+    opener: Opener,
+    environment: Mapping[str, str],
+    include_encoding: str | None = "utf-8",
 ) -> dict[str, Any]:
     """Read trusted legacy YAML as data. Includes use the same explicit inputs.
 
@@ -40,18 +44,18 @@ def load_config(
 
     class ExplicitLoader(Loader):
         def _load_yaml(self, filename):
-            return read(filename)
+            return read(filename, encoding=include_encoding)
 
     # Loader.include calls self._load_yaml; recursive includes keep this loader.
-    def read(target):
-        with opener(target, "r", encoding="utf-8") as stream:
+    def read(target, *, encoding: str | None = "utf-8"):
+        with opener(target, "r", encoding=encoding) as stream:
             named = io.StringIO(_expand(stream.read(), env))
         named.name = os.path.abspath(target)
         return yaml.load(named, Loader=ExplicitLoader)
 
     result = read(path)
     if not isinstance(result, dict):
-        raise TypeError("Config must be a YAML mapping")
+        raise TypeError(f"Config must be a YAML mapping: {filename}")
     return result
 
 
@@ -71,11 +75,11 @@ def create_config(
 
 
 def load_reference_config(
-    source: SecretRef[bytes],
+    source: ISecretRef[bytes],
     *,
     environment: Mapping[str, str],
     filename: str | Path = "w3plex.yaml",
-    includes: Mapping[str | Path, SecretRef[bytes]] | None = None,
+    includes: Mapping[str | Path, ISecretRef[bytes]] | None = None,
 ) -> AttrDict:
     """Read optional captured YAML through the existing configuration loader.
 
@@ -96,7 +100,7 @@ def load_reference_config(
             selected = sources.get(os.path.abspath(path))
             if selected is None:
                 raise PermissionDenied()
-            return io.StringIO(selected._use(lambda raw: raw.decode("utf-8-sig")))
+            return io.StringIO(selected.ref(silent=True).decode("utf-8-sig"))
 
         values = load_config(root, opener=opener, environment=environment)
 

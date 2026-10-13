@@ -76,7 +76,7 @@ def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
             secret_store._vault.unlock(PASSWORD)
             restored = (await runner.tree.alias())[0]
             assert restored.address == account.address
-            assert restored.key.identifier == account.key.identifier
+            assert restored.key.parent.identifier == account.key.parent.identifier
             signature = await restored.sign("public message")
             assert (
                 EthAccount.recover_message(
@@ -164,7 +164,7 @@ def test_denied_source_use_never_constructs_a_signing_account(
     secret_store, monkeypatch
 ):
     source = secret_store.capture((KEY + "\n").encode())
-    secret_store._authorize = lambda access: False
+    secret_store._vault.lock()
     monkeypatch.setattr(
         "w3plex.w3.account.EthAccount.from_key",
         lambda value: pytest.fail("Denied source reached the signing dependency"),
