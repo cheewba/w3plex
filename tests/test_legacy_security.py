@@ -136,6 +136,20 @@ def test_wrong_master_does_not_poison_later_unlock(legacy, monkeypatch):
     assert legacy.decrypt_data(cipher) == "hello"
 
 
+def test_decrypt_without_password_or_store_does_not_request_input(legacy, monkeypatch):
+    cipher, _ = legacy.encrypt_data(
+        "PUBLIC-TEST", password="file", add_to_keystore=False
+    )
+
+    def forbidden(_):
+        raise AssertionError("Explicit data decryption must not prompt")
+
+    monkeypatch.setattr(encryption_io.getpass, "getpass", forbidden)
+    with pytest.raises(AuthenticationFailed):
+        legacy.decrypt_data(cipher, use_keystore=False)
+    assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
+
+
 def test_valid_plaintext_store_and_rejection_of_damaged_or_empty_stores(legacy):
     key = b"a" * 32
     from cryptography.fernet import Fernet

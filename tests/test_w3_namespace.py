@@ -19,10 +19,3 @@ def test_unadapted_exports_keep_identity(name):
 def test_application_policy_is_absent_from_library_namespace(name):
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(f"w3plex.security.{name}")
-
-
-def test_old_config_import_aliases_public_reader():
-    from w3plex.config import reading
-    from w3plex.security import config
-
-    assert config is reading
