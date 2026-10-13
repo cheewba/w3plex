@@ -25,8 +25,7 @@ length and encoding. `SecretJson[T]` holds a parent and a JSON path. Both live i
 extraction metadata, never decoded values. Nested adapters forward the disclosure
 warning to the source once. The callback receives only the snapshot identifier.
 
-The old local `SecretRef` type name aliases `ISecretRef`; the former adapter
-imports from `w3plex.security.refs` remain compatible. Wallet/credential ID DTOs
+Wallet/credential ID DTOs
 are separate application types in `cryptopal.runtime.contracts`.
 
 ## Capture once and resolve when needed
