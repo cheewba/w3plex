@@ -8,14 +8,11 @@ from .io import (
     enable_encrypted_io as enable_encrypted_io,
     encrypt_data as encrypt_data,
     encrypt_file as encrypt_file,
-    secure_open as secure_open,
     unlock_keystore as unlock_keystore,
 )
 from .legacy import (
-    IncorrectPassword as IncorrectPassword,
     LegacyContext as LegacyContext,
     LegacyPasswordRequest as LegacyPasswordRequest,
-    SecureError as SecureError,
 )
 from .refs import (
     ISecretRef as ISecretRef,

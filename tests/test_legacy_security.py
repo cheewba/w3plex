@@ -15,6 +15,7 @@ import pytest
 
 from w3plex import security
 from w3plex.security import io as encryption_io
+from w3plex.security.errors import AuthenticationFailed, InvalidStore
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 
@@ -87,7 +88,9 @@ def test_fixed_old_keystores_and_ciphertexts(legacy, monkeypatch, n):
     before = store.read_bytes()
     prompts = inputs(monkeypatch, [manifest["master_password"]])
     for _ in range(2):
-        with legacy.secure_open(FIXTURES / "sample.enc", "rb") as stream:
+        with encryption_io.default_context().open(
+            FIXTURES / "sample.enc", "rb"
+        ) as stream:
             assert stream.read() == bytes.fromhex(manifest["plaintext_hex"])
     assert prompts == ["Master password: "]
     assert store.read_bytes() == before
@@ -112,7 +115,7 @@ def test_master_confirmation_cache_and_key_deduplication(legacy, monkeypatch):
 
 def test_master_confirmation_mismatch_and_cancel_leave_no_store(legacy, monkeypatch):
     inputs(monkeypatch, ["first", "second"])
-    with pytest.raises(legacy.IncorrectPassword, match="don't match"):
+    with pytest.raises(AuthenticationFailed):
         legacy.unlock_keystore()
     store = Path(os.environ["W3PLEX_KEYSTORE"])
     assert not store.exists()
@@ -127,13 +130,13 @@ def test_wrong_master_does_not_poison_later_unlock(legacy, monkeypatch):
     cipher, _ = legacy.encrypt_data("hello", password="file")
     encryption_io.default_context().lock()
     inputs(monkeypatch, ["wrong"])
-    with pytest.raises(legacy.IncorrectPassword, match="master"):
+    with pytest.raises(AuthenticationFailed):
         legacy.decrypt_data(cipher)
     inputs(monkeypatch, ["master"])
     assert legacy.decrypt_data(cipher) == "hello"
 
 
-def test_plaintext_damaged_and_empty_legacy_stores(legacy):
+def test_valid_plaintext_store_and_rejection_of_damaged_or_empty_stores(legacy):
     key = b"a" * 32
     from cryptography.fernet import Fernet
 
@@ -149,12 +152,12 @@ def test_plaintext_damaged_and_empty_legacy_stores(legacy):
     for raw in [b"", b"not-json", b"{}"]:
         encryption_io.default_context().lock()
         store.write_bytes(b"s" * 16 + raw)
-        with pytest.raises(legacy.IncorrectPassword, match="No password"):
+        with pytest.raises(InvalidStore):
             legacy.decrypt_data(cipher)
         assert store.read_bytes() == b"s" * 16 + raw
     encryption_io.default_context().lock()
     store.write_bytes(b"short")
-    with pytest.raises(ValueError, match="corrupt"):
+    with pytest.raises(InvalidStore):
         legacy.decrypt_data(cipher)
 
 
@@ -165,7 +168,7 @@ def test_file_password_is_prompted_then_cached_and_persisted(
     path.write_bytes(encrypted_bytes(legacy, b"hello"))
     prompts = inputs(monkeypatch, ["file", "master", "master"])
     for _ in range(2):
-        with legacy.secure_open(path) as stream:
+        with encryption_io.default_context().open(path) as stream:
             assert stream.read() == "hello"
             assert stream.name == str(path)
     assert prompts == [
@@ -175,7 +178,7 @@ def test_file_password_is_prompted_then_cached_and_persisted(
     ]
     encryption_io.default_context().lock()
     prompts = inputs(monkeypatch, ["master"])
-    with legacy.secure_open(path) as stream:
+    with encryption_io.default_context().open(path) as stream:
         assert stream.read() == "hello"
     assert prompts == ["Master password: "]
 
@@ -184,8 +187,8 @@ def test_three_password_attempts_and_cancel(legacy, monkeypatch, tmp_path, capsy
     path = tmp_path / "encrypted"
     path.write_bytes(encrypted_bytes(legacy, b"hello"))
     prompts = inputs(monkeypatch, ["wrong", "wrong", "wrong"])
-    with pytest.raises(legacy.IncorrectPassword):
-        legacy.secure_open(path)
+    with pytest.raises(AuthenticationFailed):
+        encryption_io.default_context().open(path)
     assert len(prompts) == 3
     output = capsys.readouterr().out
     assert "2 attempts left" in output
@@ -193,7 +196,7 @@ def test_three_password_attempts_and_cancel(legacy, monkeypatch, tmp_path, capsy
     assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
     inputs(monkeypatch, [KeyboardInterrupt()])
     with pytest.raises(KeyboardInterrupt):
-        legacy.secure_open(path)
+        encryption_io.default_context().open(path)
 
 
 def test_failed_keystore_replacement_preserves_old_data(legacy, monkeypatch):
@@ -265,17 +268,23 @@ def test_encoding_errors_newlines_binary_and_name(legacy, tmp_path, encrypted):
     path = tmp_path / "sample"
     path.write_bytes(encrypted_bytes(legacy, raw) if encrypted else raw)
     encryption_io.default_context().install_keys([hashlib.sha256(b"file").digest()])
-    with legacy.secure_open(path, encoding="latin-1", newline="") as stream:
+    with encryption_io.default_context().open(
+        path, encoding="latin-1", newline=""
+    ) as stream:
         assert stream.read() == "café\r\nnext\rfinal\n"
         assert stream.name == str(path)
-    with legacy.secure_open(path, encoding="latin-1") as stream:
+    with encryption_io.default_context().open(path, encoding="latin-1") as stream:
         assert stream.read() == "café\nnext\nfinal\n"
-    with legacy.secure_open(path, encoding="ascii", errors="replace") as stream:
+    with encryption_io.default_context().open(
+        path, encoding="ascii", errors="replace"
+    ) as stream:
         assert "caf�" in stream.read()
-    with legacy.secure_open(path, encoding="ascii", errors="strict") as stream:
+    with encryption_io.default_context().open(
+        path, encoding="ascii", errors="strict"
+    ) as stream:
         with pytest.raises(UnicodeDecodeError):
             stream.read()
-    with legacy.secure_open(path, "rb") as stream:
+    with encryption_io.default_context().open(path, "rb") as stream:
         assert stream.read() == raw
 
 
@@ -284,21 +293,23 @@ def test_descriptor_nonseekable_and_write_modes_are_untouched(legacy, tmp_path):
     raw = encrypted_bytes(legacy, b"hello")
     path.write_bytes(raw)
     descriptor = os.open(path, os.O_RDONLY)
-    with legacy.secure_open(descriptor, "rb", closefd=False) as stream:
+    with encryption_io.default_context().open(
+        descriptor, "rb", closefd=False
+    ) as stream:
         assert stream.read() == raw
     os.close(descriptor)
     read_fd, write_fd = os.pipe()
     os.write(write_fd, raw)
     os.close(write_fd)
-    with legacy.secure_open(read_fd, "rb") as stream:
+    with encryption_io.default_context().open(read_fd, "rb") as stream:
         assert not stream.seekable()
         assert stream.read() == raw
-    with legacy.secure_open(path, "r+b") as stream:
+    with encryption_io.default_context().open(path, "r+b") as stream:
         assert stream.read() == raw
-    with legacy.secure_open(path, "ab") as stream:
+    with encryption_io.default_context().open(path, "ab") as stream:
         stream.write(b"tail")
     assert path.read_bytes() == raw + b"tail"
-    with legacy.secure_open(path, "wb") as stream:
+    with encryption_io.default_context().open(path, "wb") as stream:
         stream.write(b"replacement")
     assert path.read_bytes() == b"replacement"
 
@@ -319,7 +330,10 @@ def test_noninteractive_standalone_password_never_falls_back_to_echo(
     assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
 
 
-def test_strict_encryption_limits_preserve_files_and_store(tmp_path, monkeypatch):
+@pytest.mark.parametrize("persist_keys", [False, True])
+def test_encryption_limits_preserve_files_and_store(
+    tmp_path, monkeypatch, persist_keys
+):
     from w3plex.security import legacy as legacy_format
     from w3plex.security.errors import InvalidStore
 
@@ -327,7 +341,9 @@ def test_strict_encryption_limits_preserve_files_and_store(tmp_path, monkeypatch
         raise AssertionError("Over-limit writes must fail before requesting a password")
 
     store = tmp_path / "keys"
-    context = security.LegacyContext(store, input_handler=forbidden)
+    context = security.LegacyContext(
+        store, input_handler=forbidden, persist_keys=persist_keys
+    )
     context.install_keys([b"a" * 32] * 4096)
     with pytest.raises(InvalidStore):
         context.encrypt_data("PUBLIC-TEST", password="file", add_to_keystore=True)

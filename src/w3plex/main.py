@@ -25,7 +25,6 @@ from w3plex.security import (
     decrypt_file,
     enable_encrypted_io,
     encrypt_file,
-    secure_open,
 )
 from w3plex.security.io import request_password
 from w3plex.shell import Shell
@@ -224,10 +223,10 @@ def init_cmd(args):
 
 
 def load_config(filename: str) -> dict[str, Any]:
-    enable_encrypted_io()
+    context = enable_encrypted_io()
     return read_config(
         filename,
-        opener=cast(Opener, secure_open),
+        opener=cast(Opener, context.open),
         environment=os.environ,
         include_encoding=None,
     )
