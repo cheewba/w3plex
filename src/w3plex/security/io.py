@@ -1,5 +1,6 @@
 """Standalone convenience API. Importing it does not activate encrypted I/O."""
 
+import atexit
 import builtins
 import getpass
 import io
@@ -9,9 +10,9 @@ import threading
 from pathlib import Path
 
 from .errors import ActivationConflict, InteractionRequired
-from .legacy import LegacyContext, LegacyPasswordRequest
+from .encrypted_io import EncryptedIOContext, PasswordRequest
 
-_CONTEXT: LegacyContext | None = None
+_CONTEXT: EncryptedIOContext | None = None
 _CONTEXT_LOCK = threading.RLock()
 
 
@@ -21,7 +22,7 @@ def request_password(prompt: str) -> str:
     return getpass.getpass(prompt)
 
 
-def _terminal_password(request: LegacyPasswordRequest) -> str:
+def _terminal_password(request: PasswordRequest) -> str:
     prompts = {
         "master": "Master password: ",
         "master_confirm": "Master password confirm: ",
@@ -30,7 +31,7 @@ def _terminal_password(request: LegacyPasswordRequest) -> str:
     return request_password(prompts[request.kind])
 
 
-def default_context() -> LegacyContext:
+def default_context() -> EncryptedIOContext:
     """Lazy standalone context; independent consumers construct their own."""
     global _CONTEXT
     with _CONTEXT_LOCK:
@@ -41,20 +42,28 @@ def default_context() -> LegacyContext:
                 getattr(opener, "__self__", None), "_w3plex_security_context", False
             ):
                 opener = io.open
-            _CONTEXT = LegacyContext(
-                Path(
+            _CONTEXT = EncryptedIOContext(
+                legacy_keystore_path=Path(
                     os.environ.get(
                         "W3PLEX_KEYSTORE", str(Path.home() / ".keystore.bin")
+                    )
+                ).expanduser(),
+                keystore_path=Path(
+                    os.environ.get(
+                        "W3PLEX_SECRET_STORE",
+                        str(Path.home() / ".w3plex/secrets.vault"),
                     )
                 ).expanduser(),
                 input_handler=_terminal_password,
                 opener=opener,
                 persist_keys=True,
+                persist_legacy_keys=True,
             )
+            atexit.register(_CONTEXT.close)
         return _CONTEXT
 
 
-def enable_encrypted_io() -> LegacyContext:
+def enable_encrypted_io() -> EncryptedIOContext:
     """Activate standalone reads; repeated activation by the same owner is safe."""
     with _CONTEXT_LOCK:
         context = default_context()

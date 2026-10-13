@@ -1,8 +1,10 @@
 """Shared transparent reads of ordinary, ENC1 and W3FILE1 inputs."""
 
+import base64
 import hashlib
 import io
 import os
+import secrets
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
@@ -21,6 +23,8 @@ from .errors import (
 from .io_activation import activate, deactivate, is_active
 from .legacy import LegacyContext, LegacyPasswordRequest
 from .memory import LockedBuffer, ProcessProtection
+from .snapshots import snapshot_file
+from .storage import CiphertextFile, FileIdentity, StoreChanged
 from .vault import Vault, private_call
 
 _MAXIMUM_KEYS = 1024
@@ -52,18 +56,30 @@ class EncryptedIOContext:
     def __init__(
         self,
         *,
-        protection: ProcessProtection,
+        protection: ProcessProtection | None = None,
         input_handler: Callable[[PasswordRequest], str] | None = None,
         legacy_keystore_path: str | Path | None = None,
         persist_legacy_keys: bool = False,
         keystore: Vault | None = None,
+        keystore_path: str | Path | None = None,
         persist_keys: bool = False,
         opener: Callable[..., Any] = io.open,
     ):
-        if type(persist_keys) is not bool or (persist_keys and keystore is None):
+        if (
+            type(persist_keys) is not bool
+            or (keystore is not None and keystore_path is not None)
+            or (persist_keys and keystore is None and keystore_path is None)
+        ):
             raise InvalidStore()
-        self._protection = protection
+        self._protection = protection or ProcessProtection()
+        self._own_protection = protection is None
+        self._protection_started = False
         self._keystore = keystore
+        self._keystore_path = (
+            None if keystore_path is None else Path(keystore_path).absolute()
+        )
+        self._own_keystore = keystore_path is not None
+        self._keystore_bound = keystore is not None
         self._persist_keys = persist_keys
         self._input = input_handler
         self._opener = opener
@@ -97,6 +113,22 @@ class EncryptedIOContext:
         if self._closed or generation != self._generation:
             raise PermissionDenied()
 
+    def _check_protection(self) -> None:
+        with self._mutex:
+            if self._own_protection and not self._protection_started:
+                self._protection.activate()
+                self._protection_started = True
+            self._protection.check()
+
+    def file_password(self, source: str | Path) -> str:
+        """Trusted explicit CLI input, after required modern process controls."""
+        self._check_protection()
+        generation = self.generation
+        value = self._password("file", source)
+        with self._mutex:
+            self._check(generation)
+        return value
+
     def _password(self, kind: str, source: str | Path) -> str:
         if self._input is None:
             raise InteractionRequired()
@@ -111,13 +143,17 @@ class EncryptedIOContext:
 
     def unlock_keystore(self) -> None:
         generation = self.generation
-        self._protection.check()
+        self._check_protection()
+        self._prepare_keystore(create=True)
         keystore = self._keystore
         if keystore is None:
             raise InteractionRequired()
         if keystore.is_unlocked:
             with self._mutex:
                 self._check(generation)
+                if not self._keystore_bound:
+                    keystore.add_lock_listener(self._clear_keys)
+                    self._keystore_bound = True
             return
         password = self._password("master", keystore.path)
         with self._mutex:
@@ -130,6 +166,20 @@ class EncryptedIOContext:
             if create:
                 keystore.create(password.encode("utf-8"))
             keystore.unlock(password.encode("utf-8"))
+            if not self._keystore_bound:
+                keystore.add_lock_listener(self._clear_keys)
+                self._keystore_bound = True
+
+    def _prepare_keystore(self, *, create: bool) -> None:
+        with self._mutex:
+            self._check(self._generation)
+            if self._keystore is not None or self._keystore_path is None:
+                return
+            path = self._keystore_path
+            if not create and not path.exists():
+                return
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._keystore = Vault(CiphertextFile(path), protection=self._protection)
 
     def _stored_key(self, fingerprint: str) -> bytes | None:
         if self._keystore is None:
@@ -164,7 +214,13 @@ class EncryptedIOContext:
             raise PermissionDenied()
 
     def decrypt_bytes(
-        self, raw: bytes, *, source: str | Path, password: str | None = None
+        self,
+        raw: bytes,
+        *,
+        source: str | Path,
+        password: str | None = None,
+        use_keystore: bool = True,
+        ask_password: bool = True,
     ) -> bytes:
         generation = self.generation
         kind = detect_format(raw)
@@ -173,33 +229,50 @@ class EncryptedIOContext:
         if kind == "plain":
             return raw
         if kind == "legacy":
-            value = self._legacy.decrypt_bytes(raw, source=source, password=password)
+            value = self._legacy.decrypt_bytes(
+                raw,
+                source=source,
+                password=password,
+                use_keystore=use_keystore,
+                ask_password=ask_password,
+            )
             with self._mutex:
                 self._check(generation)
             return value
         envelope = file_format.parse(raw)
-        self._protection.check()
-        if self._keystore is not None:
+        self._check_protection()
+        if use_keystore:
+            self._prepare_keystore(create=self._persist_keys and ask_password)
+        if use_keystore and self._keystore is not None:
             self.unlock_keystore()
         store_generation = (
-            None if self._keystore is None else self._keystore.checkpoint()
+            None
+            if self._keystore is None or not use_keystore
+            else self._keystore.checkpoint()
         )
         fingerprint = hashlib.sha256(raw).hexdigest()
         with self._mutex:
             self._check(generation)
             with self._key_mutex:
-                buffer = self._keys.get(fingerprint) if password is None else None
+                buffer = (
+                    self._keys.get(fingerprint)
+                    if password is None and use_keystore
+                    else None
+                )
                 key = None if buffer is None else buffer.copy_bytes()
-            if key is None and password is None:
+            if key is None and password is None and use_keystore:
                 key = self._stored_key(fingerprint)
             with self._key_mutex:
                 if key is None and len(self._keys) >= _MAXIMUM_KEYS:
                     raise InvalidStore()
         if key is None:
+            if password is None and not ask_password:
+                raise AuthenticationFailed()
             secret = self._password("file", source) if password is None else password
             with self._mutex:
                 self._check(generation)
-                self._check_keystore(store_generation)
+                if use_keystore:
+                    self._check_keystore(store_generation)
             key = file_format.unwrap(envelope, secret.encode("utf-8"))
         value = file_format.open_payload(envelope, key)
         with (
@@ -207,9 +280,10 @@ class EncryptedIOContext:
             nullcontext() if self._keystore is None else self._keystore.mutex,
         ):
             self._check(generation)
-            self._check_keystore(store_generation)
-            self._protection.check()
-            if self._persist_keys:
+            if use_keystore:
+                self._check_keystore(store_generation)
+            self._check_protection()
+            if self._persist_keys and use_keystore and self._keystore is not None:
                 self._remember_key(fingerprint, key)
             else:
                 with self._key_mutex:
@@ -220,6 +294,139 @@ class EncryptedIOContext:
                             key, protection=self._protection
                         )
         return value
+
+    def _encrypted(self, data: bytes, password: str, *, add_to_keystore: bool) -> bytes:
+        generation = self.generation
+        self._check_protection()
+        envelope, key = file_format.seal(data, password.encode("utf-8"))
+        raw = envelope.serialize()
+        if add_to_keystore:
+            self.unlock_keystore()
+        with self._mutex:
+            self._check(generation)
+            fingerprint = hashlib.sha256(raw).hexdigest()
+            if add_to_keystore:
+                self._remember_key(fingerprint, key)
+            else:
+                with self._key_mutex:
+                    if len(self._keys) >= _MAXIMUM_KEYS:
+                        raise InvalidStore()
+                    self._keys[fingerprint] = LockedBuffer(
+                        key, protection=self._protection
+                    )
+        return raw
+
+    def encrypt_data(
+        self,
+        data: str | bytes,
+        *,
+        password: str | None = None,
+        add_to_keystore: bool = True,
+    ) -> tuple[str, str]:
+        if password is None and not add_to_keystore:
+            raise ValueError(
+                "Either password must be provided or add_to_keystore must be True"
+            )
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        password = secrets.token_urlsafe(32) if password is None else password
+        raw = self._encrypted(data, password, add_to_keystore=add_to_keystore)
+        return base64.b64encode(raw).decode("ascii"), password
+
+    def decrypt_data(
+        self, encrypted: str, *, password: str | None = None, use_keystore: bool = True
+    ) -> str:
+        raw = None
+        try:
+            raw = base64.b64decode(encrypted.encode("ascii"), validate=True)
+        except (ValueError, UnicodeError):
+            pass
+        if raw is None:
+            raise ValueError("Invalid base64-encoded data")
+        if detect_format(raw) == "plain":
+            return encrypted
+        return self.decrypt_bytes(
+            raw,
+            source="encrypted data",
+            password=password,
+            use_keystore=use_keystore,
+            ask_password=False,
+        ).decode("utf-8")
+
+    def encrypt_file(
+        self,
+        src: str | Path,
+        *,
+        password: str | None = None,
+        dst: str | Path | None = None,
+        inplace: bool = False,
+        add_to_keystore: bool = False,
+    ) -> Path:
+        self._check_protection()
+        generation = self.generation
+        source = Path(src).absolute()
+        snapshot = snapshot_file(source, maximum_size=file_format.MAXIMUM_PLAINTEXT)
+        if detect_format(snapshot.raw) != "plain":
+            raise ValueError("Source is already encrypted")
+        destination = (
+            Path(src)
+            if inplace
+            else Path(dst)
+            if dst
+            else Path(src).with_suffix(Path(src).suffix + ".enc")
+        )
+        with CiphertextFile(
+            destination, maximum_size=file_format.MAXIMUM_SIZE, private=False
+        ) as storage:
+            expected = storage.identity()
+            if storage.path == source and expected != FileIdentity(*snapshot.identity):
+                raise StoreChanged()
+            secret = self._password("file", source) if password is None else password
+            with self._mutex:
+                self._check(generation)
+            raw = self._encrypted(snapshot.raw, secret, add_to_keystore=add_to_keystore)
+            with self._mutex:
+                self._check(generation)
+                storage.write(raw, expected=expected)
+        return destination
+
+    def decrypt_file(
+        self,
+        src: str | Path,
+        *,
+        password: str | None = None,
+        dst: str | Path | None = None,
+        inplace: bool = False,
+        use_keystore: bool = False,
+    ) -> Path:
+        generation = self.generation
+        source = Path(src).absolute()
+        snapshot = snapshot_file(source, maximum_size=file_format.MAXIMUM_SIZE)
+        if detect_format(snapshot.raw) == "plain":
+            raise ValueError("Source is not encrypted")
+        destination = (
+            Path(src)
+            if inplace
+            else Path(dst)
+            if dst
+            else Path(src).with_suffix(".dec")
+        )
+        with CiphertextFile(
+            destination, maximum_size=file_format.MAXIMUM_PLAINTEXT, private=False
+        ) as storage:
+            expected = storage.identity()
+            if storage.path == source and expected != FileIdentity(*snapshot.identity):
+                raise StoreChanged()
+            plaintext = self.decrypt_bytes(
+                snapshot.raw,
+                source=source,
+                password=password,
+                use_keystore=use_keystore,
+            )
+            with self._mutex:
+                self._check(generation)
+                storage.write_plaintext(plaintext, expected=expected)
+        return destination
 
     def open(
         self,
@@ -260,6 +467,11 @@ class EncryptedIOContext:
                 plain = self.decrypt_bytes(raw, source=os.fsdecode(file))
                 break
             except AuthenticationFailed:
+                if kind == "legacy":
+                    if not self._legacy.persist_keys:
+                        self._legacy.lock()
+                    elif attempt < 2:
+                        print(f"Incorrect password, {2 - attempt} attempts left")
                 if attempt == 2:
                     raise
         buffer = io.BytesIO(plain)
@@ -326,4 +538,8 @@ class EncryptedIOContext:
             if self.active:
                 self.disable()
             self._closed = True
-            self.lock()
+            try:
+                self.lock()
+            finally:
+                if self._own_keystore and self._keystore is not None:
+                    self._keystore.close()

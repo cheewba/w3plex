@@ -3,10 +3,10 @@
 `W3FILE1` stores one authenticated text or binary payload. It differs from
 `W3VAULT1`, which stores records and metadata. The low-level codec is in
 `w3plex.security.file_format`. The explicit `EncryptedIOContext` recognizes
-ordinary files, ENC1 and W3FILE1. Default CLI/helper integration is separate work
-and must not be assumed from the codec alone.
+ordinary files, ENC1 and W3FILE1. Default security helpers and CLI encryption
+produce this format; decrypt detects modern and legacy external files.
 
-For trusted standalone code, establish process protection before requesting a
+For trusted embedded code, establish process protection before requesting a
 modern file password:
 
 ```python
@@ -49,6 +49,19 @@ temporary owned keys. Locking either the context or its supplied vault clears
 these keys; a lock/unlock during file-password input invalidates that operation.
 Lock notifications coexist with the vault's primary host owner. The caller
 owns a supplied vault and closes it separately after closing the context.
+
+Standalone contexts can use keystore_path instead of a supplied vault. They
+prepare the private store lazily and close its owned descriptors at teardown.
+Without a supplied ProcessProtection, explicit modern operations activate and
+verify owned protection before input or secret use. Import, activation and plain
+reads do not do so. Native Windows modern operations are refused until required
+memory and storage support is implemented and verified.
+
+New ciphertext writes use checked atomic replacement and contain no plaintext
+temporary file. Explicit decrypt_file output is a direct final write, not an
+atomic plaintext replacement; an interruption can leave partial final plaintext.
+Both modes reject unsafe aliases and preserve source/output on authentication
+failure. See the [migration guide](security-migration.md) for defaults and paths.
 
 The on-disk layout is:
 

@@ -14,7 +14,7 @@ from typing import Any
 
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .memory import LockedBuffer, ProcessProtection
-from .storage import CiphertextFile, FileIdentity
+from .storage import CiphertextFile, FileIdentity, UnsafeStorage
 from .vault_format import (
     DEFAULT_KDF,
     Envelope,
@@ -48,6 +48,8 @@ def private_call[T](function: Callable[[], T]) -> T:
 
 class Vault:
     def __init__(self, storage: CiphertextFile, *, protection: ProcessProtection):
+        if not storage.private:
+            raise UnsafeStorage()
         self._storage = storage
         self._protection = protection
         self._mutex = threading.RLock()
