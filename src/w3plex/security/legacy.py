@@ -6,7 +6,6 @@ These formats retain their historical protection; new protected storage uses Vau
 """
 
 import base64
-import builtins
 import hashlib
 import io
 import json
@@ -24,15 +23,13 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import (
-    ActivationConflict,
     AuthenticationFailed,
     InteractionRequired,
     InvalidStore,
     PermissionDenied,
 )
+from .io_activation import activate, deactivate, is_active
 
-_ACTIVATION_LOCK = threading.RLock()
-_ACTIVE: "LegacyContext | None" = None
 _HISTORICAL_N = (32768, 16384, 8192, 4096)
 _MAX_STORE = 1024 * 1024
 _MAX_FILE = 64 * 1024 * 1024
@@ -65,8 +62,6 @@ class LegacyContext:
         self._keys: list[bytes] | None = None
         self._salt: bytes | None = None
         self._master_key: bytes | None = None
-        self._previous: Any = None
-        self._installed: Any = None
         self._lock = threading.RLock()
         self._epoch = 0
 
@@ -85,8 +80,7 @@ class LegacyContext:
 
     @property
     def active(self) -> bool:
-        with _ACTIVATION_LOCK:
-            return _ACTIVE is self and builtins.open is self._installed
+        return is_active(self)
 
     def fork(self, *, input_handler: Callable[[LegacyPasswordRequest], str]):
         with self._lock:
@@ -332,10 +326,14 @@ class LegacyContext:
                 self._add_key(key, persist=self._persist_keys)
             return plain
 
-    def decrypt_bytes(self, raw: bytes, *, source: str | Path) -> bytes:
+    def decrypt_bytes(
+        self, raw: bytes, *, source: str | Path, password: str | None = None
+    ) -> bytes:
         """Private read; ordinary contexts never rewrite the source keystore."""
         return (
-            self._decrypt_bytes(raw, source=source) if raw.startswith(b"ENC1") else raw
+            self._decrypt_bytes(raw, source=source, password=password)
+            if raw.startswith(b"ENC1")
+            else raw
         )
 
     def _read_file(self, source: Path) -> bytes:
@@ -485,27 +483,10 @@ class LegacyContext:
         )
 
     def enable(self):
-        global _ACTIVE
-        with _ACTIVATION_LOCK:
-            if _ACTIVE is not None or getattr(
-                getattr(builtins.open, "__self__", None),
-                "_w3plex_security_context",
-                False,
-            ):
-                raise ActivationConflict()
-            self._previous = builtins.open
-            self._installed = self.open
-            builtins.open = self._installed
-            _ACTIVE = self
+        activate(self, self.open)
 
     def disable(self):
-        global _ACTIVE
-        with _ACTIVATION_LOCK:
-            if _ACTIVE is not self or builtins.open is not self._installed:
-                raise ActivationConflict()
-            builtins.open = self._previous
-            self._previous = self._installed = None
-            _ACTIVE = None
+        deactivate(self)
 
     @contextmanager
     def activated(self):
