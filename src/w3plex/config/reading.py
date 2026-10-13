@@ -5,11 +5,17 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from ruamel import yaml
 
 from w3plex.config.yaml import Dumper, Loader
+
+from ..security import SecretJson, SecretRef
+from ..security.errors import InvalidStore, PermissionDenied
+from ..security.refs import _safe
+from ..security.vault_format import canonical
+from ..utils.dist import AttrDict
 
 Opener = Callable[..., TextIO]
 _VARIABLE = re.compile(r"\$(?:\{(?P<braced>[^}]+)\}|(?P<plain>\w+))")
@@ -63,3 +69,62 @@ def create_config(
     with opener(path, "x", encoding="utf-8") as stream:
         stream.write(rendered)
     return path
+
+
+def load_reference_config(
+    source: SecretRef[bytes],
+    *,
+    environment: Mapping[str, str],
+    filename: str | Path = "w3plex.yaml",
+    includes: Mapping[str | Path, SecretRef[bytes]] | None = None,
+) -> AttrDict:
+    """Read trusted YAML snapshots and replace string values with local references.
+
+    Includes must be preloaded explicitly; this function never reads a source
+    path from disk. Parsed/expanded values are encrypted as one new snapshot.
+    Temporary Python parser objects cannot be reliably erased. The resulting
+    config is private service data, not a model serialization format.
+    """
+
+    def operation():
+        root = os.path.abspath(filename)
+        sources = {
+            os.path.abspath(path): value for path, value in (includes or {}).items()
+        }
+        sources[root] = source
+
+        def opener(path, *args, **kwargs):
+            selected = sources.get(os.path.abspath(path))
+            if selected is None:
+                raise PermissionDenied()
+            return io.StringIO(selected._use(lambda raw: raw.decode("utf-8-sig")))
+
+        values = load_config(root, opener=opener, environment=environment)
+
+        def validate(value):
+            if isinstance(value, dict):
+                if any(type(key) is not str for key in value):
+                    raise InvalidStore()
+                for item in value.values():
+                    validate(item)
+            elif isinstance(value, list):
+                for item in value:
+                    validate(item)
+
+        validate(values)
+        captured = source._store.capture(canonical(values))
+
+        def bind(value, path):
+            if isinstance(value, str):
+                return SecretJson[str](captured, path)
+            if isinstance(value, dict):
+                return AttrDict(
+                    {key: bind(item, (*path, key)) for key, item in value.items()}
+                )
+            if isinstance(value, list):
+                return [bind(item, (*path, index)) for index, item in enumerate(value)]
+            return value
+
+        return cast(AttrDict, bind(values, ()))
+
+    return _safe(operation)
