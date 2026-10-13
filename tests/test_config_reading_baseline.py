@@ -1,8 +1,16 @@
 """Characterize CLI config reads before connecting the shared library reader."""
 
+import builtins
+
 import pytest
 
 from w3plex.main import load_config
+
+
+@pytest.fixture(autouse=True)
+def restore_global_opener(monkeypatch):
+    # Legacy CLI activation is expected; keep it local to each test.
+    monkeypatch.setattr(builtins, "open", builtins.open)
 
 
 def test_cli_config_expands_variables_in_nested_includes(tmp_path, monkeypatch):

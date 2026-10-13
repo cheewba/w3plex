@@ -7,13 +7,19 @@ import os
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from rich import print
 from ruamel.yaml import dump as yaml_dump, load as yaml_load
 
-from w3plex.config import Dumper, Include, Loader as YamlLoader
+from w3plex.config import (
+    Dumper,
+    Include,
+    Loader as YamlLoader,
+    load_config as read_config,
+)
+from w3plex.config.reading import Opener
 from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
 from w3plex.shell import Shell
@@ -215,14 +221,12 @@ def init_cmd(args):
 def load_config(filename: str) -> dict[str, Any]:
     from w3plex.secure import secure_open
 
-    with cast(TextIO, secure_open(filename, encoding="utf-8")) as stream:
-        expanded = os.path.expandvars(stream.read())
-    named = io.StringIO(expanded)
-    named.name = os.path.abspath(filename)
-    cfg = yaml_load(named, YamlLoader)
-    if not isinstance(cfg, dict):
-        raise TypeError(f"Config must be a YAML mapping: {filename}")
-    return cfg
+    return read_config(
+        filename,
+        opener=cast(Opener, secure_open),
+        environment=os.environ,
+        include_encoding=None,
+    )
 
 
 def main():
