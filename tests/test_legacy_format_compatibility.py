@@ -1,8 +1,6 @@
 """Cross-version tests; all passwords and values are public test data."""
 
 import hashlib
-import builtins
-import importlib
 import json
 import os
 import subprocess
@@ -11,26 +9,23 @@ from pathlib import Path
 
 import pytest
 
+from w3plex.security import LegacyContext
+
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 
 
-@pytest.fixture
-def encryption():
-    previous = builtins.open
-    try:
-        return importlib.import_module("w3plex.secure")
-    finally:
-        builtins.open = previous
-
-
-def test_new_file_and_keystore_are_readable_by_frozen_baseline(tmp_path, monkeypatch, encryption):
+@pytest.mark.parametrize("n", [None, 4096, 8192, 16384, 32768])
+def test_new_file_and_keystore_are_readable_by_frozen_baseline(tmp_path, n):
     store = tmp_path / "keystore.bin"
-    monkeypatch.setattr(encryption, "_KEYSTORE_PATH", store)
-    monkeypatch.setattr(encryption, "_salt", None)
-    monkeypatch.setattr(encryption, "_master_key", None)
-    monkeypatch.setattr(encryption, "_SCRYPT_WORK", None)
-    replies = iter(["PUBLIC-TEST-master", "PUBLIC-TEST-master"])
-    monkeypatch.setattr(encryption.getpass, "getpass", lambda _: next(replies))
+    master = "PUBLIC-TEST-master"
+    if n is not None:
+        manifest = json.loads((FIXTURES / "manifest.json").read_text())
+        master = manifest["master_password"]
+        store.write_bytes((FIXTURES / f"ks01-{n}.bin").read_bytes())
+    replies = iter([master, master])
+    encryption = LegacyContext(
+        store, input_handler=lambda _: next(replies), compatibility=True
+    )
     source = tmp_path / "input.txt"
     source.write_text("PUBLIC-TEST-value\r\n", encoding="utf-8", newline="")
     output = encryption.encrypt_file(
@@ -41,14 +36,20 @@ def test_new_file_and_keystore_are_readable_by_frozen_baseline(tmp_path, monkeyp
         [
             sys.executable,
             "-c",
-            """import getpass, runpy, sys
-getpass.getpass = lambda _: "PUBLIC-TEST-master"
+            """import getpass, hashlib, runpy, sys
+getpass.getpass = lambda _: sys.argv[3]
 old = runpy.run_path(sys.argv[1])
+if sys.argv[4] != "None":
+    state = old["secure_open"].__globals__
+    state["_SCRYPT_N"] = int(sys.argv[4])
+    state["scrypt"] = lambda *args, **kwargs: hashlib.scrypt(*args, **kwargs, maxmem=128 * 1024 * 1024)
 with old["secure_open"](sys.argv[2], "rb") as stream:
     assert stream.read() == b"PUBLIC-TEST-value\\r\\n"
 """,
             str(FIXTURES / "baseline_reader.py"),
             str(output),
+            master,
+            str(n),
         ],
         env={**os.environ, "W3PLEX_KEYSTORE": str(store)},
         capture_output=True,
@@ -63,4 +64,7 @@ with old["secure_open"](sys.argv[2], "rb") as stream:
 def test_frozen_baseline_reader_matches_recorded_provenance():
     provenance = json.loads((FIXTURES / "baseline-reader.json").read_text())
     assert provenance["revision"] == "d3a88e1"
-    assert hashlib.sha256((FIXTURES / "baseline_reader.py").read_bytes()).hexdigest() == provenance["sha256"]
+    assert (
+        hashlib.sha256((FIXTURES / "baseline_reader.py").read_bytes()).hexdigest()
+        == provenance["sha256"]
+    )

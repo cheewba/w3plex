@@ -109,6 +109,16 @@ def test_cli_encrypt_decrypt_absolute_paths_with_spaces_without_config(tmp_path)
     assert destination.read_text() == "hello\n"
 
 
+def test_cli_noninteractive_password_request_returns_interaction_required(tmp_path):
+    source = tmp_path / "input.txt"
+    source.write_text("PUBLIC-TEST-input")
+    result = run_cli(tmp_path, "encrypt", str(source), "--password")
+    assert result.returncode == 1
+    assert "interaction_required" in result.stderr
+    assert "may be echoed" not in result.stderr
+    assert not source.with_suffix(".txt.enc").exists()
+
+
 def test_cli_preserves_quoted_values_and_parses_typed_overrides(tmp_path):
     (tmp_path / "sample.py").write_text("""from w3plex import application
 @application

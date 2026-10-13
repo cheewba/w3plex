@@ -24,7 +24,8 @@ assert builtins.open is before
 assert os.environ == env
 assert "w3plex.main" not in sys.modules
 assert "w3plex.shell" not in sys.modules
-assert "w3plex.secure" not in sys.modules
+import importlib.util
+assert importlib.util.find_spec("w3plex.secure") is None
 """,
         ],
         cwd=tmp_path,

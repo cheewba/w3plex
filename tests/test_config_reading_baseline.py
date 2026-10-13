@@ -5,12 +5,16 @@ import builtins
 import pytest
 
 from w3plex.main import load_config
+from w3plex.security import disable_encrypted_io
 
 
 @pytest.fixture(autouse=True)
-def restore_global_opener(monkeypatch):
-    # Legacy CLI activation is expected; keep it local to each test.
-    monkeypatch.setattr(builtins, "open", builtins.open)
+def restore_global_opener():
+    previous = builtins.open
+    yield
+    if builtins.open is not previous:
+        disable_encrypted_io()
+    assert builtins.open is previous
 
 
 def test_cli_config_expands_variables_in_nested_includes(tmp_path, monkeypatch):

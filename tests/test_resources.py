@@ -87,14 +87,16 @@ def test_dashboard_navigation_preserves_children_for_each_page():
 
 
 def test_encrypted_open_preserves_text_binary_and_file_descriptor_reads(tmp_path):
-    # secure intentionally patches open globally; keep that behavior in a subprocess.
+    # Keep process-wide activation local to this subprocess.
     script = """import builtins, os
 from pathlib import Path
-from w3plex import secure
+from w3plex import security
+import hashlib
 source = Path("plain.txt")
 source.write_text("hello\\n", encoding="utf-8")
-encrypted = secure.encrypt_file(source, password="file password")
-secure._all_keys = lambda: [secure._derive_file_key("file password")]
+encrypted = security.encrypt_file(source, password="file password")
+context = security.enable_encrypted_io()
+context.install_keys([hashlib.sha256(b"file password").digest()])
 with builtins.open(encrypted) as stream:
     assert stream.read() == "hello\\n"
     assert stream.name == str(encrypted)
@@ -103,7 +105,7 @@ with builtins.open(encrypted, "rb") as stream:
 descriptor = os.open(source, os.O_RDONLY)
 with builtins.open(descriptor) as stream:
     assert stream.read() == "hello\\n"
-assert secure._KEYSTORE_PATH == Path(os.environ["W3PLEX_KEYSTORE"])
+assert context.path == Path(os.environ["W3PLEX_KEYSTORE"])
 """
     import os
 

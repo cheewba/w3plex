@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import getpass
 import glob
 import io
 import os
@@ -22,6 +21,13 @@ from w3plex.config import (
 from w3plex.config.reading import Opener
 from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
+from w3plex.security import (
+    decrypt_file,
+    enable_encrypted_io,
+    encrypt_file,
+    secure_open,
+)
+from w3plex.security.io import request_password
 from w3plex.shell import Shell
 
 load_dotenv(Path.cwd() / ".env")
@@ -44,6 +50,7 @@ def _get_base_args_parse(*args, **kwargs) -> argparse.ArgumentParser:
 
 
 def process_args(argv=None):
+    enable_encrypted_io()
     argv = sys.argv[1:] if argv is None else argv
     cfg_args, remaining = _get_base_args_parse(add_help=False).parse_known_args(argv)
     cfg_path = os.path.abspath(cfg_args.config)
@@ -126,8 +133,6 @@ def process_args(argv=None):
 
 
 def crypt_cmd(args, *, encrypt):
-    from w3plex.secure import decrypt_file, encrypt_file
-
     files = sorted(
         {
             Path(filename)
@@ -141,7 +146,7 @@ def crypt_cmd(args, *, encrypt):
     if args.dst and len(files) != 1:
         raise ValueError("--output requires exactly one source file")
     password = (
-        getpass.getpass("File password: ")
+        request_password("File password: ")
         if args.password == EMPTY_PASSWORD
         else args.password
     )
@@ -219,8 +224,7 @@ def init_cmd(args):
 
 
 def load_config(filename: str) -> dict[str, Any]:
-    from w3plex.secure import secure_open
-
+    enable_encrypted_io()
     return read_config(
         filename,
         opener=cast(Opener, secure_open),
