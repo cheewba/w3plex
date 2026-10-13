@@ -9,6 +9,7 @@ from typing import Annotated, NotRequired, TypedDict, cast
 from ..security.contracts import Public, SecretKind, SecretRef
 from ..security.diagnostics import private_async
 from ..security.errors import PermissionDenied, SecurityError
+from ..security.refs import SecretRef as LocalSecretRef
 from .transport import NullableResponse, ProtectedHTTP, RequestSpec, ResponseType
 
 _TEXT = ResponseType.TEXT
@@ -84,7 +85,7 @@ class ProtectedDeBank:
     def __init__(
         self,
         http: ProtectedHTTP,
-        credential: SecretRef,
+        credential: SecretRef | LocalSecretRef,
         *,
         registration: str,
         origin: str = "https://pro-openapi.debank.com",
@@ -205,7 +206,7 @@ class ProtectedOdos:
         registration: str,
         chain_id: int,
         origin: str = "https://api.odos.xyz",
-        credential: SecretRef | None = None,
+        credential: SecretRef | LocalSecretRef | None = None,
         auth_name: str = "Authorization",
         auth_prefix: str = "Bearer ",
     ):

@@ -71,6 +71,10 @@ class SecretRef[T]:
         return self._source.identifier
 
     @property
+    def kind(self) -> SecretKind:
+        return self._source.kind
+
+    @property
     def _selection(self) -> str:
         return self.identifier
 
@@ -244,12 +248,39 @@ class SecretStore:
     def __reduce_ex__(self, protocol: SupportsIndex) -> Never:
         raise PermissionDenied()
 
-    def capture(self, value: bytes) -> SecretRef[bytes]:
+    def capture(
+        self, value: bytes, *, kind: SecretKind = SecretKind.DATA
+    ) -> SecretRef[bytes]:
         """Privately encrypt a snapshot before returning its immutable handle."""
-        if not isinstance(value, bytes) or len(value) > MAX_SNAPSHOT_SIZE:
+        if (
+            not isinstance(value, bytes)
+            or len(value) > MAX_SNAPSHOT_SIZE
+            or not isinstance(kind, SecretKind)
+            or kind
+            not in {SecretKind.DATA, SecretKind.API, SecretKind.RPC, SecretKind.MODEL}
+        ):
             raise InvalidStore()
-        source = self._vault.add(SecretKind.DATA, value, uses=[SecretUse.DECRYPT])
+        purpose = SecretUse.DECRYPT if kind is SecretKind.DATA else SecretUse.HTTP
+        source = self._vault.add(kind, value, uses=[purpose])
         return SecretRef(self, source)
+
+    def credential(
+        self, reference: SecretRef, *, kind: SecretKind = SecretKind.API
+    ) -> SecretRef[bytes]:
+        """Privately copy a selected field into a classified encrypted record."""
+        if not isinstance(kind, SecretKind) or kind not in {
+            SecretKind.API,
+            SecretKind.RPC,
+            SecretKind.MODEL,
+        }:
+            raise InvalidStore()
+
+        def capture(value):
+            return self.capture(
+                value.encode("utf-8") if isinstance(value, str) else value, kind=kind
+            )
+
+        return reference._use(capture)
 
     def capture_file(
         self, filename: str | Path, *, legacy: LegacyContext | None = None
@@ -271,15 +302,20 @@ class SecretStore:
 
         return _safe(operation)
 
-    def reference(self, identifier: str) -> SecretRef[bytes]:
+    def reference(
+        self, identifier: str, *, kind: SecretKind = SecretKind.DATA
+    ) -> SecretRef[bytes]:
         """Rebind a stored snapshot ID; authenticity is checked during use."""
         if (
             not isinstance(identifier, str)
             or len(identifier) != 32
             or any(c not in "0123456789abcdef" for c in identifier)
+            or not isinstance(kind, SecretKind)
+            or kind
+            not in {SecretKind.DATA, SecretKind.API, SecretKind.RPC, SecretKind.MODEL}
         ):
             raise PermissionDenied()
-        return SecretRef(self, SecretId(identifier, SecretKind.DATA))
+        return SecretRef(self, SecretId(identifier, kind))
 
     def _stamp(self) -> LockedBuffer:
         if self._check_host is not None:
@@ -332,9 +368,12 @@ class SecretStore:
                     raise PermissionDenied()
                 return result
 
-            return self._vault._use_secret(
-                reference._source, SecretUse.DECRYPT, consume
+            purpose = (
+                SecretUse.DECRYPT
+                if reference.kind is SecretKind.DATA
+                else SecretUse.HTTP
             )
+            return self._vault._use_secret(reference._source, purpose, consume)
 
     def _use[T, R](self, reference: SecretRef[T], consumer: Callable[[T], R]) -> R:
         return _safe(

@@ -26,6 +26,7 @@ from yarl import URL
 from ..security.contracts import Public, SecretKind, SecretRef, SecretUse
 from ..security.diagnostics import private_async
 from ..security.errors import PermissionDenied, SecurityError, UnsupportedProtection
+from ..security.refs import SecretRef as LocalSecretRef
 from ..security.session import Session, SessionState
 from ..security.vault import Vault
 from ..security.vault_format import canonical
@@ -81,7 +82,7 @@ class RequestSpec:
     response_shape: ResponseShape
     parameters: tuple[str, ...] = ()
     body_fields: tuple[str, ...] = ()
-    secret: SecretRef | None = None
+    secret: SecretRef | LocalSecretRef | None = None
     auth: AuthPlacement = AuthPlacement.HEADER
     auth_name: str = "Authorization"
     auth_prefix: str = "Bearer "
@@ -287,6 +288,11 @@ class ProtectedHTTP:
         }:
             raise PermissionDenied()
         if (
+            isinstance(spec.secret, LocalSecretRef)
+            and spec.secret._store._vault is not self._vault
+        ):
+            raise PermissionDenied()
+        if (
             not spec.auth_name
             or any(
                 character in spec.auth_name + spec.auth_prefix for character in "\r\n"
@@ -349,13 +355,18 @@ class ProtectedHTTP:
             raise PermissionDenied()
         if spec.auth is AuthPlacement.QUERY and spec.auth_name in params:
             raise PermissionDenied()
+        intent_values = {"parameters": params, "body": payload}
+        if isinstance(spec.secret, LocalSecretRef):
+            intent_values["credential_selection"] = spec.secret._selection
         intent = RequestIntent(
             operation,
             name,
-            hashlib.sha256(
-                canonical({"parameters": params, "body": payload})
-            ).hexdigest(),
-            spec.secret,
+            hashlib.sha256(canonical(intent_values)).hexdigest(),
+            (
+                spec.secret._source
+                if isinstance(spec.secret, LocalSecretRef)
+                else spec.secret
+            ),
         )
         status = self._session.status()
         public_url = URL(spec.origin)
@@ -436,12 +447,26 @@ class ProtectedHTTP:
             if task is None:
                 raise PermissionDenied()
             self._session.track(status.generation, task, close=client.close)
+
+            def use_secret():
+                if isinstance(secret_reference, LocalSecretRef):
+
+                    def authenticate_local(value):
+                        if isinstance(value, str):
+                            value = value.encode("utf-8")
+                        if not isinstance(value, bytes) or not value:
+                            raise PermissionDenied()
+                        return authenticate(value)
+
+                    return secret_reference._use(authenticate_local)
+                return self._vault._use_secret(
+                    secret_reference, SecretUse.HTTP, authenticate
+                )
+
             return self._session.use(
                 status.generation,
                 operation,
-                lambda: self._vault._use_secret(
-                    secret_reference, SecretUse.HTTP, authenticate
-                ),
+                use_secret,
             )
         except BaseException:
             await self._close_client(client)

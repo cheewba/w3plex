@@ -11,6 +11,7 @@ from web3.types import RPCEndpoint, RPCResponse
 from ..security.contracts import SecretKind, SecretRef
 from ..security.diagnostics import private_async
 from ..security.errors import PermissionDenied, SecurityError
+from ..security.refs import SecretRef as LocalSecretRef
 from .transport import (
     AuthPlacement,
     NullableResponse,
@@ -233,7 +234,7 @@ class ProtectedRPC(AsyncBaseProvider):
         chain_id: int,
         origin: str,
         path: str,
-        credential: SecretRef | None = None,
+        credential: SecretRef | LocalSecretRef | None = None,
         auth: AuthPlacement = AuthPlacement.HEADER,
         auth_name: str = "Authorization",
         auth_prefix: str = "Bearer ",
