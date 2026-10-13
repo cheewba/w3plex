@@ -19,6 +19,5 @@ from .legacy import (
 )
 from .refs import (
     ISecretRef as ISecretRef,
-    SecretRef as SecretRef,
     SecretStore as SecretStore,
 )

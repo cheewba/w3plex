@@ -9,7 +9,7 @@ from cryptography.fernet import Fernet
 
 from w3plex.config import config_loader
 from w3plex.config.reading import load_reference_config
-from w3plex.security import SecretRef
+from w3plex.security import ISecretRef
 from w3plex.security.legacy import LegacyContext
 
 
@@ -36,7 +36,7 @@ def test_captured_yaml_keeps_constructor_and_object_reference_strings(
         try:
             assert tree.alias is tree.reader
             value = (await tree.reader())[0]
-            assert isinstance(value, SecretRef)
+            assert isinstance(value, ISecretRef)
             assert value.ref(silent=True) == "external data"
         finally:
             await tree.close()

@@ -135,24 +135,6 @@ class FileLoader[T]:
             result.append(SecretString(source, offset, len(value.encode("utf-8"))))
         return result
 
-    @staticmethod
-    def from_secret(
-        source: ISecretRef[bytes], *, filter: str | None = None
-    ) -> "SecretFileLoader[Any]":
-        """Opt in to reference results; the ordinary constructor stays compatible."""
-        return SecretFileLoader(source, filter=filter)
-
-
-class SecretFileLoader[T](FileLoader[T]):
-    """Compatibility constructor for the reference path of FileLoader."""
-
-    def __init__(self, file: ISecretRef[bytes], *, filter: str | None = None):
-        self.file = file
-        config: FileLoaderConfig = {"file": file}
-        if filter is not None:
-            config["filter"] = filter
-        super().__init__(**config)
-
 
 def accounts_loader(
     **kwargs: Unpack[FileLoaderConfig],

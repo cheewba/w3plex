@@ -8,10 +8,10 @@ import pytest
 from cryptography.fernet import Fernet
 
 from w3plex.config.reading import load_reference_config
-from w3plex.security import SecretRef
+from w3plex.security import ISecretRef
 from w3plex.security.errors import PermissionDenied
 from w3plex.security.legacy import LegacyContext
-from w3plex.utils.loader import FileLoader, SecretFileLoader
+from w3plex.utils.loader import FileLoader
 
 PASSWORD = b"PUBLIC-TEST-snapshot-password"
 
@@ -20,10 +20,10 @@ def test_line_reader_preserves_bom_comments_unicode_and_raw_filter(secret_store)
     source = secret_store.capture(
         b"\xef\xbb\xbf # ignored\r\n\r\n one \r\n\tcaf\xc3\xa9\t\n"
     )
-    values = asyncio.run(FileLoader.from_secret(source).process())
-    assert all(isinstance(value, SecretRef) for value in values)
+    values = asyncio.run(FileLoader(file=source).process())
+    assert all(isinstance(value, ISecretRef) for value in values)
     assert [value.ref(silent=True) for value in values] == ["one", "café"]
-    selected = asyncio.run(SecretFileLoader(source, filter="^\\t").process())
+    selected = asyncio.run(FileLoader(file=source, filter="^\\t").process())
     assert [value.ref(silent=True) for value in selected] == ["café"]
     secret_store._vault.lock()
     secret_store._vault.unlock(PASSWORD)
@@ -38,8 +38,8 @@ def test_line_transform_receives_reference_and_can_skip_items(secret_store):
         received.append(value)
         return value if len(received) == 1 else None
 
-    assert asyncio.run(SecretFileLoader(source).process(transform)) == received[:1]
-    assert all(isinstance(value, SecretRef) for value in received)
+    assert asyncio.run(FileLoader(file=source).process(transform)) == received[:1]
+    assert all(isinstance(value, ISecretRef) for value in received)
 
 
 def test_enc1_is_captured_once_without_modifying_original(secret_store, tmp_path):
@@ -51,7 +51,7 @@ def test_enc1_is_captured_once_without_modifying_original(secret_store, tmp_path
     legacy = LegacyContext(None, input_handler=lambda request: password)
     captured = secret_store.capture_file(filename, legacy=legacy)
     assert filename.read_bytes() == encrypted
-    values = asyncio.run(SecretFileLoader(captured).process())
+    values = asyncio.run(FileLoader(file=captured).process())
     filename.unlink()
     legacy.lock()
     secret_store._vault.lock()

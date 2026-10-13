@@ -10,7 +10,7 @@ from w3plex.config import config_loader
 from w3plex.config.reading import load_config
 from w3plex.core.objects import application
 from w3plex.runner import Runner
-from w3plex.security import SecretRef, SecretStore
+from w3plex.security import ISecretRef, SecretStore
 from w3plex.security.errors import PermissionDenied
 from w3plex.security.memory import ProcessProtection
 from w3plex.security.storage import CiphertextFile
@@ -55,7 +55,7 @@ def test_plain_yaml_keeps_factories_references_and_include_paths(
         try:
             assert runner.tree.alias is runner.tree.readers.lines
             values = await runner.tree.alias()
-            assert isinstance(values[0], SecretRef)
+            assert isinstance(values[0], ISecretRef)
             assert values[0].parent._store is secret_store
             assert values[0].ref(silent=True) == "PUBLIC-TEST-private-line"
             assert get_file_opener() is None
@@ -84,7 +84,7 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
             assert get_file_opener() is None
             reader = await tree.reader()
             value = (await reader())[0]
-            assert isinstance(value, SecretRef)
+            assert isinstance(value, ISecretRef)
             assert value.parent._store is secret_store
             assert value.ref(silent=True) == "deferred"
         finally:
@@ -215,7 +215,7 @@ def test_application_created_reader_uses_runner_opener(
         )
         try:
             await runner.tree.applications.sample("read")
-            assert isinstance(received[0], SecretRef)
+            assert isinstance(received[0], ISecretRef)
             assert received[0].parent._store is secret_store
             assert received[0].ref(silent=True) == "application read"
             assert get_file_opener() is None
