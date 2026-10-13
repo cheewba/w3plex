@@ -52,7 +52,7 @@ def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
 
     def opener(path):
         calls.append(path)
-        return secret_store.capture_file(path, legacy=legacy)
+        return secret_store.capture_file(path, context=legacy)
 
     async def check():
         runner = Runner()
@@ -111,7 +111,7 @@ def test_existing_public_address_loader_returns_validated_strings(
         await runner.init(
             cfg,
             str(config),
-            file_opener=partial(secret_store.capture_file, legacy=legacy),
+            file_opener=partial(secret_store.capture_file, context=legacy),
         )
         try:
             assert runner.tree.wallets == [Web3.to_checksum_address(address)]

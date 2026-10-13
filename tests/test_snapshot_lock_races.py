@@ -35,7 +35,7 @@ def test_locked_capture_does_not_read_a_source_or_request_password(
         lambda path: pytest.fail("Locked capture opened a private source"),
     )
     with pytest.raises(PermissionDenied):
-        secret_store.capture_file(path, legacy=legacy)
+        secret_store.capture_file(path, context=legacy)
 
 
 @pytest.mark.parametrize("reopen", [False, True])
@@ -53,7 +53,7 @@ def test_private_input_lock_invalidates_capture(secret_store, tmp_path, reopen):
     legacy = LegacyContext(None, input_handler=password)
     try:
         with pytest.raises(PermissionDenied):
-            secret_store.capture_file(path, legacy=legacy)
+            secret_store.capture_file(path, context=legacy)
         assert secret_store._vault._storage.read() == original
     finally:
         legacy.lock()

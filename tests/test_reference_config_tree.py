@@ -83,7 +83,7 @@ def test_enc1_yaml_capture_survives_original_removal(secret_store, tmp_path):
     path = tmp_path / "w3plex.yaml"
     path.write_bytes(encrypted)
     legacy = LegacyContext(None, input_handler=lambda request: password)
-    source = secret_store.capture_file(path, legacy=legacy)
+    source = secret_store.capture_file(path, context=legacy)
     assert path.read_bytes() == encrypted
     path.unlink()
     legacy.lock()
