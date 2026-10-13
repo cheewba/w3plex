@@ -50,7 +50,7 @@ def _valid_size(kind: SecretKind, size: int) -> bool:
     return 0 <= size <= 1024 * 1024 if kind is SecretKind.DATA else 1 <= size <= 65536
 
 
-def _private[T](function: Callable[[], T]) -> T:
+def private_call[T](function: Callable[[], T]) -> T:
     """Raise fixed codes without the dependency exception or its cause chain.
 
     Exception frames still belong to the private host; never log their locals.
@@ -66,7 +66,7 @@ def _private[T](function: Callable[[], T]) -> T:
     raise error()
 
 
-def _new_record(
+def new_record(
     kind: SecretKind, value: bytes, uses: Iterable[SecretUse]
 ) -> dict[str, Any]:
     allowed = set(uses)
@@ -85,7 +85,7 @@ def _new_record(
     if kind is SecretKind.WALLET:
         if len(value) != 32:
             raise InvalidStore()
-        address = _private(lambda: EthAccount.from_key(value).address)
+        address = private_call(lambda: EthAccount.from_key(value).address)
     return {
         "id": secrets.token_hex(16),
         "kind": kind.value,
@@ -221,7 +221,7 @@ class Vault:
                 # Setup does not leave an implicitly unlocked session.
                 self.lock()
 
-        return _private(operation)
+        return private_call(operation)
 
     def unlock(self, password: bytes):
         """Trusted private input; retain only a locked data-key allocation."""
@@ -241,7 +241,7 @@ class Vault:
                     raise
                 self._key, self._envelope, self._identity = buffer, envelope, identity
 
-        return _private(operation)
+        return private_call(operation)
 
     def lock(self):
         with self._mutex:
@@ -264,7 +264,9 @@ class Vault:
         return json.loads(open_payload(envelope, key))["records"]
 
     def references(self) -> tuple[SecretRef, ...]:
-        return _private(lambda: tuple(_reference(record) for record in self._records()))
+        return private_call(
+            lambda: tuple(_reference(record) for record in self._records())
+        )
 
     def wallets(self) -> tuple[WalletInfo, ...]:
         """Public metadata for a separately admitted host session read."""
@@ -280,7 +282,7 @@ class Vault:
                     if record["kind"] == SecretKind.WALLET.value
                 )
 
-        return _private(operation)
+        return private_call(operation)
 
     def add(
         self, kind: SecretKind, value: bytes, *, uses: Iterable[SecretUse]
@@ -301,7 +303,7 @@ class Vault:
                 envelope, key = self._unlocked()
                 records = self._records()
                 additions = [
-                    _new_record(kind, value, uses) for kind, value, uses in selected
+                    new_record(kind, value, uses) for kind, value, uses in selected
                 ]
                 if not additions or len(records) + len(additions) > 4096:
                     raise InvalidStore()
@@ -319,7 +321,7 @@ class Vault:
                 self._envelope, self._identity = updated, identity
                 return tuple(_reference(record) for record in additions)
 
-        return _private(operation)
+        return private_call(operation)
 
     def _use_secret[T](
         self, reference: SecretRef, use: SecretUse, consumer: Callable[[bytes], T]
@@ -335,7 +337,7 @@ class Vault:
                         )
                 raise PermissionDenied()
 
-        return _private(operation)
+        return private_call(operation)
 
     def change_password(
         self,
@@ -372,7 +374,7 @@ class Vault:
                 self.lock()
 
         try:
-            return _private(operation)
+            return private_call(operation)
         finally:
             self.lock()
 
@@ -387,7 +389,7 @@ class Vault:
                     raise AuthenticationFailed()
                 destination.write(data, expected=None)
 
-        return _private(operation)
+        return private_call(operation)
 
     def close(self):
         with self._mutex:

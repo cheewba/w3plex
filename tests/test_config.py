@@ -8,12 +8,11 @@ from lazyplex.core.context import branch
 from ruamel import yaml
 from w3ext import Chain, Currency
 
+from w3plex.config import config as config_module
 from w3plex.config.config import (
     ConfigTree,
     Lazy,
     LazyVar,
-    _ConfigLoader,
-    _Resolver,
     config_loader,
     entity_factory,
 )
@@ -25,7 +24,7 @@ from w3plex.runner import Runner
 
 
 def test_resolver_reports_pending_names_and_resolves_callbacks():
-    resolver = _Resolver()
+    resolver = config_module._Resolver()
     results = []
     assert not resolver.resolve_once_ready("item", results.append)
     assert resolver.get_unresolved() == ["item"]
@@ -35,7 +34,7 @@ def test_resolver_reports_pending_names_and_resolves_callbacks():
 
 
 def test_config_node_registration_accepts_non_mapping_values():
-    loader = _ConfigLoader()
+    loader = config_module._ConfigLoader()
 
     @loader.add_node(r"^logging$")
     def loggers(config, path):
@@ -163,7 +162,7 @@ def test_config_reports_reference_cycles(tmp_path):
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_config_closes_generator_resources_on_exit_or_parse_failure(tmp_path, failure):
-    loader = _ConfigLoader()
+    loader = config_module._ConfigLoader()
     events = []
 
     @loader.add_node(r"^resource$", "resources")

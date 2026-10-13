@@ -31,7 +31,7 @@ def test_locked_capture_does_not_read_a_source_or_request_password(
     )
     secret_store._vault.lock()
     monkeypatch.setattr(
-        "w3plex.security.refs._snapshot_file",
+        "w3plex.security.refs.snapshot_file",
         lambda path: pytest.fail("Locked capture opened a private source"),
     )
     with pytest.raises(PermissionDenied):

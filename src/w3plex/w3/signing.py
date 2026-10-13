@@ -34,7 +34,7 @@ from ..security.contracts import (
 from ..security.diagnostics import private_async
 from ..security.errors import PermissionDenied, SecurityError
 from ..security.session import Session, SessionState
-from ..security.vault import Vault, _private
+from ..security.vault import Vault, private_call
 from ..security.vault_format import canonical
 
 
@@ -259,7 +259,9 @@ class LocalSigning:
                     if isinstance(value, str) and value.startswith("0x")
                     else int(value)
                 )
-        material = _private(lambda: canonical(_json_value(quantities)).decode("ascii"))
+        material = private_call(
+            lambda: canonical(_json_value(quantities)).decode("ascii")
+        )
         intent = SigningIntent(
             operation, status.generation, wallet, SigningKind.TRANSACTION, material
         )
@@ -276,13 +278,13 @@ class LocalSigning:
         if isinstance(message, Mapping):
             kind = SigningKind.TYPED
             material = canonical(_json_value(message)).decode("ascii")
-            _private(lambda: encode_typed_data(full_message=json.loads(material)))
+            private_call(lambda: encode_typed_data(full_message=json.loads(material)))
         elif isinstance(message, (str, bytes)):
             kind = SigningKind.PERSONAL
             # The convention is explicit: text means UTF-8, bytes are literal.
             # Unlike the legacy API, JSON strings are not silently typed data.
             raw = (
-                _private(lambda: message.encode("utf-8"))
+                private_call(lambda: message.encode("utf-8"))
                 if isinstance(message, str)
                 else message
             )

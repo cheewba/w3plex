@@ -69,7 +69,7 @@ async def probe(certificate, keyfile):
 
     fake_module = types.ModuleType(package.__name__ + ".vault")
     fake_module.Vault = FakeVault
-    fake_module._private = lambda consumer: consumer()
+    fake_module.private_call = lambda consumer: consumer()
     sys.modules[fake_module.__name__] = fake_module
     session_module = importlib.import_module(package.__name__ + ".session")
     interaction = importlib.import_module(package.__name__ + ".interaction")

@@ -24,7 +24,7 @@ from ..constants import (
 )
 from ..exceptions import ConfigError
 from ..utils import AttrDict, as_future, get_context, get_scope, load_path
-from ..utils.loader import _FILE_OPENER, FileOpener, _using_file_opener
+from ..utils.loader import FileOpener, get_file_opener, using_file_opener
 
 __all__ = ["ConfigTree", "Lazy", "config_loader"]
 
@@ -282,7 +282,7 @@ class _ConfigLoader:
                 active.remove(parts)
 
         try:
-            with _using_file_opener(file_opener):
+            with using_file_opener(file_opener):
                 tree = await parse(cfg, (), root_dir)
         except BaseException:
             await resources.aclose()
@@ -440,7 +440,7 @@ class Lazy[T]:
 
         self.cfg = cfg
         self.path = path
-        self._file_opener = _FILE_OPENER.get()
+        self._file_opener = get_file_opener()
         self._resources = AsyncExitStack()
 
     @property
@@ -516,7 +516,7 @@ class Lazy[T]:
             return value
 
         kw = await resolve(kw)
-        with _using_file_opener(self._file_opener):
+        with using_file_opener(self._file_opener):
             value = cast(T, await config_loader.get_node(kw, self.path))
         if isgenerator(value):
             generator = value

@@ -7,6 +7,5 @@ from ..w3 import files as _implementation
 
 if TYPE_CHECKING:
     from ..w3.files import *
-    from ..w3.files import _snapshot_file as _snapshot_file  # noqa: PLC0414
 
 sys.modules[__name__] = _implementation

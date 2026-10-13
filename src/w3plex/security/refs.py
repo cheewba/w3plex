@@ -12,8 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Never, Self, SupportsIndex, cast
 
-from .contracts import SecretKind, SecretUse
-from .contracts import SecretRef as SecretId
+from .contracts import SecretKind, SecretRef as SecretId, SecretUse
 from .errors import (
     AuthenticationFailed,
     InteractionRequired,
@@ -24,9 +23,9 @@ from .errors import (
 )
 from .legacy import LegacyContext
 from .memory import LockedBuffer
-from .snapshots import _snapshot_file
+from .snapshots import snapshot_file
 from .vault import Vault
-from .vault_format import _invalid_constant, _unique, canonical
+from .vault_format import canonical, reject_json_constant, unique_fields
 
 MAX_SNAPSHOT_SIZE = 1024 * 1024
 _SAFE_ERRORS = {
@@ -39,7 +38,7 @@ _SAFE_ERRORS = {
 }
 
 
-def _safe[T](function: Callable[[], T]) -> T:
+def safe_call[T](function: Callable[[], T]) -> T:
     error = SecurityError
     try:
         return function()
@@ -213,7 +212,9 @@ class SecretJson[T](SecretRef[T]):
         result = self.parent._restore(value)
         if isinstance(result, (str, bytes)):
             result = json.loads(
-                result, object_pairs_hook=_unique, parse_constant=_invalid_constant
+                result,
+                object_pairs_hook=unique_fields,
+                parse_constant=reject_json_constant,
             )
         for key in self.path:
             if isinstance(key, str) and isinstance(result, dict):
@@ -300,7 +301,7 @@ class SecretStore:
             with self._vault._mutex:
                 stamp = self._stamp()
             path = Path(filename).absolute()
-            raw = _snapshot_file(path).raw
+            raw = snapshot_file(path).raw
             if raw.startswith(b"ENC1"):
                 if legacy is None:
                     raise InteractionRequired()
@@ -310,7 +311,7 @@ class SecretStore:
                     raise PermissionDenied()
                 return self.capture(raw)
 
-        return _safe(operation)
+        return safe_call(operation)
 
     def reference(
         self, identifier: str, *, kind: SecretKind = SecretKind.DATA
@@ -386,7 +387,7 @@ class SecretStore:
             return self._vault._use_secret(reference._source, purpose, consume)
 
     def _use[T, R](self, reference: SecretRef[T], consumer: Callable[[T], R]) -> R:
-        return _safe(
+        return safe_call(
             lambda: self._consume(
                 reference, consumer, self._admit(reference, AccessKind.USE)
             )
@@ -407,4 +408,4 @@ class SecretStore:
                 reference, lambda value: value, stamp, action=AccessKind.DISCLOSE
             )
 
-        return _safe(operation)
+        return safe_call(operation)

@@ -12,7 +12,7 @@ from web3 import Web3
 
 from ..security import SecretRef, SecretString
 from ..security.errors import PermissionDenied
-from ..security.refs import _safe
+from ..security.refs import safe_call
 from .filter import TemplateFilter
 
 type FileOpener = Callable[[str | Path], SecretRef[bytes]]
@@ -22,8 +22,12 @@ _FILE_OPENER: ContextVar[FileOpener | None] = ContextVar(
 )
 
 
+def get_file_opener() -> FileOpener | None:
+    return _FILE_OPENER.get()
+
+
 @contextmanager
-def _using_file_opener(opener: FileOpener | None) -> Iterator[None]:
+def using_file_opener(opener: FileOpener | None) -> Iterator[None]:
     token = _FILE_OPENER.set(opener)
     try:
         yield
@@ -68,7 +72,7 @@ class FileLoader[T]:
         if isinstance(file, SecretRef) or self._opener is not None:
             source = await asyncio.to_thread(self._capture)
             lines = source._use(lambda raw: self._reference_lines(source, raw, flt))
-            return _safe(
+            return safe_call(
                 lambda: [
                     value
                     for line in lines
@@ -104,7 +108,7 @@ class FileLoader[T]:
                 opener = self._opener
                 if opener is None:
                     raise PermissionDenied()
-                source = _safe(lambda: opener(file))
+                source = safe_call(lambda: opener(file))
                 if not isinstance(source, SecretRef):
                     raise PermissionDenied()
                 self._source = source

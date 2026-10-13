@@ -13,6 +13,7 @@ from urllib.parse import quote
 import pytest
 from test_security_interaction_session import make_session, unlock
 
+from w3plex.security import transport as transport_module
 from w3plex.security.contracts import SecretKind, SecretUse
 from w3plex.security.errors import (
     PermissionDenied,
@@ -24,7 +25,6 @@ from w3plex.security.transport import (
     ProtectedHTTP,
     RequestSpec,
     ResponseType,
-    _PinnedConnector,
 )
 
 MARKER = b"PUBLIC-TEST-api-key-Aa/+=@"
@@ -338,7 +338,9 @@ def test_actual_peer_must_match_pinned_ip_before_http_write(monkeypatch):
             "aiohttp.TCPConnector._wrap_create_connection",
             AsyncMock(return_value=(transport, object())),
         )
-        connector = _PinnedConnector("public.example", frozenset({"8.8.8.8"}))
+        connector = transport_module._PinnedConnector(
+            "public.example", frozenset({"8.8.8.8"})
+        )
         with pytest.raises(PermissionDenied):
             await connector._wrap_create_connection()
         assert transport.closed
@@ -386,7 +388,9 @@ def test_one_private_dns_answer_blocks_entire_request_before_injection(
 
 def test_pinned_dns_allows_only_registered_host(monkeypatch):
     async def check():
-        connector = _PinnedConnector("public.example", frozenset({"8.8.8.8"}))
+        connector = transport_module._PinnedConnector(
+            "public.example", frozenset({"8.8.8.8"})
+        )
         with pytest.raises(PermissionDenied):
             await connector._resolver.resolve("other.example", 443)
         records = await connector._resolver.resolve("public.example", 443)
