@@ -106,7 +106,7 @@ def load_reference_config(
                     raise InvalidStore()
                 result = AttrDict({key: bind(item) for key, item in value.items()})
                 if included := getattr(value, "__include_path__", None):
-                    setattr(result, "__include_path__", included)
+                    cast(Any, result).__include_path__ = included
                 return result
             if isinstance(value, list):
                 return [bind(item) for item in value]

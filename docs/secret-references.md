@@ -83,34 +83,97 @@ trusted; attribute hiding and the warning are not an intra-process boundary.
 Cryptopal must check permissions in its service and expose restricted proxies
 whose schemas include neither local handles nor the `silent` option.
 
-## Readers and credentials
+## Existing YAML and external-file readers
 
-```python
-from w3plex.config import load_reference_config
-from w3plex.utils.loader import FileLoader
-from w3plex.security.contracts import SecretKind
+Keep the existing configuration format. YAML selects constructors and their
+parameters; sensitive data can live in separate ordinary or ENC1 files:
 
-keys = await FileLoader.from_secret(key_file_reference).process()
-accounts = [Account.from_key(key) for key in keys]
-
-config = load_reference_config(
-    config_reference,
-    environment={},
-    includes={"debank.yaml": debank_reference},
-)
-credential = store.credential(config.debank.api_key, kind=SecretKind.API)
+```yaml
+accounts:
+  main:
+    __init__: w3plex.utils.loader:accounts_loader
+    file: keys.enc
 ```
 
-The protected line reader keeps UTF-8 BOM, comments, whitespace and filter
-behavior. Transforms receive references. The ordinary FileLoader still returns
-ordinary strings. JSON paths handle escaping; string offsets count bytes in
-the parent's decoded bytes or encoded text and must not split a codepoint.
+The trusted host enables protected reading on the existing Runner:
 
-The config reader uses only preloaded include references. It performs no
-implicit source-file reads. It encrypts the parsed, expanded configuration as a
-new snapshot and replaces string values with `SecretJson` handles. The whole
-configuration remains private service data; numbers, booleans and field names
-are not a safe model export format by themselves.
+```python
+from functools import partial
+from w3plex.config import load_config
+from w3plex.runner import Runner
+
+# The host supplies an unlocked store and a LegacyContext with private input.
+config = load_config("w3plex.yaml", opener=legacy.open, environment={})
+runner = Runner()
+await runner.init(
+    config,
+    "w3plex.yaml",
+    file_opener=partial(store.capture_file, legacy=legacy),
+)
+accounts = await runner.tree.accounts.main()
+```
+
+The same option is available on `config_loader.parse(config, filename,
+file_opener=...)`. The opener belongs to trusted code and must approve source
+access before capture. It returns a local byte reference or raises a safe error.
+Protected failures never retry through ordinary reading. Imports alone do not
+enable this mode.
+
+YAML class names, file paths, `$...` references, lazy factories and include
+source directories keep their existing meaning. The existing FileLoader binds
+the opener during construction, including deferred factories. Concurrent
+runners keep separate bindings. Readers created during an application call use
+that Runner's opener as well.
+
+The reader captures its source on first read and reuses that reference after
+lock/unlock, even if the file changes or disappears. Concurrent first reads
+capture once. Create a new reader or explicitly capture a new source to use
+changed data. This mode also protects plaintext input in the vault; it does not
+rewrite the original input file. The host owns the vault and legacy context and
+must lock both when their session ends or locks.
+
+The existing accounts loader creates `w3plex.w3.Account` for referenced keys.
+The account retains a reference and a public address; `.key` returns that
+reference. It creates signing dependencies only during use. Ordinary mode keeps
+its existing w3ext account type and key access. Signing authorization and
+transaction approvals remain the service's responsibility.
+
+The public-address loader validates values privately and returns ordinary
+checksummed address strings. Generic protected transforms receive references;
+unsupported consumers do not trigger automatic plaintext conversion. Use
+`FileLoader(file=reference)` for already captured data. The earlier
+`FileLoader.from_secret(...)` and `SecretFileLoader(...)` entry points use the
+same reader implementation. Ordinary readers still return strings and reopen
+the file on each call. BOM, whitespace, comments and filtering stay compatible.
+
+## Optional encrypted YAML
+
+`load_config` can read encrypted YAML using `legacy.open`, as it can read
+ordinary YAML. `load_reference_config` reads an already captured YAML source
+and explicitly preloaded includes. It keeps ordinary configuration values and
+include metadata so the result can go through the existing tree parser.
+It performs no implicit include-file reads and does not convert YAML to JSON or
+wrap class names, paths and object references in SecretJson. This corrects the
+initial unreleased helper's string-wrapping behavior.
+
+Parsed configuration is trusted private data. Inline values are ordinary Python
+values; keep sensitive values in protected external files. YAML parsing and
+variable expansion can create temporary plaintext copies.
+
+## Structured external data and credentials
+
+```python
+from w3plex.security import SecretJson
+from w3plex.security.contracts import SecretKind
+
+source = store.capture_file("credentials.json.enc", legacy=legacy)
+api_key = SecretJson[str](source, ("debank", "api_key"))
+credential = store.credential(api_key, kind=SecretKind.API)
+```
+
+JSON paths handle escaping. String offsets count bytes in the parent's decoded
+bytes or encoded text and must not split a codepoint. Immutable local handles
+survive configuration deepcopy by identity while still refusing serialization.
 
 `store.credential` copies a selected value into a classified encrypted API,
 RPC or model record without returning plaintext to the caller. Alternatively,
@@ -120,12 +183,7 @@ in `w3plex.w3` accept these local references or the existing ID DTOs. They retai
 destination checks, request authorization and Session.use guards. Authorizers
 receive ID DTOs only; local selection fingerprints bind the request digest.
 Unclassified references and references owned by another vault are refused.
-
-`w3plex.w3.Account` retains a reference and a public address for protected keys.
-It constructs a LocalAccount only during signing. Its `.key` returns the
-reference. Ordinary string keys keep legacy behavior. Other public w3ext
-exports keep their original class identity. Signing authorization, transaction
-approvals and provider selection remain the consumer/service's responsibility.
+Other public w3ext exports keep their original class identity.
 
 ## Current protection scope
 
