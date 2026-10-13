@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from cryptography.exceptions import UnsupportedAlgorithm
 
-from w3plex.security import vault_format as codec
+from w3plex.security import crypto, vault_format as codec
 from w3plex.security.errors import (
     AuthenticationFailed,
     InvalidStore,
@@ -26,7 +26,7 @@ def test_missing_aes_backend_returns_safe_capability_error(monkeypatch, operatio
     def unavailable(key):
         raise UnsupportedAlgorithm("PUBLIC-TEST-private-backend-details")
 
-    monkeypatch.setattr(codec, "AESGCM", unavailable)
+    monkeypatch.setattr(crypto, "AESGCM", unavailable)
     with pytest.raises(UnsupportedProtection) as raised:
         if operation == "encrypt":
             codec.seal(VALUE, PASSWORD)
@@ -46,7 +46,7 @@ def test_missing_argon_at_derive_has_no_weaker_retry(monkeypatch):
         def derive(self, password):
             raise UnsupportedAlgorithm("PUBLIC-TEST-private-backend-details")
 
-    monkeypatch.setattr(codec, "Argon2id", Missing)
+    monkeypatch.setattr(crypto, "Argon2id", Missing)
     envelope = codec.parse((FIXTURES / "sample.vault").read_bytes())
     with pytest.raises(UnsupportedProtection) as raised:
         codec.unwrap(envelope, b"PUBLIC-TEST-v1-password")
@@ -64,7 +64,7 @@ def test_repeated_initial_nonces_stop_before_kdf(monkeypatch):
         raise AssertionError("Repeated nonces must not start derivation")
 
     monkeypatch.setattr(codec.secrets, "token_bytes", lambda size: bytes(size))
-    monkeypatch.setattr(codec, "Argon2id", forbidden)
+    monkeypatch.setattr(crypto, "Argon2id", forbidden)
     with pytest.raises(UnsupportedProtection):
         codec.seal(VALUE, PASSWORD)
 
@@ -160,7 +160,7 @@ def test_work_bounds_before_kdf_and_no_missing_backend_fallback(monkeypatch):
         attempts.append(kwargs)
         raise UnsupportedAlgorithm("PRIVATE dependency details")
 
-    monkeypatch.setattr(codec, "Argon2id", missing)
+    monkeypatch.setattr(crypto, "Argon2id", missing)
     for field, value in [
         ("memory_kib", 10**9),
         ("iterations", 10000),
