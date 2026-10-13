@@ -4,11 +4,13 @@ Public RPC callers use the separate SecretRef ID DTO in contracts. Native owned
 buffers are cleared after use; Python and dependency copies remain a limitation.
 """
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Never, SupportsIndex, cast
+from typing import Any, Never, SupportsIndex, cast
 
 from .contracts import SecretKind, SecretUse
 from .contracts import SecretRef as SecretId
@@ -24,6 +26,7 @@ from .legacy import LegacyContext
 from .memory import LockedBuffer
 from .snapshots import _snapshot_file
 from .vault import Vault
+from .vault_format import _invalid_constant, _unique, canonical
 
 MAX_SNAPSHOT_SIZE = 1024 * 1024
 _SAFE_ERRORS = {
@@ -55,6 +58,7 @@ class AccessKind(StrEnum):
 class SecretAccess:
     identifier: str
     action: AccessKind
+    selection: str
 
 
 @dataclass(frozen=True, repr=False)
@@ -65,6 +69,14 @@ class SecretRef[T]:
     @property
     def identifier(self) -> str:
         return self._source.identifier
+
+    @property
+    def _selection(self) -> str:
+        return self.identifier
+
+    @property
+    def _depth(self) -> int:
+        return 0
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(<private>)"
@@ -89,6 +101,119 @@ class SecretRef[T]:
         if type(silent) is not bool:
             raise PermissionDenied()
         return self._store._reveal(self, silent=silent)
+
+
+def _bind_child(child: SecretRef, parent: SecretRef) -> None:
+    if not isinstance(parent, SecretRef) or parent._depth >= 32:
+        raise InvalidStore()
+    object.__setattr__(child, "_store", parent._store)
+    object.__setattr__(child, "_source", parent._source)
+    object.__setattr__(child, "parent", parent)
+
+
+@dataclass(frozen=True, repr=False, init=False)
+class SecretString(SecretRef[str]):
+    """A byte range in the parent's decoded bytes or encoded string value."""
+
+    parent: SecretRef
+    offset: int
+    length: int | None
+    encoding: str
+
+    def __init__(
+        self,
+        parent: SecretRef,
+        offset: int = 0,
+        length: int | None = None,
+        *,
+        encoding: str = "utf-8",
+    ):
+        if (
+            type(offset) is not int
+            or offset < 0
+            or (length is not None and (type(length) is not int or length < 0))
+            or type(encoding) is not str
+            or not 1 <= len(encoding) <= 64
+        ):
+            raise InvalidStore()
+        _bind_child(self, parent)
+        object.__setattr__(self, "offset", offset)
+        object.__setattr__(self, "length", length)
+        object.__setattr__(self, "encoding", encoding)
+
+    @property
+    def _depth(self) -> int:
+        return self.parent._depth + 1
+
+    @property
+    def _selection(self) -> str:
+        return hashlib.sha256(
+            canonical(
+                [
+                    self.parent._selection,
+                    "text",
+                    self.offset,
+                    self.length,
+                    self.encoding,
+                ]
+            )
+        ).hexdigest()
+
+    def _restore(self, value: bytes) -> str:
+        raw = self.parent._restore(value)
+        if isinstance(raw, str):
+            raw = raw.encode(self.encoding)
+        if not isinstance(raw, bytes):
+            raise InvalidStore()
+        end = len(raw) if self.length is None else self.offset + self.length
+        if not self.offset <= end <= len(raw):
+            raise InvalidStore()
+        return raw[self.offset : end].decode(self.encoding)
+
+
+@dataclass(frozen=True, repr=False, init=False)
+class SecretJson[T](SecretRef[T]):
+    """A JSON value selected by a fixed path; no decoded document is retained."""
+
+    parent: SecretRef
+    path: tuple[str | int, ...]
+
+    def __init__(self, parent: SecretRef, path: tuple[str | int, ...] = ()):
+        path = tuple(path)
+        if len(path) > 32 or any(
+            not (type(key) is str or (type(key) is int and key >= 0)) for key in path
+        ):
+            raise InvalidStore()
+        _bind_child(self, parent)
+        object.__setattr__(self, "path", path)
+
+    @property
+    def _depth(self) -> int:
+        return self.parent._depth + 1
+
+    @property
+    def _selection(self) -> str:
+        return hashlib.sha256(
+            canonical([self.parent._selection, "json", self.path])
+        ).hexdigest()
+
+    def __getitem__(self, key: str | int) -> "SecretJson[Any]":
+        return SecretJson(self, (key,))
+
+    def _restore(self, value: bytes) -> T:
+        result = self.parent._restore(value)
+        if isinstance(result, (str, bytes)):
+            result = json.loads(
+                result, object_pairs_hook=_unique, parse_constant=_invalid_constant
+            )
+        for key in self.path:
+            if isinstance(key, str) and isinstance(result, dict):
+                result = result[key]
+            elif isinstance(key, int) and isinstance(result, list):
+                result = result[key]
+            else:
+                raise InvalidStore()
+        return cast(T, result)
 
 
 class SecretStore:
@@ -169,7 +294,10 @@ class SecretStore:
         with self._vault._mutex:
             stamp = self._stamp()
         if self._authorize is not None and (
-            self._authorize(SecretAccess(reference.identifier, action)) is not True
+            self._authorize(
+                SecretAccess(reference.identifier, action, reference._selection)
+            )
+            is not True
         ):
             raise PermissionDenied()
         return stamp
@@ -220,7 +348,9 @@ class SecretStore:
             if not silent:
                 if self._confirm is None:
                     raise InteractionRequired()
-                access = SecretAccess(reference.identifier, AccessKind.DISCLOSE)
+                access = SecretAccess(
+                    reference.identifier, AccessKind.DISCLOSE, reference._selection
+                )
                 if self._confirm(access) is not True:
                     raise PermissionDenied()
             return self._consume(
