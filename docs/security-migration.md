@@ -18,7 +18,7 @@ decoded = decrypt_file(encrypted, password="PUBLIC-EXAMPLE-password")
 The helper arguments, return types and destination rules remain the same.
 `encrypt_data()` returns the base64 ciphertext and password;
 `decrypt_data()` returns text. These helpers retain the old ENC1 format.
-`IncorrectPassword` and `SecureError` are available from `w3plex.security`.
+Use `AuthenticationFailed` and `InvalidStore` from `w3plex.security.errors`.
 
 An import no longer changes `open()`. Enable transparent reads explicitly:
 
@@ -74,9 +74,9 @@ finally:
 These contexts keep discovered keys in their own memory and do not rewrite
 source keystores during reads. They reject malformed stores and bound input
 sizes. Explicit encryption methods with `add_to_keystore=True` request a write.
-`compatibility=True` selects the standalone behavior, including persistent keys
-and the old treatment of empty/malformed plaintext keystore JSON. Private legacy
-imports in Cryptopal use the default strict mode.
+`persist_keys=True` explicitly saves discovered keys. Every context rejects
+malformed keystores, more than 4096 keys, stores over 1 MiB and encrypted input
+over 64 MiB. Private imports use session-local keys and preserve source stores.
 
 Use `context.activated()` only when process-wide transparent reads are needed.
 Activation rejects conflicting owners. Concurrent service contexts should use
@@ -90,3 +90,23 @@ with the authenticated vault. That vault uses Argon2id and AES-256-GCM. ENC1/KS0
 retain their historical cryptography and protection level. Moving code into
 security does not strengthen old ciphertext or prevent recovery from every
 memory dump. Importing into the new vault is explicit and preserves originals.
+
+The new vault starts with `W3VAULT1`. It contains several identified records.
+Transparent open currently recognizes ENC1 only. Opening a vault through it
+returns encrypted file contents without decryption. A new Argon2id/AES-GCM
+external-file format and automatic opening are not implemented yet.
+
+## Retired experimental interfaces
+
+| Retired interface | Current interface |
+| --- | --- |
+| Local `SecretRef` alias | `ISecretRef` |
+| Adapter imports from `security.refs` | `security` or `security.adapters` |
+| `security.config` | `w3plex.config` |
+| `SecretFileLoader` / `FileLoader.from_secret` | `FileLoader(file=reference)` |
+| `secure_open` | The selected context's `open` method |
+| `SecureError` / `IncorrectPassword` | Errors from `security.errors` |
+| `compatibility=True` | `persist_keys=True` when persistence is intended |
+
+Malformed plaintext keystores no longer become empty stores. They raise
+`InvalidStore`. Password failures use the fixed `AuthenticationFailed` status.
