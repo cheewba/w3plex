@@ -19,6 +19,7 @@ from .constants import (
 )
 from .log import logger
 from .utils import load_path
+from .utils.loader import FileOpener, _using_file_opener
 
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
@@ -83,6 +84,7 @@ class Runner:
                 loop = asyncio.new_event_loop()
         self.loop: asyncio.AbstractEventLoop = loop
         self._log_sinks: list[int] = []
+        self._file_opener: FileOpener | None = None
 
     @property
     def is_initialized(self) -> bool:
@@ -156,7 +158,9 @@ class Runner:
         app.name = app_name
         return wrap_app(app)
 
-    async def init(self, cfg: dict, cfg_path: str):
+    async def init(
+        self, cfg: dict, cfg_path: str, *, file_opener: FileOpener | None = None
+    ):
         assert self.cfg is None, "Already initialized. Finalize first."
 
         loader = config_loader.clone()
@@ -165,8 +169,9 @@ class Runner:
 
         self.cfg = deepcopy(cfg)
         self.cfg_path = cfg_path
+        self._file_opener = file_opener
         try:
-            self._tree = await loader.parse(cfg, cfg_path)
+            self._tree = await loader.parse(cfg, cfg_path, file_opener=file_opener)
         except BaseException:
             await self.finalize()
             raise
@@ -204,6 +209,7 @@ class Runner:
             self._tree = None
             self.cfg = None
             self.cfg_path = None
+            self._file_opener = None
             for sink in self._log_sinks:
                 logger.remove(sink)
             self._log_sinks.clear()
@@ -218,15 +224,18 @@ class Runner:
             raise RuntimeError("Runner is not initialized")
         cfg = dict(self.cfg)
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
-        with create_context(
-            {
-                CONTEXT_CONFIG_KEY: dict(app_cfg),
-                CONTEXT_EXTRAS_KEY: dict(cfg),
-                CONTEXT_CHAINS_KEY: dict(
-                    chains if (chains := self.tree.get_collection("chains")) else {}
-                ),
-                CONTEXT_VARS_KEY: self.tree.get_collection(VARS_COLLECTION),
-            }
+        with (
+            _using_file_opener(self._file_opener),
+            create_context(
+                {
+                    CONTEXT_CONFIG_KEY: dict(app_cfg),
+                    CONTEXT_EXTRAS_KEY: dict(cfg),
+                    CONTEXT_CHAINS_KEY: dict(
+                        chains if (chains := self.tree.get_collection("chains")) else {}
+                    ),
+                    CONTEXT_VARS_KEY: self.tree.get_collection(VARS_COLLECTION),
+                }
+            ),
         ):
             yield app
 
