@@ -80,6 +80,16 @@ class SecretRef[T]:
         """Trusted consumer interface, not a model-facing operation."""
         return self._store._use(self, consumer)
 
+    def ref(self, *, silent: bool = False) -> T:
+        """Export ordinary plaintext. Default confirmation never displays it.
+
+        silent suppresses that confirmation only. Exported Python values cannot
+        be revoked or reliably erased by a later lock.
+        """
+        if type(silent) is not bool:
+            raise PermissionDenied()
+        return self._store._reveal(self, silent=silent)
+
 
 class SecretStore:
     """Capture input in an existing vault and bind private local references.
@@ -165,10 +175,18 @@ class SecretStore:
         return stamp
 
     def _consume[T, R](
-        self, reference: SecretRef[T], consumer: Callable[[T], R], stamp: LockedBuffer
+        self,
+        reference: SecretRef[T],
+        consumer: Callable[[T], R],
+        stamp: LockedBuffer,
+        *,
+        action: AccessKind = AccessKind.USE,
     ) -> R:
         with self._vault._mutex:
-            if self._stamp() is not stamp:
+            if (
+                self._admit(reference, action) is not stamp
+                or self._stamp() is not stamp
+            ):
                 raise PermissionDenied()
 
             def consume(value: bytes):
@@ -195,3 +213,18 @@ class SecretStore:
                 reference, consumer, self._admit(reference, AccessKind.USE)
             )
         )
+
+    def _reveal[T](self, reference: SecretRef[T], *, silent: bool) -> T:
+        def operation():
+            stamp = self._admit(reference, AccessKind.DISCLOSE)
+            if not silent:
+                if self._confirm is None:
+                    raise InteractionRequired()
+                access = SecretAccess(reference.identifier, AccessKind.DISCLOSE)
+                if self._confirm(access) is not True:
+                    raise PermissionDenied()
+            return self._consume(
+                reference, lambda value: value, stamp, action=AccessKind.DISCLOSE
+            )
+
+        return _safe(operation)
