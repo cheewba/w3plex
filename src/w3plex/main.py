@@ -26,7 +26,6 @@ from w3plex.security import (
     enable_encrypted_io,
     encrypt_file,
 )
-from w3plex.security.io import request_password
 from w3plex.shell import Shell
 
 load_dotenv(Path.cwd() / ".env")
@@ -145,7 +144,7 @@ def crypt_cmd(args, *, encrypt):
     if args.dst and len(files) != 1:
         raise ValueError("--output requires exactly one source file")
     password = (
-        request_password("File password: ")
+        enable_encrypted_io().file_password(files[0])
         if args.password == EMPTY_PASSWORD
         else args.password
     )

@@ -65,7 +65,16 @@ def _no_extended_acl(fd: int) -> None:
 
 
 class CiphertextFile:
-    def __init__(self, path: str | Path, *, maximum_size: int = 8 * 1024 * 1024):
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        maximum_size: int = 8 * 1024 * 1024,
+        private: bool = True,
+    ):
+        if type(private) is not bool:
+            raise UnsafeStorage()
+        self.private = private
         if os.name != "posix" or not all(
             hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "getuid")
         ):
@@ -74,11 +83,16 @@ class CiphertextFile:
         if self.path.name in {"", ".", ".."}:
             raise UnsafeStorage()
         self.maximum_size = maximum_size
-        self._fd = self._open_directory(self.path.parent)
+        self._fd = self.open_directory(self.path.parent)
         try:
             info = os.fstat(self._fd)
             self._directory_identity = (info.st_dev, info.st_ino)
-            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            mode = stat.S_IMODE(info.st_mode)
+            if (
+                info.st_uid != os.getuid()
+                or mode & 0o022
+                or (private and mode != 0o700)
+            ):
                 raise UnsafeStorage()
             _no_extended_acl(self._fd)
         except BaseException:
@@ -89,7 +103,7 @@ class CiphertextFile:
         return "CiphertextFile(<private>)"
 
     @staticmethod
-    def _open_directory(path: Path) -> int:
+    def open_directory(path: Path) -> int:
         descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
         try:
             for part in path.parts[1:]:
@@ -108,13 +122,14 @@ class CiphertextFile:
     def _check_directory(self):
         if self._fd is None:
             raise UnsafeStorage()
-        current = self._open_directory(self.path.parent)
+        current = self.open_directory(self.path.parent)
         try:
             info = os.fstat(current)
             if (
                 (info.st_dev, info.st_ino) != self._directory_identity
                 or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) != 0o700
+                or stat.S_IMODE(info.st_mode) & 0o022
+                or (self.private and stat.S_IMODE(info.st_mode) != 0o700)
             ):
                 raise UnsafeStorage()
             _no_extended_acl(current)
@@ -122,12 +137,13 @@ class CiphertextFile:
             os.close(current)
 
     @staticmethod
-    def _check_file(info: os.stat_result):
+    def _check_file(info: os.stat_result, *, private: bool = True):
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
             or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) != 0o600
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or (private and stat.S_IMODE(info.st_mode) != 0o600)
         ):
             raise UnsafeStorage()
 
@@ -136,7 +152,7 @@ class CiphertextFile:
             info = os.stat(self.path.name, dir_fd=self._fd, follow_symlinks=False)
         except FileNotFoundError:
             return None
-        self._check_file(info)
+        self._check_file(info, private=self.private)
         fd = os.open(
             self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._fd
         )
@@ -155,7 +171,7 @@ class CiphertextFile:
         )
         try:
             before = os.fstat(fd)
-            self._check_file(before)
+            self._check_file(before, private=self.private)
             _no_extended_acl(fd)
             if before.st_size > self.maximum_size:
                 raise UnsafeStorage()
@@ -163,7 +179,7 @@ class CiphertextFile:
                 data = stream.read(self.maximum_size + 1)
             after = os.fstat(fd)
             identity = _identity(before)
-            self._check_file(after)
+            self._check_file(after, private=self.private)
             _no_extended_acl(fd)
             if (
                 len(data) > self.maximum_size
@@ -209,6 +225,54 @@ class CiphertextFile:
             if acquired:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    def identity(self) -> FileIdentity | None:
+        """Check the approved target before a caller prepares its replacement."""
+        self._check_directory()
+        return self._target_identity()
+
+    def write_plaintext(
+        self, plaintext: bytes, *, expected: FileIdentity | None
+    ) -> None:
+        """Explicit final plaintext output, with no plaintext temporary file.
+
+        This direct output is not atomic; interruption can leave a partial final
+        file. Ciphertext commits must use write instead.
+        """
+        if type(plaintext) is not bytes or len(plaintext) > self.maximum_size:
+            raise UnsafeStorage()
+        with self._writer():
+            if self._target_identity() != expected:
+                raise StoreChanged()
+            flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            if expected is None:
+                flags |= os.O_CREAT | os.O_EXCL
+            fd = os.open(self.path.name, flags, 0o600, dir_fd=self._fd)
+            try:
+                info = os.fstat(fd)
+                self._check_file(info, private=self.private)
+                _no_extended_acl(fd)
+                if expected is not None and _identity(info) != expected:
+                    raise StoreChanged()
+                self._check_directory()
+                os.fchmod(fd, 0o600)
+                self._check_file(os.fstat(fd))
+                if self._target_identity() != _identity(os.fstat(fd)):
+                    raise StoreChanged()
+                os.ftruncate(fd, 0)
+                with os.fdopen(fd, "wb", closefd=False) as stream:
+                    stream.write(plaintext)
+                    stream.flush()
+                    os.fsync(fd)
+                named = self._target_identity()
+                if named != _identity(os.fstat(fd)):
+                    raise StoreChanged()
+                if self._fd is None:
+                    raise UnsafeStorage()
+                os.fsync(self._fd)
+                self._check_directory()
+            finally:
+                os.close(fd)
 
     def write(
         self, ciphertext: bytes, *, expected: FileIdentity | None

@@ -15,8 +15,10 @@ class FileSnapshot:
     raw: bytes
 
 
-def snapshot_file(path: Path) -> FileSnapshot:
-    parent = CiphertextFile._open_directory(path.parent)
+def snapshot_file(path: Path, *, maximum_size: int = 64 * 1024 * 1024) -> FileSnapshot:
+    if type(maximum_size) is not int or not 1 <= maximum_size <= 128 * 1024 * 1024:
+        raise PermissionDenied()
+    parent = CiphertextFile.open_directory(path.parent)
     directory = os.fstat(parent)
     fd = None
     try:
@@ -27,11 +29,11 @@ def snapshot_file(path: Path) -> FileSnapshot:
         if (
             not stat.S_ISREG(first.st_mode)
             or first.st_nlink != 1
-            or first.st_size > 64 * 1024 * 1024
+            or first.st_size > maximum_size
         ):
             raise PermissionDenied()
         with os.fdopen(fd, "rb", closefd=False) as stream:
-            raw = stream.read(64 * 1024 * 1024 + 1)
+            raw = stream.read(maximum_size + 1)
         last = os.fstat(fd)
         named = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
 
@@ -47,12 +49,12 @@ def snapshot_file(path: Path) -> FileSnapshot:
         if (
             last.st_nlink != 1
             or named.st_nlink != 1
-            or len(raw) > 64 * 1024 * 1024
+            or len(raw) > maximum_size
             or identity(first) != identity(last)
             or identity(last) != identity(named)
         ):
             raise PermissionDenied()
-        current = CiphertextFile._open_directory(path.parent)
+        current = CiphertextFile.open_directory(path.parent)
         try:
             selected = os.fstat(current)
             if (directory.st_dev, directory.st_ino) != (

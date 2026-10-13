@@ -88,15 +88,15 @@ def test_dashboard_navigation_preserves_children_for_each_page():
 
 def test_encrypted_open_preserves_text_binary_and_file_descriptor_reads(tmp_path):
     # Keep process-wide activation local to this subprocess.
-    script = """import builtins, os
+    script = """import builtins, getpass, os, sys
 from pathlib import Path
 from w3plex import security
-import hashlib
+sys.stdin.isatty = lambda: True
+getpass.getpass = lambda _: "PUBLIC-TEST-master"
 source = Path("plain.txt")
 source.write_text("hello\\n", encoding="utf-8")
 encrypted = security.encrypt_file(source, password="file password")
 context = security.enable_encrypted_io()
-context.install_keys([hashlib.sha256(b"file password").digest()])
 with builtins.open(encrypted) as stream:
     assert stream.read() == "hello\\n"
     assert stream.name == str(encrypted)
@@ -105,14 +105,19 @@ with builtins.open(encrypted, "rb") as stream:
 descriptor = os.open(source, os.O_RDONLY)
 with builtins.open(descriptor) as stream:
     assert stream.read() == "hello\\n"
-assert context.path == Path(os.environ["W3PLEX_KEYSTORE"])
+assert Path(os.environ["W3PLEX_SECRET_STORE"]).exists()
+assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
 """
     import os
 
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=tmp_path,
-        env={**os.environ, "W3PLEX_KEYSTORE": str(tmp_path / "keystore.bin")},
+        env={
+            **os.environ,
+            "W3PLEX_KEYSTORE": str(tmp_path / "keystore.bin"),
+            "W3PLEX_SECRET_STORE": str(tmp_path / "private" / "secrets.vault"),
+        },
         capture_output=True,
         text=True,
         timeout=15,

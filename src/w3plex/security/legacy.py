@@ -79,6 +79,10 @@ class LegacyContext:
             return self._epoch
 
     @property
+    def persist_keys(self) -> bool:
+        return self._persist_keys
+
+    @property
     def active(self) -> bool:
         return is_active(self)
 
@@ -327,11 +331,23 @@ class LegacyContext:
             return plain
 
     def decrypt_bytes(
-        self, raw: bytes, *, source: str | Path, password: str | None = None
+        self,
+        raw: bytes,
+        *,
+        source: str | Path,
+        password: str | None = None,
+        use_keystore: bool = True,
+        ask_password: bool = True,
     ) -> bytes:
         """Private read; ordinary contexts never rewrite the source keystore."""
         return (
-            self._decrypt_bytes(raw, source=source, password=password)
+            self._decrypt_bytes(
+                raw,
+                source=source,
+                password=password,
+                use_keystore=use_keystore,
+                ask_password=ask_password,
+            )
             if raw.startswith(b"ENC1")
             else raw
         )

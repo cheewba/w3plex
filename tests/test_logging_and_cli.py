@@ -94,7 +94,7 @@ def test_cli_encrypt_decrypt_absolute_paths_with_spaces_without_config(tmp_path)
     result = run_cli(tmp_path, "encrypt", str(source), "--password", "test password")
     assert result.returncode == 0, result.stderr
     encrypted = source.with_suffix(".txt.enc")
-    assert encrypted.read_bytes().startswith(b"ENC1")
+    assert encrypted.read_bytes().startswith(b"W3FILE1\n")
     destination = tmp_path / "decoded.txt"
     result = run_cli(
         tmp_path,
