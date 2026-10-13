@@ -11,8 +11,9 @@ from eth_account.signers.local import LocalAccount
 from hexbytes import HexBytes
 from w3ext import Account as LegacyAccount
 
-from ..security import SecretRef
+from ..security import ISecretRef
 from ..security.errors import InvalidStore
+from ..security.refs import safe_call
 
 
 def _key(value: Any) -> bytes | str:
@@ -49,37 +50,38 @@ def _message(data: bytes | str | Mapping) -> SignableMessage:
 
 
 class Account(LegacyAccount):
-    """Retain a SecretRef instead of a LocalAccount for protected keys.
+    """Retain a ISecretRef instead of a LocalAccount for protected keys.
 
     Ordinary string construction retains w3ext behavior. These are trusted local
     objects, not agent proxies; Cryptopal must authorize final signing inputs.
     """
 
     def __init__(self):
-        self._reference: SecretRef | None = None
+        self._reference: ISecretRef | None = None
         super().__init__()
 
     @classmethod
-    def from_key(cls, key: str | SecretRef) -> Self:
-        if not isinstance(key, SecretRef):
+    def from_key(cls, key: str | ISecretRef) -> Self:
+        if not isinstance(key, ISecretRef):
             return cast(Self, super().from_key(key))
         instance = cls()
         instance._reference = key
         del instance._acc
-        instance.address = key._use(
-            lambda value: EthAccount.from_key(_key(value)).address
+        instance.address = safe_call(
+            lambda: EthAccount.from_key(_key(key.ref(silent=True))).address
         )
         return instance
 
     @property
-    def key(self) -> bytes | SecretRef:
+    def key(self) -> bytes | ISecretRef:
         return self._reference if self._reference is not None else self._acc.key
 
     def _local[T](self, function: Callable[[LocalAccount], T]) -> T:
         if self._reference is None:
             return function(self._acc)
-        return self._reference._use(
-            lambda value: function(EthAccount.from_key(_key(value)))
+        reference = self._reference
+        return safe_call(
+            lambda: function(EthAccount.from_key(_key(reference.ref(silent=True))))
         )
 
     def sign_message(self, message: SignableMessage) -> SignedMessage:

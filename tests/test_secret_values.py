@@ -31,8 +31,7 @@ def test_json_escapes_and_nested_text_restore_with_one_confirmation(secret_store
     secret_store._confirm = lambda access: confirmations.append(access) or True
     assert selected.ref() == "1"
     assert len(confirmations) == 1
-    assert confirmations[0].selection == selected._selection
-    assert key._selection != selected._selection
+    assert confirmations[0].identifier == root.identifier
     secret_store._vault.lock()
     secret_store._vault.unlock(PASSWORD)
     assert key.ref(silent=True) == "abc1xyz"
@@ -79,7 +78,7 @@ def test_out_of_bounds_wrong_parent_and_split_unicode_are_safe(secret_store):
 
 def test_depth_is_bounded_and_equivalent_recipes_keep_selection_identity(secret_store):
     root = secret_store.capture(b"test")
-    assert SecretString(root)._selection == SecretString(root)._selection
+    assert SecretString(root) == SecretString(root)
     parent = root
     for _ in range(32):
         parent = SecretString(parent)

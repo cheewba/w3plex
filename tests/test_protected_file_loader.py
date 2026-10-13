@@ -40,7 +40,7 @@ def test_existing_reader_captures_once_across_concurrent_reads_and_lock(
 
     async def read():
         first, second = await asyncio.gather(reader(), reader())
-        assert first[0].identifier == second[0].identifier
+        assert first[0].parent.identifier == second[0].parent.identifier
         return first
 
     values = asyncio.run(read())

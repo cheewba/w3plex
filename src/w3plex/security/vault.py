@@ -1,7 +1,6 @@
-"""Service-owned encrypted vault. Do not expose this object as an agent tool.
+"""Encrypted data storage with opaque metadata and explicit lock/unlock.
 
-Only SecretRef DTOs cross the public boundary. Plaintext methods are trusted
-private host interfaces; a service authenticates their control connection.
+This module has no wallet types, application permissions or agent interfaces.
 """
 
 import base64
@@ -12,9 +11,6 @@ import weakref
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from eth_account import Account as EthAccount
-
-from .contracts import SecretKind, SecretRef, SecretUse, WalletInfo
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .memory import LockedBuffer, ProcessProtection
 from .storage import CiphertextFile, FileIdentity
@@ -25,29 +21,12 @@ from .vault_format import (
     canonical,
     open_payload,
     parse,
+    reject_json_constant,
     seal,
+    unique_fields,
     unwrap,
     update_payload,
 )
-
-_USES = {
-    SecretKind.DATA: {SecretUse.DECRYPT},
-    SecretKind.WALLET: {
-        SecretUse.TRANSACTION,
-        SecretUse.MESSAGE,
-        SecretUse.TYPED_MESSAGE,
-    },
-    SecretKind.SEED: {SecretUse.RECOVERY},
-    SecretKind.PASSWORD: {SecretUse.RECOVERY},
-    SecretKind.API: {SecretUse.HTTP},
-    SecretKind.RPC: {SecretUse.HTTP},
-    SecretKind.MODEL: {SecretUse.HTTP},
-    SecretKind.LEGACY_FILE_KEY: {SecretUse.DECRYPT},
-}
-
-
-def _valid_size(kind: SecretKind, size: int) -> bool:
-    return 0 <= size <= 1024 * 1024 if kind is SecretKind.DATA else 1 <= size <= 65536
 
 
 def private_call[T](function: Callable[[], T]) -> T:
@@ -66,98 +45,6 @@ def private_call[T](function: Callable[[], T]) -> T:
     raise error()
 
 
-def new_record(
-    kind: SecretKind, value: bytes, uses: Iterable[SecretUse]
-) -> dict[str, Any]:
-    allowed = set(uses)
-    if (
-        not isinstance(kind, SecretKind)
-        or not isinstance(value, bytes)
-        or not _valid_size(kind, len(value))
-        or not allowed
-        or any(not isinstance(use, SecretUse) for use in allowed)
-        or not allowed <= _USES[kind]
-    ):
-        raise InvalidStore()
-    address = None
-    if kind is SecretKind.LEGACY_FILE_KEY and len(value) != 32:
-        raise InvalidStore()
-    if kind is SecretKind.WALLET:
-        if len(value) != 32:
-            raise InvalidStore()
-        address = private_call(lambda: EthAccount.from_key(value).address)
-    return {
-        "id": secrets.token_hex(16),
-        "kind": kind.value,
-        "address": address,
-        "uses": sorted(use.value for use in allowed),
-        "value": base64.b64encode(value).decode("ascii"),
-    }
-
-
-def _parse_records(plaintext: bytes) -> list[dict[str, Any]]:
-    valid = False
-    records = []
-    try:
-        document = json.loads(plaintext)
-        if (
-            isinstance(document, dict)
-            and set(document) == {"records"}
-            and isinstance(document["records"], list)
-            and len(document["records"]) <= 4096
-        ):
-            identifiers = set()
-            for item in document["records"]:
-                if not isinstance(item, dict) or set(item) != {
-                    "id",
-                    "kind",
-                    "address",
-                    "uses",
-                    "value",
-                }:
-                    break
-                identifier = item["id"]
-                if (
-                    not isinstance(identifier, str)
-                    or len(identifier) != 32
-                    or any(c not in "0123456789abcdef" for c in identifier)
-                    or identifier in identifiers
-                ):
-                    break
-                kind = SecretKind(item["kind"])
-                if not isinstance(item["uses"], list) or not item["uses"]:
-                    break
-                uses = {SecretUse(use) for use in item["uses"]}
-                if len(uses) != len(item["uses"]) or not uses <= _USES[kind]:
-                    break
-                value = base64.b64decode(item["value"], validate=True)
-                if not _valid_size(kind, len(value)):
-                    break
-                if kind is SecretKind.LEGACY_FILE_KEY and len(value) != 32:
-                    break
-                if kind is SecretKind.WALLET:
-                    if (
-                        len(value) != 32
-                        or EthAccount.from_key(value).address != item["address"]
-                    ):
-                        break
-                elif item["address"] is not None:
-                    break
-                identifiers.add(identifier)
-                records.append(item)
-            else:
-                valid = True
-    except (ValueError, TypeError, UnicodeError, RecursionError):
-        pass
-    if not valid:
-        raise InvalidStore()
-    return records
-
-
-def _reference(record: dict[str, Any]) -> SecretRef:
-    return SecretRef(record["id"], SecretKind(record["kind"]), record["address"])
-
-
 class Vault:
     def __init__(self, storage: CiphertextFile, *, protection: ProcessProtection):
         self._storage = storage
@@ -167,12 +54,13 @@ class Vault:
         self._envelope: Envelope | None = None
         self._identity: FileIdentity | None = None
         self._closed = False
+        self._generation = 0
         self._lock_listener: weakref.WeakMethod | None = None
 
     def __repr__(self):
         return "Vault(<private>)"
 
-    def _bind_lock(self, callback: Callable[[], None] | None) -> None:
+    def bind_lock(self, callback: Callable[[], None] | None) -> None:
         """One host session owns lock notification; standalone vaults need none."""
         with self._mutex:
             if (
@@ -195,13 +83,13 @@ class Vault:
                 and self._envelope is not None
             )
 
-    def _check(self):
+    def check(self):
         self._protection.check()
         if self._closed:
             raise PermissionDenied()
 
     def _unlocked(self) -> tuple[Envelope, bytes]:
-        self._check()
+        self.check()
         if self._key is None or self._envelope is None:
             raise PermissionDenied()
         return self._envelope, self._key.copy_bytes()
@@ -211,7 +99,7 @@ class Vault:
 
         def operation():
             with self._mutex:
-                self._check()
+                self.check()
                 with LockedBuffer(bytes(32), protection=self._protection) as buffer:
                     envelope, key = seal(
                         canonical({"records": []}), password, settings=settings
@@ -228,14 +116,14 @@ class Vault:
 
         def operation():
             with self._mutex:
-                self._check()
+                self.check()
                 self.lock()
                 data, identity = self._storage.read()
                 envelope = parse(data)
                 buffer = LockedBuffer(bytes(32), protection=self._protection)
                 try:
                     buffer.replace(unwrap(envelope, password))
-                    _parse_records(open_payload(envelope, buffer.copy_bytes()))
+                    self.validate_records(open_payload(envelope, buffer.copy_bytes()))
                 except BaseException:
                     buffer.close()
                     raise
@@ -245,6 +133,7 @@ class Vault:
 
     def lock(self):
         with self._mutex:
+            self._generation += 1
             buffer, self._key = self._key, None
             self._envelope = self._identity = None
             try:
@@ -259,58 +148,111 @@ class Vault:
 
     def _records(self) -> list[dict[str, Any]]:
         envelope, key = self._unlocked()
-        # Unlock and writes validate this authenticated document. Parsing a use
-        # must not decode unrelated wallet keys or derive their addresses again.
+        # Unlock and writes validate this authenticated document.
         return json.loads(open_payload(envelope, key))["records"]
 
-    def references(self) -> tuple[SecretRef, ...]:
-        return private_call(
-            lambda: tuple(_reference(record) for record in self._records())
+    @property
+    def mutex(self):
+        return self._mutex
+
+    @property
+    def protection(self) -> ProcessProtection:
+        return self._protection
+
+    def checkpoint(self) -> int:
+        with self._mutex:
+            self.check()
+            if not self.is_unlocked:
+                raise PermissionDenied()
+            return self._generation
+
+    def validate_records(self, plaintext: bytes) -> list[dict[str, Any]]:
+        document = json.loads(
+            plaintext,
+            object_pairs_hook=unique_fields,
+            parse_constant=reject_json_constant,
         )
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"records"}
+            or not isinstance(document["records"], list)
+            or len(document["records"]) > 4096
+        ):
+            raise InvalidStore()
+        seen = set()
+        for record in document["records"]:
+            if not isinstance(record, dict) or not {"id", "value"} <= record.keys():
+                raise InvalidStore()
+            identifier = record["id"]
+            if (
+                type(identifier) is not str
+                or len(identifier) != 32
+                or any(c not in "0123456789abcdef" for c in identifier)
+                or identifier in seen
+            ):
+                raise InvalidStore()
+            if type(record["value"]) is not str:
+                raise InvalidStore()
+            value = base64.b64decode(record["value"], validate=True)
+            if len(value) > 1024 * 1024:
+                raise InvalidStore()
+            seen.add(identifier)
+        return document["records"]
 
-    def wallets(self) -> tuple[WalletInfo, ...]:
-        """Public metadata for a separately admitted host session read."""
-
+    def identifiers(self) -> tuple[str, ...]:
         def operation():
             with self._mutex:
-                return tuple(
-                    WalletInfo(
-                        _reference(record),
-                        tuple(SecretUse(use) for use in record["uses"]),
-                    )
-                    for record in self._records()
-                    if record["kind"] == SecretKind.WALLET.value
-                )
+                return tuple(record["id"] for record in self._records())
 
         return private_call(operation)
 
-    def add(
-        self, kind: SecretKind, value: bytes, *, uses: Iterable[SecretUse]
-    ) -> SecretRef:
-        return self.import_records([(kind, value, tuple(uses))])[0]
+    def metadata(self, identifier: str) -> dict[str, Any]:
+        def operation():
+            with self._mutex:
+                for record in self._records():
+                    if record["id"] == identifier:
+                        return {
+                            key: value
+                            for key, value in record.items()
+                            if key not in {"id", "value"}
+                        }
+                raise PermissionDenied()
 
-    def import_records(
-        self, selected: Iterable[tuple[SecretKind, bytes, tuple[SecretUse, ...]]]
-    ) -> tuple[SecretRef, ...]:
-        """Trusted, already authorized private import; validate all then commit once.
+        return private_call(operation)
 
-        The host owns source approval and cancellation before this commit point.
-        No source file is modified by this method.
-        """
+    def save(self, value: bytes, *, metadata: dict[str, Any] | None = None) -> str:
+        return self.import_entries([(value, metadata or {})])[0]
+
+    def import_entries(
+        self, selected: Iterable[tuple[bytes, dict[str, Any]]]
+    ) -> tuple[str, ...]:
+        """Validate generic values and opaque metadata, then commit once."""
 
         def operation():
             with self._mutex:
                 envelope, key = self._unlocked()
                 records = self._records()
-                additions = [
-                    new_record(kind, value, uses) for kind, value, uses in selected
-                ]
+                additions = []
+                for value, metadata in selected:
+                    if (
+                        type(value) is not bytes
+                        or len(value) > 1024 * 1024
+                        or type(metadata) is not dict
+                        or {"id", "value"} & metadata.keys()
+                    ):
+                        raise InvalidStore()
+                    additions.append(
+                        {
+                            **metadata,
+                            "id": secrets.token_hex(16),
+                            "value": base64.b64encode(value).decode("ascii"),
+                        }
+                    )
                 if not additions or len(records) + len(additions) > 4096:
                     raise InvalidStore()
-                _parse_records(canonical({"records": records + additions}))
-                updated = update_payload(
-                    envelope, key, canonical({"records": records + additions})
-                )
+                plaintext = canonical({"records": records + additions})
+                self.validate_records(plaintext)
+                updated = update_payload(envelope, key, plaintext)
                 try:
                     identity = self._storage.write(
                         updated.serialize(), expected=self._identity
@@ -319,22 +261,16 @@ class Vault:
                     self.lock()
                     raise
                 self._envelope, self._identity = updated, identity
-                return tuple(_reference(record) for record in additions)
+                return tuple(record["id"] for record in additions)
 
         return private_call(operation)
 
-    def _use_secret[T](
-        self, reference: SecretRef, use: SecretUse, consumer: Callable[[bytes], T]
-    ) -> T:
-        """Private service adapter only; requires its separate session/permit guard."""
-
+    def read(self, identifier: str) -> bytes:
         def operation():
             with self._mutex:
                 for record in self._records():
-                    if _reference(record) == reference and use.value in record["uses"]:
-                        return consumer(
-                            base64.b64decode(record["value"], validate=True)
-                        )
+                    if record["id"] == identifier:
+                        return base64.b64decode(record["value"], validate=True)
                 raise PermissionDenied()
 
         return private_call(operation)
@@ -348,7 +284,7 @@ class Vault:
     ):
         def operation():
             with self._mutex:
-                self._check()
+                self.check()
                 data, identity = self._storage.read()
                 existing = parse(data)
                 with (
@@ -359,7 +295,7 @@ class Vault:
                 ):
                     buffer.replace(unwrap(existing, current_password))
                     plaintext = open_payload(existing, buffer.copy_bytes())
-                    _parse_records(plaintext)
+                    self.validate_records(plaintext)
                     # Rotate the data key too; no old key is persisted.
                     replacement_envelope, replacement_key = seal(
                         plaintext,
@@ -381,7 +317,7 @@ class Vault:
     def backup(self, destination: CiphertextFile):
         def operation():
             with self._mutex:
-                self._check()
+                self.check()
                 if self._key is None or self._envelope is None:
                     raise PermissionDenied()
                 data, identity = self._storage.read()

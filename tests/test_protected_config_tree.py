@@ -56,7 +56,7 @@ def test_plain_yaml_keeps_factories_references_and_include_paths(
             assert runner.tree.alias is runner.tree.readers.lines
             values = await runner.tree.alias()
             assert isinstance(values[0], SecretRef)
-            assert values[0]._store is secret_store
+            assert values[0].parent._store is secret_store
             assert values[0].ref(silent=True) == "PUBLIC-TEST-private-line"
             assert get_file_opener() is None
         finally:
@@ -85,7 +85,7 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
             reader = await tree.reader()
             value = (await reader())[0]
             assert isinstance(value, SecretRef)
-            assert value._store is secret_store
+            assert value.parent._store is secret_store
             assert value.ref(silent=True) == "deferred"
         finally:
             await tree.close()
@@ -123,8 +123,8 @@ def test_concurrent_factories_and_later_reads_keep_owner(
             first, second = await asyncio.gather(
                 *(runner.tree.reader() for runner in runners)
             )
-            assert first[0]._store is secret_store
-            assert second[0]._store is other_store
+            assert first[0].parent._store is secret_store
+            assert second[0].parent._store is other_store
             assert first[0].ref(silent=True) == "first"
             assert second[0].ref(silent=True) == "second"
             assert get_file_opener() is None
@@ -216,7 +216,7 @@ def test_application_created_reader_uses_runner_opener(
         try:
             await runner.tree.applications.sample("read")
             assert isinstance(received[0], SecretRef)
-            assert received[0]._store is secret_store
+            assert received[0].parent._store is secret_store
             assert received[0].ref(silent=True) == "application read"
             assert get_file_opener() is None
         finally:

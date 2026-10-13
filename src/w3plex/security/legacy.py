@@ -71,6 +71,30 @@ class LegacyContext:
             self._keys = None
             self._epoch += 1
 
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._epoch
+
+    def fork(self, *, input_handler: Callable[[LegacyPasswordRequest], str]):
+        with self._lock:
+            context = LegacyContext(
+                self.path, input_handler=input_handler, opener=self._opener
+            )
+            context._keys = None if self._keys is None else list(self._keys)
+            return self._epoch, context
+
+    def merge(self, context: "LegacyContext", *, generation: int) -> None:
+        with self._lock, context._lock:
+            if self._epoch != generation or context.path != self.path:
+                raise PermissionDenied()
+            self._keys = None if context._keys is None else list(context._keys)
+
+    def install_keys(self, keys: list[bytes]) -> None:
+        if any(type(key) is not bytes or len(key) != 32 for key in keys):
+            raise InvalidStore()
+        with self._lock:
+            self._keys = list(keys)
 
     def _password(self, kind: str, source: Path) -> str:
         if self._input is None:
@@ -81,7 +105,7 @@ class LegacyContext:
         return value
 
     @staticmethod
-    def _parse_keys(plain: bytes) -> list[bytes]:
+    def parse_keys(plain: bytes) -> list[bytes]:
         valid = False
         keys: list[bytes] = []
         try:
@@ -121,7 +145,7 @@ class LegacyContext:
             raise InvalidStore()
         salt, payload = raw[:16], raw[16:]
         if not payload.startswith(b"KS01"):
-            keys = self._parse_keys(payload)
+            keys = self.parse_keys(payload)
         else:
             password = self._password("master", self.path)
             keys = None
@@ -141,7 +165,7 @@ class LegacyContext:
                     )
                 except InvalidToken:
                     continue
-                keys = self._parse_keys(plain)
+                keys = self.parse_keys(plain)
                 break
             if keys is None:
                 raise AuthenticationFailed()
