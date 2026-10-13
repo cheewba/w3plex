@@ -92,9 +92,13 @@ security does not strengthen old ciphertext or prevent recovery from every
 memory dump. Importing into the new vault is explicit and preserves originals.
 
 The new vault starts with `W3VAULT1`. It contains several identified records.
-Transparent open currently recognizes ENC1 only. Opening a vault through it
-returns encrypted file contents without decryption. A new Argon2id/AES-GCM
-external-file format and automatic opening are not implemented yet.
+The standalone default context and convenience encryption helpers still use
+ENC1. The explicit `EncryptedIOContext` also reads modern `W3FILE1` external
+files. See the [external-file format and context guide](security-file-format.md)
+for private input, process protection and encrypted file-key persistence.
+This context rejects vaults as external files; the legacy-only context leaves
+their ciphertext unchanged. Neither context turns vault records into a plain
+file stream.
 
 ## Retired experimental interfaces
 

@@ -1,7 +1,7 @@
 """Generic data protection and structural references; imports have no effects."""
 
 from .adapters import SecretJson as SecretJson, SecretString as SecretString
-from .files import (
+from .encrypted_io import (
     EncryptedIOContext as EncryptedIOContext,
     PasswordRequest as PasswordRequest,
 )

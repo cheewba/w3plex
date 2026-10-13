@@ -36,6 +36,20 @@ Contexts reuse modern file keys in owned locked buffers, up to 1024 cached keys.
 Locking clears those buffers and invalidates a pending password response.
 Ordinary returned bytes and strings remain plaintext after locking.
 
+Supply an existing generic `Vault` through `keystore=` to reuse encrypted file
+keys across process restarts. `persist_keys=True` remembers successfully
+authenticated file keys; the default keeps newly discovered keys in memory
+only. A locked keystore requests its master password through the same private
+input callback. A missing store requires master-password confirmation before
+creation. The master password is never saved. Modern keys do not enter KS01.
+
+With persistent keys, reopening needs the master password rather than every
+individual file password. Without persistence, repeated reads still reuse
+temporary owned keys. Locking either the context or its supplied vault clears
+these keys; a lock/unlock during file-password input invalidates that operation.
+Lock notifications coexist with the vault's primary host owner. The caller
+owns a supplied vault and closes it separately after closing the context.
+
 The on-disk layout is:
 
 | Field | Bytes |
