@@ -7,6 +7,7 @@ from eth_typing import HexAddress, HexStr
 from w3ext import Account, Chain, Currency, CurrencyAmount, TokenAmount
 from web3.types import Nonce, TxParams
 
+from ..security import ISecretRef
 from .module import ModuleError
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,10 @@ class Odos:
     name = "odos"
 
     def __init__(
-        self, account: "Account", chain: "Chain", ref_code: str | None = None
+        self,
+        account: "Account",
+        chain: "Chain",
+        ref_code: str | ISecretRef[str] | None = None,
     ) -> None:
         self.account = account
         self.chain = chain
@@ -218,13 +222,18 @@ class Odos:
         output_: Currency | list[Currency] | list[tuple[Currency, float]],
         slippage: float = 0.5,
     ) -> Quote:
+        ref_code = (
+            self.ref_code.ref(silent=True)
+            if isinstance(self.ref_code, ISecretRef)
+            else self.ref_code
+        )
         data = {
             "chainId": int(self.chain.chain_id),
             "inputTokens": self._format_input(input_),
             "outputTokens": self._format_output(output_),
             "slippageLimitPercent": slippage,
             "userAddr": self.account.address,
-            "referralCode": self.ref_code or 1,
+            "referralCode": ref_code or 1,
             "gasPrice": await self.get_gas_price(),
             "disableRFQs": False,
             "likeAsset": True,
