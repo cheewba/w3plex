@@ -318,9 +318,7 @@ class LegacyContext:
                     self._password("file", Path(source)).encode()
                 ).digest()
             else:
-                raise self._authentication_error(
-                    "No password provided and key not in keystore"
-                )
+                raise AuthenticationFailed()
             success = False
             plain = b""
             try:
