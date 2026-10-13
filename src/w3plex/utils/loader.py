@@ -151,11 +151,17 @@ class SecretFileLoader[T](FileLoader[T]):
 def accounts_loader(
     **kwargs: Unpack[FileLoaderConfig],
 ) -> Callable[[], Awaitable[list[Account]]]:
-    def account(line: str) -> Account:
+    reader = FileLoader[Account](**kwargs)
+
+    def account(line: str | SecretString) -> Account:
+        if isinstance(line, SecretRef):
+            from ..w3.account import Account as ReferenceAccount
+
+            return ReferenceAccount.from_key(line)
         return Account.from_key(line)
 
     def wrapper():
-        return FileLoader[Account](**kwargs).process(account)
+        return reader.process(account)
 
     return wrapper
 
@@ -163,7 +169,9 @@ def accounts_loader(
 async def wallets_loader(**kwargs: Unpack[FileLoaderConfig]) -> list[str]:
     """Load public EVM addresses, ignoring blank lines and comments."""
 
-    def address(line: str) -> str:
+    def address(line: str | SecretString) -> str:
+        if isinstance(line, SecretRef):
+            return line._use(address)
         if not Web3.is_address(line):
             raise ValueError(f"Invalid wallet address in {kwargs['file']}: {line}")
         return Web3.to_checksum_address(line)
