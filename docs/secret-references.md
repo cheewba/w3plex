@@ -95,17 +95,27 @@ Enable protection on the existing Runner or config-tree parser:
 from functools import partial
 from w3plex.config import load_config
 from w3plex.runner import Runner
-from w3plex.security.legacy import LegacyContext
+from w3plex.security import EncryptedIOContext
 
-legacy = LegacyContext("keystore.bin", input_handler=read_legacy_password)
-cfg = load_config("w3plex.yaml", opener=legacy.open, environment={})
+context = EncryptedIOContext(
+    protection=protection, input_handler=read_private_password,
+    keystore=vault,
+    legacy_keystore_path="keystore.bin",
+)
+cfg = load_config("w3plex.yaml", opener=context.open, environment={})
 runner = Runner()
 await runner.init(
     cfg, "w3plex.yaml",
-    file_opener=partial(store.capture_file, legacy=legacy),
+    file_opener=partial(store.capture_file, context=context),
 )
 accounts = await runner.tree.accounts.main()
 ```
+
+The host activates the supplied process protection before private input.
+The same context recognizes ENC1 and W3FILE1. capture_file uses the named
+context parameter; the earlier experimental legacy keyword is removed.
+A modern source requires EncryptedIOContext and cannot fall back to a legacy-only
+reader or plaintext capture. Captured plaintext values are limited to 1 MiB.
 
 The host approves sources and handles private input. Readers capture the opener
 when constructed; deferred factories and separate async runners keep their own

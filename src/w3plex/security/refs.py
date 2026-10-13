@@ -12,6 +12,8 @@ from typing import (
     runtime_checkable,
 )
 
+from . import file_format
+from .encrypted_io import EncryptedIOContext, detect_format
 from .errors import (
     AuthenticationFailed,
     InteractionRequired,
@@ -106,16 +108,27 @@ class SecretStore:
         return safe_call(operation)
 
     def capture_file(
-        self, file: str | Path, *, legacy: LegacyContext | None = None
+        self,
+        file: str | Path,
+        *,
+        context: EncryptedIOContext | LegacyContext | None = None,
     ) -> StoredSecret:
         def operation():
             checkpoint = self._vault.checkpoint()
             path = Path(file).absolute()
             raw = snapshot_file(path).raw
-            if raw.startswith(b"ENC1"):
-                if legacy is None:
+            kind = detect_format(raw)
+            if (
+                kind == "modern"
+                and len(file_format.parse(raw).payload) > MAX_SNAPSHOT_SIZE + 16
+            ):
+                raise InvalidStore()
+            if kind != "plain":
+                if context is None or (
+                    kind == "modern" and not isinstance(context, EncryptedIOContext)
+                ):
                     raise InteractionRequired()
-                raw = legacy.decrypt_bytes(raw, source=path)
+                raw = context.decrypt_bytes(raw, source=path)
             with self._vault.mutex:
                 if self._vault.checkpoint() != checkpoint:
                     raise PermissionDenied()

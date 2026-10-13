@@ -49,7 +49,7 @@ def test_enc1_is_captured_once_without_modifying_original(secret_store, tmp_path
     filename = tmp_path / "legacy.enc"
     filename.write_bytes(encrypted)
     legacy = LegacyContext(None, input_handler=lambda request: password)
-    captured = secret_store.capture_file(filename, legacy=legacy)
+    captured = secret_store.capture_file(filename, context=legacy)
     assert filename.read_bytes() == encrypted
     values = asyncio.run(FileLoader(file=captured).process())
     filename.unlink()
