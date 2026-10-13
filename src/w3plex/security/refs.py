@@ -209,10 +209,11 @@ class SecretJson[T](SecretRef[T]):
         for key in self.path:
             if isinstance(key, str) and isinstance(result, dict):
                 result = result[key]
-            elif isinstance(key, int) and isinstance(result, list):
+                continue
+            if isinstance(key, int) and isinstance(result, list):
                 result = result[key]
-            else:
-                raise InvalidStore()
+                continue
+            raise InvalidStore()
         return cast(T, result)
 
 
