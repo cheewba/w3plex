@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
+from .diagnostics import safe_error_type
 from .memory import LockedBuffer, ProcessProtection
 from .storage import CiphertextFile, FileIdentity, UnsafeStorage
 from .vault_format import (
@@ -39,9 +40,10 @@ def private_call[T](function: Callable[[], T]) -> T:
     try:
         return function()
     except SecurityError as exc:
-        error = type(exc)
+        error = safe_error_type(exc)
     except Exception:  # noqa: BLE001 -- private library errors are never forwarded
         error = SecurityError
+    del function
     # Outside the exception handler: no __context__ chain with private locals.
     raise error()
 
