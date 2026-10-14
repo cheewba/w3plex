@@ -396,6 +396,8 @@ class Vault:
 
     def close(self):
         with self._mutex:
-            self.lock()
-            self._closed = True
-            self._storage.close()
+            try:
+                self.lock()
+            finally:
+                self._closed = True
+                self._storage.close()
