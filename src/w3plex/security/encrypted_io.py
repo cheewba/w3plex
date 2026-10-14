@@ -541,7 +541,8 @@ class EncryptedIOContext:
         generation = self.generation
         source = Path(src).absolute()
         snapshot = snapshot_file(source, maximum_size=file_format.MAXIMUM_SIZE)
-        if detect_format(snapshot.raw) == "plain":
+        kind = detect_format(snapshot.raw)
+        if kind == "plain":
             raise ValueError("Source is not encrypted")
         destination = (
             Path(src)
@@ -558,14 +559,33 @@ class EncryptedIOContext:
                 *snapshot.identity, hashlib.sha256(snapshot.raw).digest()
             ):
                 raise StoreChanged()
+            if kind == "modern":
+                file_format.parse(snapshot.raw)
+            store_generation = self._keystore_checkpoint()
+            if use_keystore and (
+                kind == "modern" or self._store_available() or self._persist_keys
+            ):
+                # Prepare before decryption so its vault epoch also covers the
+                # plaintext commit. Never hold the vault mutex across input.
+                self._check_protection()
+                self._prepare_keystore(create=self._persist_keys, generation=generation)
+                if self._keystore is not None:
+                    self.unlock_keystore()
+                    if store_generation is None:
+                        store_generation = self._keystore_checkpoint()
             plaintext = self.decrypt_bytes(
                 snapshot.raw,
                 source=source,
                 password=password,
                 use_keystore=use_keystore,
             )
-            with self._mutex:
+            with (
+                self._mutex,
+                nullcontext() if self._keystore is None else self._keystore.mutex,
+            ):
                 self._check(generation)
+                if store_generation is not None:
+                    self._check_keystore(store_generation)
                 storage.write_plaintext(plaintext, expected=expected)
         return destination
 
