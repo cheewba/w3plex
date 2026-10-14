@@ -143,6 +143,131 @@ def test_unsaved_key_reuses_memory_and_underlying_lock_clears_it(keystore):
         owner.close()
 
 
+@pytest.mark.parametrize("format_name", ["modern", "legacy"])
+@pytest.mark.parametrize("output", ["missing", "existing", "inplace"])
+@pytest.mark.parametrize("reunlock", [False, True])
+def test_vault_lock_after_decryption_prevents_plaintext_output(
+    keystore, tmp_path, monkeypatch, format_name, output, reunlock
+):
+    directory = (
+        FIXTURES if format_name == "modern" else FIXTURES.parent / "legacy-security"
+    )
+    manifest = json.loads((directory / "manifest.json").read_text())
+    source = tmp_path / "source.enc"
+    source.write_bytes((directory / "sample.enc").read_bytes())
+    destination = source if output == "inplace" else tmp_path / "output"
+    if output == "existing":
+        destination.write_bytes(b"PUBLIC-TEST-previous-output")
+    original = destination.read_bytes() if destination.exists() else None
+    owner = EncryptedIOContext(
+        protection=keystore.protection,
+        keystore=keystore,
+        input_handler=lambda _: (
+            PASSWORD if format_name == "modern" else manifest["file_password"]
+        ),
+    )
+    decrypt = owner.decrypt_bytes
+    failures = []
+
+    def revoke():
+        try:
+            keystore.lock()
+            if reunlock:
+                keystore.unlock(MASTER)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def decrypted(*args, **kwargs):
+        result = decrypt(*args, **kwargs)
+        worker = threading.Thread(target=revoke, daemon=True)
+        worker.start()
+        worker.join(timeout=3)
+        assert not worker.is_alive(), "Private input/decryption held the vault mutex"
+        assert failures == []
+        return result
+
+    monkeypatch.setattr(owner, "decrypt_bytes", decrypted)
+    try:
+        with pytest.raises(PermissionDenied):
+            owner.decrypt_file(source, dst=destination, use_keystore=True)
+        assert (destination.read_bytes() if destination.exists() else None) == original
+        assert not list(tmp_path.glob("*.tmp"))
+    finally:
+        owner.close()
+
+
+def test_initially_locked_vault_checkpoint_survives_decryption_boundary(
+    keystore, tmp_path, monkeypatch
+):
+    keystore.lock()
+    source = tmp_path / "source.enc"
+    source.write_bytes((FIXTURES / "sample.enc").read_bytes())
+    requests = []
+
+    def answer(request):
+        requests.append(request.kind)
+        return MASTER.decode() if request.kind == "master" else PASSWORD
+
+    owner = EncryptedIOContext(
+        protection=keystore.protection, keystore=keystore, input_handler=answer
+    )
+    decrypt = owner.decrypt_bytes
+
+    def decrypted(*args, **kwargs):
+        result = decrypt(*args, **kwargs)
+        keystore.lock()
+        keystore.unlock(MASTER)
+        return result
+
+    monkeypatch.setattr(owner, "decrypt_bytes", decrypted)
+    try:
+        with pytest.raises(PermissionDenied):
+            owner.decrypt_file(source, use_keystore=True)
+        assert requests == ["master", "file"]
+        assert not source.with_suffix(".dec").exists()
+    finally:
+        owner.close()
+
+
+def test_plaintext_commit_holds_borrowed_vault_mutex(keystore, tmp_path, monkeypatch):
+    source = tmp_path / "source.enc"
+    source.write_bytes((FIXTURES / "sample.enc").read_bytes())
+    owner = EncryptedIOContext(
+        protection=keystore.protection,
+        keystore=keystore,
+        input_handler=lambda _: PASSWORD,
+    )
+    write = CiphertextFile.write_plaintext
+    entered, locked = threading.Event(), threading.Event()
+    worker = None
+
+    def revoke():
+        entered.set()
+        keystore.lock()
+        locked.set()
+
+    def committing(storage, *args, **kwargs):
+        nonlocal worker
+        worker = threading.Thread(target=revoke, daemon=True)
+        worker.start()
+        assert entered.wait(timeout=2)
+        assert not locked.wait(timeout=0.1), "Vault locked during plaintext commit"
+        return write(storage, *args, **kwargs)
+
+    monkeypatch.setattr(CiphertextFile, "write_plaintext", committing)
+    try:
+        result = owner.decrypt_file(source, use_keystore=True)
+        assert result.read_bytes() == bytes.fromhex(
+            json.loads((FIXTURES / "manifest.json").read_text())["plaintext_hex"]
+        )
+        worker.join(timeout=3)
+        assert locked.is_set() and not worker.is_alive()
+    finally:
+        if worker is not None:
+            worker.join(timeout=3)
+        owner.close()
+
+
 def test_shared_vault_lock_clears_each_context_without_replacing_primary_owner(
     keystore,
 ):
