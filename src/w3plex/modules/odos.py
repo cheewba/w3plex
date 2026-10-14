@@ -8,6 +8,7 @@ from w3ext import Account, Chain, Currency, CurrencyAmount, TokenAmount
 from web3.types import Nonce, TxParams
 
 from ..security import ISecretRef
+from ..security.refs import safe_call
 from .module import ModuleError
 
 logger = logging.getLogger(__name__)
@@ -222,10 +223,11 @@ class Odos:
         output_: Currency | list[Currency] | list[tuple[Currency, float]],
         slippage: float = 0.5,
     ) -> Quote:
+        reference = self.ref_code
         ref_code = (
-            self.ref_code.ref(silent=True)
-            if isinstance(self.ref_code, ISecretRef)
-            else self.ref_code
+            safe_call(lambda: reference.ref(silent=True))
+            if isinstance(reference, ISecretRef)
+            else reference
         )
         data = {
             "chainId": int(self.chain.chain_id),

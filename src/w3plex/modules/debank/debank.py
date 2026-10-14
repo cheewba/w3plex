@@ -11,6 +11,7 @@ from aiohttp_socks import ProxyConnector as _ProxyConnector
 from w3ext import Chain, Currency, CurrencyAmount, Token, TokenAmount
 
 from ...security import ISecretRef
+from ...security.refs import safe_call
 from ..module import ModuleError
 from .constants import (
     AWAILABLE_CHAINS_API_URL,
@@ -170,14 +171,16 @@ class Debank:
     async def _official_request(self, path: str, **params) -> list:
         if not self.access_key:
             raise ModuleError("debank: access_key is required for the DeBank OpenAPI")
+        reference = self.access_key
+        access_key = (
+            safe_call(lambda: reference.ref(silent=True))
+            if isinstance(reference, ISecretRef)
+            else reference
+        )
         async with self._api_request(
             "get",
             f"{OPEN_API_URL}/{path}",
-            headers={
-                "AccessKey": self.access_key.ref(silent=True)
-                if isinstance(self.access_key, ISecretRef)
-                else self.access_key
-            },
+            headers={"AccessKey": access_key},
             params=params,
         ) as response:
             return await response.json()
