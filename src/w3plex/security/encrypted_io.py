@@ -702,14 +702,27 @@ class EncryptedIOContext:
                     self._keystore.lock()
 
     def close(self) -> None:
+        failure: type[SecurityError] | None = None
+        interruption: BaseException | None = None
         with self._mutex:
             if self._closed:
                 return
             if self.active:
                 self.disable()
             self._closed = True
-            try:
-                self.lock()
-            finally:
-                if self._own_keystore and self._keystore is not None:
-                    self._keystore.close()
+            operations = [self.lock]
+            if self._own_keystore and self._keystore is not None:
+                operations.append(self._keystore.close)
+            for operation in operations:
+                try:
+                    operation()
+                except SecurityError as exc:
+                    failure = safe_error_type(exc)
+                except Exception:  # noqa: BLE001 -- still close owned storage
+                    failure = SecurityError
+                except BaseException as exc:  # noqa: BLE001 -- finish teardown before cancellation
+                    interruption = exc
+        if interruption is not None:
+            raise interruption
+        if failure is not None:
+            raise failure()
