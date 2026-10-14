@@ -299,9 +299,11 @@ def test_encoding_errors_newlines_binary_and_name(legacy, tmp_path, encrypted):
         assert stream.read() == "café\nnext\nfinal\n"
     with legacy.open(path, encoding="ascii", errors="replace") as stream:
         assert "caf�" in stream.read()
-    with legacy.open(path, encoding="ascii", errors="strict") as stream:
-        with pytest.raises(UnicodeDecodeError):
-            stream.read()
+    with (
+        legacy.open(path, encoding="ascii", errors="strict") as stream,
+        pytest.raises(UnicodeDecodeError),
+    ):
+        stream.read()
     with legacy.open(path, "rb") as stream:
         assert stream.read() == raw
 

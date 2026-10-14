@@ -10,13 +10,13 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
+from w3plex.security import io as encryption_io
 from w3plex.security.errors import (
     AuthenticationFailed,
     InteractionRequired,
     InvalidStore,
 )
 from w3plex.security.legacy import LegacyContext
-from w3plex.security import io as encryption_io
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 

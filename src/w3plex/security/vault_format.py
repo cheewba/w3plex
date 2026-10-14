@@ -6,16 +6,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from .crypto import (
-    DEFAULT_KDF as DEFAULT_KDF,
-    KdfSettings as KdfSettings,
-    canonical as canonical,
+    DEFAULT_KDF as DEFAULT_KDF,  # noqa: PLC0414 -- public re-export for type checkers
+    KdfSettings as KdfSettings,  # noqa: PLC0414 -- public re-export for type checkers
+    canonical as canonical,  # noqa: PLC0414 -- public re-export for type checkers
     decode_bytes,
     decrypt,
     derive_key,
     encode_bytes,
     encrypt,
-    reject_json_constant as reject_json_constant,
-    unique_fields as unique_fields,
+    reject_json_constant as reject_json_constant,  # noqa: PLC0414 -- public re-export
+    unique_fields as unique_fields,  # noqa: PLC0414 -- public re-export
 )
 from .errors import InvalidStore, UnsupportedProtection
 

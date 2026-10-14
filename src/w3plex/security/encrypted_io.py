@@ -379,7 +379,9 @@ class EncryptedIOContext:
             destination, maximum_size=file_format.MAXIMUM_SIZE, private=False
         ) as storage:
             expected = storage.identity()
-            if storage.path == source and expected != FileIdentity(*snapshot.identity):
+            if storage.path == source and expected != FileIdentity(
+                *snapshot.identity, hashlib.sha256(snapshot.raw).digest()
+            ):
                 raise StoreChanged()
             secret = self._password("file", source) if password is None else password
             with self._mutex:
@@ -412,10 +414,12 @@ class EncryptedIOContext:
             else Path(src).with_suffix(".dec")
         )
         with CiphertextFile(
-            destination, maximum_size=file_format.MAXIMUM_PLAINTEXT, private=False
+            destination, maximum_size=file_format.MAXIMUM_SIZE, private=False
         ) as storage:
             expected = storage.identity()
-            if storage.path == source and expected != FileIdentity(*snapshot.identity):
+            if storage.path == source and expected != FileIdentity(
+                *snapshot.identity, hashlib.sha256(snapshot.raw).digest()
+            ):
                 raise StoreChanged()
             plaintext = self.decrypt_bytes(
                 snapshot.raw,
@@ -514,7 +518,7 @@ class EncryptedIOContext:
                     failure = type(exc)
                 except Exception:  # noqa: BLE001 -- still clear every owned buffer
                     failure = SecurityError
-                except BaseException as exc:  # finish cleanup before cancellation
+                except BaseException as exc:  # noqa: BLE001 -- finish cleanup before cancellation
                     interruption = exc
             if interruption is not None:
                 raise interruption

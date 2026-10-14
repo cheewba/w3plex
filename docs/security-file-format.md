@@ -63,6 +63,18 @@ atomic plaintext replacement; an interruption can leave partial final plaintext.
 Both modes reject unsafe aliases and preserve source/output on authentication
 failure. See the [migration guide](security-migration.md) for defaults and paths.
 
+Checked replacement compares device, inode, size, mtime, ctime and a SHA-256
+fingerprint of the actual file bytes. Timestamps alone can collide on filesystems
+with coarse clock resolution. The writer checks the original target before
+replacement and verifies its temporary ciphertext against the requested bytes.
+Fingerprint reads are bounded by the configured file limit and use small chunks.
+
+`security.storage.FileIdentity` is a local protected-storage token. It now has a
+sixth `fingerprint` field. Prefer its named fields or keep the returned token
+intact; code unpacking five fields must migrate. Its original fields retain their
+names. This token is not part of any encrypted file format, and the change does
+not rewrite existing data or alter standalone file-helper signatures.
+
 The on-disk layout is:
 
 | Field | Bytes |

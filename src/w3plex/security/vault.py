@@ -12,8 +12,8 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .diagnostics import safe_error_type
+from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .memory import LockedBuffer, ProcessProtection
 from .storage import CiphertextFile, FileIdentity, UnsafeStorage
 from .vault_format import (
@@ -168,7 +168,7 @@ class Vault:
                 failure = type(exc)
             except Exception:  # noqa: BLE001 -- still notify data owners
                 failure = SecurityError
-            except BaseException as exc:  # finish cleanup before cancellation
+            except BaseException as exc:  # noqa: BLE001 -- finish cleanup before cancellation
                 interruption = exc
             references = (
                 [] if self._lock_listener is None else [self._lock_listener]
@@ -182,7 +182,7 @@ class Vault:
                         failure = type(exc)
                     except Exception:  # noqa: BLE001 -- notify every data owner
                         failure = SecurityError
-                    except BaseException as exc:  # finish notifying every data owner
+                    except BaseException as exc:  # noqa: BLE001 -- finish notifying every data owner
                         interruption = exc
         if interruption is not None:
             raise interruption

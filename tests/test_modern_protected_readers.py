@@ -9,8 +9,13 @@ from eth_account.messages import encode_defunct
 
 from w3plex.config.reading import load_config, load_reference_config
 from w3plex.runner import Runner
-from w3plex.security import EncryptedIOContext, ISecretRef, LegacyContext, SecretJson
-from w3plex.security import file_format as codec
+from w3plex.security import (
+    EncryptedIOContext,
+    ISecretRef,
+    LegacyContext,
+    SecretJson,
+    file_format as codec,
+)
 from w3plex.security.errors import (
     AuthenticationFailed,
     InteractionRequired,
