@@ -93,6 +93,65 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("as_factory", [False, True])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("protected", [False, True])
+def test_generator_reader_factory_keeps_configured_opener(
+    secret_store, tmp_path, monkeypatch, as_factory, asynchronous, protected
+):
+    data = tmp_path / "data.txt"
+    data.write_text("deferred generator\n")
+    closed = []
+
+    def factory(file):
+        try:
+            yield FileLoader(file=file)
+        finally:
+            closed.append(True)
+
+    async def async_factory(file):
+        await asyncio.sleep(0)
+        try:
+            yield FileLoader(file=file)
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(
+        "w3plex.config.config.load_path",
+        lambda path: async_factory if asynchronous else factory,
+    )
+    cfg = {
+        "reader": {
+            "__init__": "fixture:factory",
+            "__factory__" if as_factory else "__lazy__": True,
+            "file": str(data),
+        }
+    }
+
+    async def check():
+        tree = await config_loader.parse(
+            cfg,
+            str(tmp_path / "w3plex.yaml"),
+            file_opener=secret_store.capture_file if protected else None,
+        )
+        try:
+            reader = await tree.reader()
+            assert get_file_opener() is None
+            values = await reader()
+            if protected:
+                assert isinstance(values[0], ISecretRef)
+                assert values[0].parent._store is secret_store
+                assert values[0].ref(silent=True) == "deferred generator"
+            else:
+                assert values == ["deferred generator"]
+        finally:
+            await tree.close()
+        assert closed == [True]
+        assert get_file_opener() is None
+
+    asyncio.run(check())
+
+
 def test_concurrent_factories_and_later_reads_keep_owner(
     secret_store, other_store, tmp_path, monkeypatch
 ):

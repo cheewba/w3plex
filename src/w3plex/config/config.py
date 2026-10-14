@@ -518,22 +518,24 @@ class Lazy[T]:
         kw = await resolve(kw)
         with using_file_opener(self._file_opener):
             value = cast(T, await config_loader.get_node(kw, self.path))
-        if isgenerator(value):
-            generator = value
-            value = self._resources.enter_context(contextmanager(lambda: generator)())
-        elif isasyncgen(value):
-            generator = value
-            value = await self._resources.enter_async_context(
-                asynccontextmanager(lambda: generator)()
-            )
-        elif callable(close := _get_close(value)):
+            if isgenerator(value):
+                generator = value
+                value = self._resources.enter_context(
+                    contextmanager(lambda: generator)()
+                )
+            elif isasyncgen(value):
+                generator = value
+                value = await self._resources.enter_async_context(
+                    asynccontextmanager(lambda: generator)()
+                )
+            elif callable(close := _get_close(value)):
 
-            async def cleanup():
-                result = close()
-                if isawaitable(result):
-                    await result
+                async def cleanup():
+                    result = close()
+                    if isawaitable(result):
+                        await result
 
-            self._resources.push_async_callback(cleanup)
+                self._resources.push_async_callback(cleanup)
         if not self.as_factory:
             self._set_cached(cast(T, value))
         return cast(T, value)
