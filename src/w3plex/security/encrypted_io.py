@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import file_format
+from .diagnostics import safe_error_type
 from .errors import (
     AuthenticationFailed,
     InteractionRequired,
@@ -675,7 +676,7 @@ class EncryptedIOContext:
                 try:
                     buffer.close()
                 except SecurityError as exc:
-                    failure = type(exc)
+                    failure = safe_error_type(exc)
                 except Exception:  # noqa: BLE001 -- still clear every owned buffer
                     failure = SecurityError
                 except BaseException as exc:  # noqa: BLE001 -- finish cleanup before cancellation

@@ -163,7 +163,7 @@ class Vault:
                 if buffer is not None:
                     buffer.close()
             except SecurityError as exc:
-                failure = type(exc)
+                failure = safe_error_type(exc)
             except Exception:  # noqa: BLE001 -- still notify data owners
                 failure = SecurityError
             except BaseException as exc:  # noqa: BLE001 -- finish cleanup before cancellation
@@ -177,7 +177,7 @@ class Vault:
                     try:
                         listener()
                     except SecurityError as exc:
-                        failure = type(exc)
+                        failure = safe_error_type(exc)
                     except Exception:  # noqa: BLE001 -- notify every data owner
                         failure = SecurityError
                     except BaseException as exc:  # noqa: BLE001 -- finish notifying every data owner
