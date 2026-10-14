@@ -259,7 +259,7 @@ class CiphertextFile:
     ) -> FileIdentity:
         """Commit a complete ciphertext; expected=None means exclusive creation.
 
-        On a failure after replace, the complete new file can already be visible.
+        On a failure after publication, the complete new file can already be visible.
         The caller must invalidate cached state and reread, never retry blindly.
         """
         if (
@@ -295,9 +295,30 @@ class CiphertextFile:
                     raise StoreChanged()
                 if self._target_identity() != expected:
                     raise StoreChanged()
-                os.replace(
-                    temporary, self.path.name, src_dir_fd=self._fd, dst_dir_fd=self._fd
-                )
+                if expected is None:
+                    collision = False
+                    try:
+                        # link() atomically refuses an occupied destination,
+                        # including writers which ignore the advisory lock.
+                        os.link(
+                            temporary,
+                            self.path.name,
+                            src_dir_fd=self._fd,
+                            dst_dir_fd=self._fd,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError:
+                        collision = True
+                    if collision:
+                        raise StoreChanged()
+                    os.unlink(temporary, dir_fd=self._fd)
+                else:
+                    os.replace(
+                        temporary,
+                        self.path.name,
+                        src_dir_fd=self._fd,
+                        dst_dir_fd=self._fd,
+                    )
                 if self._fd is None:
                     raise UnsafeStorage()
                 os.fsync(self._fd)
