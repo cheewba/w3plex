@@ -326,6 +326,7 @@ class EncryptedIOContext:
     ) -> bytes:
         generation = self.generation
         kind = detect_format(raw)
+        use_keystore = use_keystore and password is None
         with self._mutex:
             self._check(generation)
         if kind == "plain":
@@ -539,6 +540,7 @@ class EncryptedIOContext:
         use_keystore: bool = False,
     ) -> Path:
         generation = self.generation
+        use_keystore = use_keystore and password is None
         source = Path(src).absolute()
         snapshot = snapshot_file(source, maximum_size=file_format.MAXIMUM_SIZE)
         kind = detect_format(snapshot.raw)
