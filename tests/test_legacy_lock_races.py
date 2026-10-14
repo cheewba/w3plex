@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,105 @@ from w3plex.security.errors import PermissionDenied
 
 FIXTURES = Path(__file__).parent / "fixtures/legacy-security"
 MANIFEST = json.loads((FIXTURES / "manifest.json").read_text())
+
+
+@pytest.mark.parametrize("mixed_formats", [False, True])
+def test_concurrent_legacy_reads_reuse_one_master_unlock(tmp_path, mixed_formats):
+    path = tmp_path / "legacy-store"
+    original = (FIXTURES / "ks01-4096.bin").read_bytes()
+    path.write_bytes(original)
+    requests, results, errors = [], [], []
+    gate = threading.Barrier(4)
+
+    def answer(request):
+        requests.append(request.kind)
+        return MANIFEST["master_password"]
+
+    context = (
+        EncryptedIOContext(legacy_keystore_path=path, input_handler=answer)
+        if mixed_formats
+        else LegacyContext(path, input_handler=answer)
+    )
+    raw = (FIXTURES / "sample.enc").read_bytes()
+
+    def read():
+        try:
+            gate.wait(timeout=3)
+            results.append(context.decrypt_bytes(raw, source="legacy-file"))
+        except BaseException as exc:
+            errors.append(exc)
+
+    workers = [threading.Thread(target=read, daemon=True) for _ in range(4)]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+        assert all(not worker.is_alive() for worker in workers)
+        assert errors == []
+        assert results == [bytes.fromhex(MANIFEST["plaintext_hex"])] * 4
+        assert requests == ["master"] and path.read_bytes() == original
+    finally:
+        context.close() if mixed_formats else context.lock()
+
+
+@pytest.mark.parametrize("mixed_formats", [False, True])
+@pytest.mark.parametrize("prompt", ["file", "master", "master_confirm"])
+def test_legacy_private_input_does_not_block_lock_from_another_thread(
+    tmp_path, mixed_formats, prompt
+):
+    path = tmp_path / "legacy-store"
+    original = (FIXTURES / "ks01-4096.bin").read_bytes() if prompt == "master" else None
+    if original is not None:
+        path.write_bytes(original)
+    persist = prompt == "master_confirm"
+    completed, started = threading.Event(), threading.Event()
+    pending, workers, errors = [], [], []
+
+    def lock():
+        started.set()
+        try:
+            context.lock()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    def answer(request):
+        if request.kind == prompt:
+            worker = threading.Thread(target=lock, daemon=True)
+            workers.append(worker)
+            worker.start()
+            assert started.wait(timeout=3)
+            pending.append(completed.wait(timeout=0.25))
+        return MANIFEST[
+            "file_password" if request.kind == "file" else "master_password"
+        ]
+
+    context = (
+        EncryptedIOContext(
+            legacy_keystore_path=path,
+            persist_legacy_keys=persist,
+            input_handler=answer,
+        )
+        if mixed_formats
+        else LegacyContext(path, persist_keys=persist, input_handler=answer)
+    )
+    try:
+        with pytest.raises(PermissionDenied):
+            context.decrypt_bytes(
+                (FIXTURES / "sample.enc").read_bytes(), source="legacy-file"
+            )
+        assert pending == [True], "Private input blocked session lock"
+        assert errors == []
+        assert (path.read_bytes() if path.exists() else None) == original
+        legacy = context._legacy if mixed_formats else context
+        assert legacy._keys is None and legacy._master_key is None
+    finally:
+        for worker in workers:
+            worker.join(timeout=3)
+            assert not worker.is_alive()
+        context.close() if mixed_formats else context.lock()
 
 
 @pytest.mark.parametrize("mixed_formats", [False, True])
