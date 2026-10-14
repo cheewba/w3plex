@@ -185,9 +185,8 @@ def test_external_file_directory_can_be_readable_but_never_writable_by_others(
     source.write_text("PUBLIC-TEST-value")
     output = owner.encrypt_file(source, password=PASSWORD)
     assert output.stat().st_mode & 0o777 == 0o600
-    with CiphertextFile(output, private=False) as storage:
-        with pytest.raises(UnsafeStorage):
-            Vault(storage, protection=owner._protection)
+    with CiphertextFile(output, private=False) as storage, pytest.raises(UnsafeStorage):
+        Vault(storage, protection=owner._protection)
     directory.chmod(0o777)
     with pytest.raises(UnsafeStorage):
         owner.encrypt_file(source, password=PASSWORD)
@@ -235,6 +234,7 @@ assert builtins.open is previous
         capture_output=True,
         text=True,
         timeout=20,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
 
@@ -264,6 +264,7 @@ assert (Path(sys.argv[1]) / "private" / "store").exists()
         capture_output=True,
         text=True,
         timeout=25,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
 

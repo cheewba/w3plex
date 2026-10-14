@@ -9,8 +9,8 @@ import sys
 import threading
 from pathlib import Path
 
-from .errors import ActivationConflict, InteractionRequired
 from .encrypted_io import EncryptedIOContext, PasswordRequest
+from .errors import ActivationConflict, InteractionRequired
 
 _CONTEXT: EncryptedIOContext | None = None
 _CONTEXT_LOCK = threading.RLock()

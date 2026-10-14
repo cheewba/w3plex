@@ -79,7 +79,7 @@ def test_source_is_closed_and_snapshotted_before_password(tmp_path):
     handles, requests = [], []
 
     def opener(*args):
-        handle = io.open(*args)
+        handle = io.open(*args)  # noqa: UP020, SIM115 -- unpatched opener; context closes it
         handles.append(handle)
         return handle
 
@@ -131,9 +131,8 @@ def test_common_and_legacy_contexts_share_exclusive_activation(context, tmp_path
             context.enable()
         assert io.open is not builtins.open
     assert not context.active and builtins.open is previous
-    with legacy.activated():
-        with pytest.raises(ActivationConflict):
-            context.enable()
+    with legacy.activated(), pytest.raises(ActivationConflict):
+        context.enable()
     assert builtins.open is previous
 
 

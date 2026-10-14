@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -93,11 +94,44 @@ def test_restore_mtime_cannot_hide_a_changed_target(store):
     old, new = ciphertexts()
     expected = store.write(old, expected=None)
     before = store.path.stat()
+    # tmpfs ctime can advance on kernel ticks rather than every syscall.
+    time.sleep(0.02)
     store.path.write_bytes(old)
     os.utime(store.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.path.stat().st_ctime_ns != before.st_ctime_ns
     with pytest.raises(StoreChanged):
         store.write(new, expected=expected)
     assert store.path.read_bytes() == old
+
+
+def test_changed_bytes_are_rejected_when_all_stat_fields_collide(store, monkeypatch):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    before = store.path.stat()
+    fstat, stat_path = os.fstat, os.stat
+
+    class CoarseStat:
+        def __init__(self, value):
+            self.value = value
+
+        def __getattr__(self, name):
+            if name in {"st_mtime_ns", "st_ctime_ns"}:
+                return getattr(before, name)
+            return getattr(self.value, name)
+
+    def coarse(value):
+        return CoarseStat(value) if value.st_ino == before.st_ino else value
+
+    monkeypatch.setattr(os, "fstat", lambda fd: coarse(fstat(fd)))
+    monkeypatch.setattr(
+        os, "stat", lambda *args, **kwargs: coarse(stat_path(*args, **kwargs))
+    )
+    changed = old[:-1] + bytes([old[-1] ^ 1])
+    store.path.write_bytes(changed)
+    os.utime(store.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(StoreChanged):
+        store.write(new, expected=expected)
+    assert store.path.read_bytes() == changed
 
 
 def test_temporary_name_substitution_is_detected_before_replace(store, monkeypatch):

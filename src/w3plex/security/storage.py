@@ -6,6 +6,7 @@ verification. chmod on Windows does not satisfy this contract.
 
 import ctypes
 import errno
+import hashlib
 import os
 import secrets
 import stat
@@ -35,6 +36,7 @@ class FileIdentity(NamedTuple):
     size: int
     modified_ns: int
     changed_ns: int
+    fingerprint: bytes = b""
 
 
 def _identity(value: os.stat_result) -> FileIdentity:
@@ -147,6 +149,31 @@ class CiphertextFile:
         ):
             raise UnsafeStorage()
 
+    def _file_identity(self, fd: int) -> FileIdentity:
+        before = os.fstat(fd)
+        self._check_file(before, private=self.private)
+        _no_extended_acl(fd)
+        if before.st_size > self.maximum_size:
+            raise UnsafeStorage()
+        digest = hashlib.sha256()
+        size = 0
+        while size <= self.maximum_size:
+            block = os.pread(fd, min(65536, self.maximum_size + 1 - size), size)
+            if not block:
+                break
+            digest.update(block)
+            size += len(block)
+        after = os.fstat(fd)
+        self._check_file(after, private=self.private)
+        _no_extended_acl(fd)
+        if (
+            size != before.st_size
+            or size > self.maximum_size
+            or _identity(before) != _identity(after)
+        ):
+            raise StoreChanged()
+        return _identity(after)._replace(fingerprint=digest.digest())
+
     def _target_identity(self) -> FileIdentity | None:
         try:
             info = os.stat(self.path.name, dir_fd=self._fd, follow_symlinks=False)
@@ -157,10 +184,10 @@ class CiphertextFile:
             self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._fd
         )
         try:
-            _no_extended_acl(fd)
-            if _identity(os.fstat(fd)) != _identity(info):
+            identity = self._file_identity(fd)
+            if identity._replace(fingerprint=b"") != _identity(info):
                 raise StoreChanged()
-            return _identity(info)
+            return identity
         finally:
             os.close(fd)
 
@@ -178,12 +205,14 @@ class CiphertextFile:
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 data = stream.read(self.maximum_size + 1)
             after = os.fstat(fd)
-            identity = _identity(before)
+            identity = _identity(before)._replace(
+                fingerprint=hashlib.sha256(data).digest()
+            )
             self._check_file(after, private=self.private)
             _no_extended_acl(fd)
             if (
                 len(data) > self.maximum_size
-                or identity != _identity(after)
+                or _identity(before) != _identity(after)
                 or self._target_identity() != identity
             ):
                 raise StoreChanged()
@@ -244,7 +273,7 @@ class CiphertextFile:
         with self._writer():
             if self._target_identity() != expected:
                 raise StoreChanged()
-            flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
             if expected is None:
                 flags |= os.O_CREAT | os.O_EXCL
             fd = os.open(self.path.name, flags, 0o600, dir_fd=self._fd)
@@ -252,12 +281,12 @@ class CiphertextFile:
                 info = os.fstat(fd)
                 self._check_file(info, private=self.private)
                 _no_extended_acl(fd)
-                if expected is not None and _identity(info) != expected:
+                if expected is not None and self._file_identity(fd) != expected:
                     raise StoreChanged()
                 self._check_directory()
                 os.fchmod(fd, 0o600)
                 self._check_file(os.fstat(fd))
-                if self._target_identity() != _identity(os.fstat(fd)):
+                if self._target_identity() != self._file_identity(fd):
                     raise StoreChanged()
                 os.ftruncate(fd, 0)
                 with os.fdopen(fd, "wb", closefd=False) as stream:
@@ -265,7 +294,7 @@ class CiphertextFile:
                     stream.flush()
                     os.fsync(fd)
                 named = self._target_identity()
-                if named != _identity(os.fstat(fd)):
+                if named != self._file_identity(fd):
                     raise StoreChanged()
                 if self._fd is None:
                     raise UnsafeStorage()
@@ -293,7 +322,7 @@ class CiphertextFile:
             temporary = "." + self.path.name + "." + secrets.token_hex(16) + ".tmp"
             descriptor = os.open(
                 temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 0o600,
                 dir_fd=self._fd,
             )
@@ -311,6 +340,11 @@ class CiphertextFile:
                 named = os.stat(temporary, dir_fd=self._fd, follow_symlinks=False)
                 if _identity(created) != _identity(named):
                     raise StoreChanged()
+                if (
+                    self._file_identity(descriptor).fingerprint
+                    != hashlib.sha256(ciphertext).digest()
+                ):
+                    raise StoreChanged()
                 if self._target_identity() != expected:
                     raise StoreChanged()
                 os.replace(
@@ -321,7 +355,7 @@ class CiphertextFile:
                 os.fsync(self._fd)
                 self._check_directory()
                 identity = self._target_identity()
-                if identity is None or identity != _identity(os.fstat(descriptor)):
+                if identity is None or identity != self._file_identity(descriptor):
                     raise StoreChanged()
                 return identity
             finally:
