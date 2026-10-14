@@ -13,8 +13,7 @@ from w3plex.security.errors import (
     PermissionDenied,
     UnsupportedProtection,
 )
-from w3plex.security.storage import CiphertextFile, StoreChanged, UnsafeStorage
-from w3plex.security.vault import Vault
+from w3plex.security.storage import StoreChanged, UnsafeStorage
 
 PASSWORD = "PUBLIC-TEST-file-password"
 MASTER = "PUBLIC-TEST-modern-master"
@@ -176,20 +175,21 @@ def test_lock_during_input_prevents_output(owner, tmp_path):
     assert not (tmp_path / "private" / "keys.vault").exists()
 
 
-def test_external_file_directory_can_be_readable_but_never_writable_by_others(
-    owner, tmp_path
-):
-    directory = tmp_path / "shared-readable"
-    directory.mkdir(mode=0o755)
+@pytest.mark.parametrize("mode", [0o755, 0o777])
+def test_external_file_permissions_are_left_to_the_application(owner, tmp_path, mode):
+    directory = tmp_path / "accessible"
+    directory.mkdir()
+    directory.chmod(mode)
     source = directory / "input"
     source.write_text("PUBLIC-TEST-value")
     output = owner.encrypt_file(source, password=PASSWORD)
     assert output.stat().st_mode & 0o777 == 0o600
-    with CiphertextFile(output, private=False) as storage, pytest.raises(UnsafeStorage):
-        Vault(storage, protection=owner._protection)
-    directory.chmod(0o777)
-    with pytest.raises(UnsafeStorage):
-        owner.encrypt_file(source, password=PASSWORD)
+    assert directory.stat().st_mode & 0o777 == mode
+    output.chmod(0o644)
+    assert (
+        owner.decrypt_file(output, password=PASSWORD).read_text() == "PUBLIC-TEST-value"
+    )
+    assert output.stat().st_mode & 0o777 == 0o644
 
 
 @pytest.mark.parametrize("alias", ["symlink", "hardlink"])
@@ -242,8 +242,8 @@ assert builtins.open is previous
 def test_default_helpers_and_cli_activation_open_modern_files(tmp_path):
     script = """import builtins, getpass, os, sys
 from pathlib import Path
-os.environ["W3PLEX_SECRET_STORE"] = str(Path(sys.argv[1]) / "private" / "store")
-os.environ["W3PLEX_KEYSTORE"] = str(Path(sys.argv[1]) / "legacy")
+os.environ["W3PLEX_KEYSTORE"] = str(Path(sys.argv[1]) / "store")
+os.environ.pop("W3PLEX_SECRET_STORE", None)
 from w3plex.security import encrypt_file
 source = Path(sys.argv[1]) / "input"
 source.write_text("PUBLIC-TEST-modern")
@@ -257,7 +257,7 @@ process_args(["--help"])
 with open(path) as stream:
     assert stream.read() == "PUBLIC-TEST-modern"
 assert not (Path(sys.argv[1]) / "legacy").exists()
-assert (Path(sys.argv[1]) / "private" / "store").exists()
+assert (Path(sys.argv[1]) / "store").exists()
 """
     result = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path)],

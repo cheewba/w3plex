@@ -346,15 +346,45 @@ adds `.enc` and decryption replaces the final suffix with `.dec`. Glob patterns
 and multiple sources are supported; `--output` accepts exactly one source.
 
 When the CLI reads an encrypted config or input file, it decrypts it in memory
-and prompts as needed. The default keystore is `~/.keystore.bin`; set
-`W3PLEX_KEYSTORE` to choose another location. Its master password is separate from
-file passwords and is cached for the process lifetime.
+and prompts as needed. One file-key store serves both ENC1 and W3FILE1 files.
+Its default path is `~/.keystore.bin`, selected by `W3PLEX_KEYSTORE`.
+`W3PLEX_SECRET_STORE` is an optional alias for an explicitly selected path.
+If both variables are set, they must select the same path. Master passwords
+are separate from file passwords and are never written to disk.
+Transparent reads allow three password attempts and report the remaining
+count after each incorrect master or file password. Cancelling stops the read.
 
-The current file format uses Fernet with a SHA-256-derived file key, and the
-keystore uses scrypt for its master key. Choose a strong, unique file password;
-the file format does not provide a slow password KDF. Prefer password prompts
-over putting passwords in shell history. Keep plaintext outputs and custom
-keystore paths out of Git as well as the default ignored files.
+Unlocking an old KS01 store automatically upgrades it in place. The usual
+private master-password prompt is the only interaction: the same password
+protects the new vault. No migration command or extra confirmation is needed.
+Before atomic replacement, an exact encrypted copy is saved at
+`<keystore>.legacy.bak`. A plaintext legacy store needs a new master password
+and confirmation because it had no password; its backup is encrypted W3FILE1.
+No plaintext key copies or passwords are written to temporary files.
+
+Existing encrypted external files stay unchanged. After migration one unlock
+serves both formats, and the current context stays unlocked. Merely creating a
+context or reading a plain file does not upgrade the store. Explicit legacy
+source contexts keep their original import/interoperability behavior. Old
+w3plex readers can use the KS01 backup because they cannot read the modern vault.
+Wrong passwords and cancelled input leave the source intact. An unrelated
+backup is never overwritten. Keep it safe and move it out of the backup path
+before retrying. Interrupted migration is retryable; unlocking a modern store
+does not migrate or rewrite it. Missing stores are created in modern format.
+
+New encryption writes W3FILE1 with Argon2id and AES-256-GCM. The reader still
+accepts ENC1 files and KS01 keystores. A LegacyContext writer can produce old
+files when an old reader needs them. Existing encrypted inputs are not rewritten.
+
+w3plex does not enforce filesystem owner, access modes or ACL policy. Existing
+accessible directories work without chmod; applications can enforce their own
+policy through the storage backend. Atomic writes, bounded reads, identity
+checks and rejection of unsafe links remain active. Newly created files use
+conservative access modes, and plaintext is never written to temporary files.
+The experimental CiphertextFile(private=...) parameter has been removed.
+
+Use password prompts instead of putting passwords in shell history. Keep
+plaintext outputs, secret stores and credentials out of version control.
 
 ## Other modules
 

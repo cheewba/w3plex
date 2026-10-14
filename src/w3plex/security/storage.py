@@ -1,16 +1,9 @@
-"""Owner-only POSIX ciphertext storage, pinned directories and exclusive writers.
+"""Bounded ciphertext storage, pinned paths and atomic exclusive writes."""
 
-Windows storage is refused until its native DACL/reparse implementation passes
-verification. chmod on Windows does not satisfy this contract.
-"""
-
-import ctypes
-import errno
 import hashlib
 import os
 import secrets
 import stat
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
@@ -45,40 +38,15 @@ def _identity(value: os.stat_result) -> FileIdentity:
     )
 
 
-def _no_extended_acl(fd: int) -> None:
-    if sys.platform != "darwin":
-        return
-    lib = ctypes.CDLL(None, use_errno=True)
-    if not all(hasattr(lib, name) for name in ("acl_get_fd_np", "acl_free")):
-        raise UnsupportedProtection()
-    lib.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
-    lib.acl_get_fd_np.restype = ctypes.c_void_p
-    lib.acl_free.argtypes = [ctypes.c_void_p]
-    lib.acl_free.restype = ctypes.c_int
-    ctypes.set_errno(0)
-    # Darwin ACL_TYPE_EXTENDED. ENOENT denotes no extended ACL on this fd.
-    acl = lib.acl_get_fd_np(fd, 0x100)
-    if acl:
-        if lib.acl_free(acl) != 0:
-            raise UnsupportedProtection()
-        raise UnsafeStorage()
-    if ctypes.get_errno() != errno.ENOENT:
-        raise UnsupportedProtection()
-
-
 class CiphertextFile:
     def __init__(
         self,
         path: str | Path,
         *,
         maximum_size: int = 8 * 1024 * 1024,
-        private: bool = True,
     ):
-        if type(private) is not bool:
-            raise UnsafeStorage()
-        self.private = private
         if os.name != "posix" or not all(
-            hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY", "getuid")
+            hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")
         ):
             raise UnsupportedProtection()
         self.path = Path(os.path.abspath(path))
@@ -87,16 +55,8 @@ class CiphertextFile:
         self.maximum_size = maximum_size
         self._fd = self.open_directory(self.path.parent)
         try:
-            info = os.fstat(self._fd)
+            info = self.check_directory(self._fd)
             self._directory_identity = (info.st_dev, info.st_ino)
-            mode = stat.S_IMODE(info.st_mode)
-            if (
-                info.st_uid != os.getuid()
-                or mode & 0o022
-                or (private and mode != 0o700)
-            ):
-                raise UnsafeStorage()
-            _no_extended_acl(self._fd)
         except BaseException:
             self.close()
             raise
@@ -126,33 +86,32 @@ class CiphertextFile:
             raise UnsafeStorage()
         current = self.open_directory(self.path.parent)
         try:
-            info = os.fstat(current)
-            if (
-                (info.st_dev, info.st_ino) != self._directory_identity
-                or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) & 0o022
-                or (self.private and stat.S_IMODE(info.st_mode) != 0o700)
-            ):
+            info = self.check_directory(current)
+            if (info.st_dev, info.st_ino) != self._directory_identity:
                 raise UnsafeStorage()
-            _no_extended_acl(current)
         finally:
             os.close(current)
 
     @staticmethod
-    def _check_file(info: os.stat_result, *, private: bool = True):
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != os.getuid()
-            or stat.S_IMODE(info.st_mode) & 0o022
-            or (private and stat.S_IMODE(info.st_mode) != 0o600)
-        ):
+    def _check_file(info: os.stat_result):
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise UnsafeStorage()
 
+    def check_directory(self, descriptor: int) -> os.stat_result:
+        """Validate an opened directory; applications may add access policy."""
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise UnsafeStorage()
+        return info
+
+    def check_file(self, descriptor: int) -> os.stat_result:
+        """Validate an opened file before use, including lock and temporary files."""
+        info = os.fstat(descriptor)
+        self._check_file(info)
+        return info
+
     def _file_identity(self, fd: int) -> FileIdentity:
-        before = os.fstat(fd)
-        self._check_file(before, private=self.private)
-        _no_extended_acl(fd)
+        before = self.check_file(fd)
         if before.st_size > self.maximum_size:
             raise UnsafeStorage()
         digest = hashlib.sha256()
@@ -163,9 +122,7 @@ class CiphertextFile:
                 break
             digest.update(block)
             size += len(block)
-        after = os.fstat(fd)
-        self._check_file(after, private=self.private)
-        _no_extended_acl(fd)
+        after = self.check_file(fd)
         if (
             size != before.st_size
             or size > self.maximum_size
@@ -179,7 +136,7 @@ class CiphertextFile:
             info = os.stat(self.path.name, dir_fd=self._fd, follow_symlinks=False)
         except FileNotFoundError:
             return None
-        self._check_file(info, private=self.private)
+        self._check_file(info)
         fd = os.open(
             self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._fd
         )
@@ -197,19 +154,15 @@ class CiphertextFile:
             self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._fd
         )
         try:
-            before = os.fstat(fd)
-            self._check_file(before, private=self.private)
-            _no_extended_acl(fd)
+            before = self.check_file(fd)
             if before.st_size > self.maximum_size:
                 raise UnsafeStorage()
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 data = stream.read(self.maximum_size + 1)
-            after = os.fstat(fd)
+            after = self.check_file(fd)
             identity = _identity(before)._replace(
                 fingerprint=hashlib.sha256(data).digest()
             )
-            self._check_file(after, private=self.private)
-            _no_extended_acl(fd)
             if (
                 len(data) > self.maximum_size
                 or _identity(before) != _identity(after)
@@ -235,9 +188,8 @@ class CiphertextFile:
         )
         acquired = False
         try:
-            info = os.fstat(fd)
+            info = self.check_file(fd)
             self._check_file(info)
-            _no_extended_acl(fd)
             named = os.stat(lock_name, dir_fd=self._fd, follow_symlinks=False)
             if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
                 raise UnsafeStorage()
@@ -278,14 +230,13 @@ class CiphertextFile:
                 flags |= os.O_CREAT | os.O_EXCL
             fd = os.open(self.path.name, flags, 0o600, dir_fd=self._fd)
             try:
-                info = os.fstat(fd)
-                self._check_file(info, private=self.private)
-                _no_extended_acl(fd)
+                info = self.check_file(fd)
+                self._check_file(info)
                 if expected is not None and self._file_identity(fd) != expected:
                     raise StoreChanged()
                 self._check_directory()
                 os.fchmod(fd, 0o600)
-                self._check_file(os.fstat(fd))
+                self.check_file(fd)
                 if self._target_identity() != self._file_identity(fd):
                     raise StoreChanged()
                 os.ftruncate(fd, 0)
@@ -328,15 +279,12 @@ class CiphertextFile:
             )
             try:
                 with os.fdopen(descriptor, "wb", closefd=False) as stream:
-                    self._check_file(os.fstat(stream.fileno()))
-                    _no_extended_acl(stream.fileno())
+                    self.check_file(stream.fileno())
                     stream.write(ciphertext)
                     stream.flush()
                     os.fsync(stream.fileno())
                 self._check_directory()
-                created = os.fstat(descriptor)
-                self._check_file(created)
-                _no_extended_acl(descriptor)
+                created = self.check_file(descriptor)
                 named = os.stat(temporary, dir_fd=self._fd, follow_symlinks=False)
                 if _identity(created) != _identity(named):
                     raise StoreChanged()

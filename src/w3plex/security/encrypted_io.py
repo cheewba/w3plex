@@ -23,6 +23,7 @@ from .errors import (
 from .io_activation import activate, deactivate, is_active
 from .legacy import LegacyContext, LegacyPasswordRequest
 from .memory import LockedBuffer, ProcessProtection
+from .migration import migrate_keystore
 from .snapshots import snapshot_file
 from .storage import CiphertextFile, FileIdentity, StoreChanged
 from .vault import Vault, private_call
@@ -92,6 +93,7 @@ class EncryptedIOContext:
         self._keys: dict[str, LockedBuffer] = {}
         self._mutex = threading.RLock()
         self._key_mutex = threading.RLock()
+        self._prepare_mutex = threading.RLock()
         self._generation = 0
         self._closed = False
         if keystore is not None:
@@ -144,7 +146,7 @@ class EncryptedIOContext:
     def unlock_keystore(self) -> None:
         generation = self.generation
         self._check_protection()
-        self._prepare_keystore(create=True)
+        self._prepare_keystore(create=True, generation=generation)
         keystore = self._keystore
         if keystore is None:
             raise InteractionRequired()
@@ -170,16 +172,109 @@ class EncryptedIOContext:
                 keystore.add_lock_listener(self._clear_keys)
                 self._keystore_bound = True
 
-    def _prepare_keystore(self, *, create: bool) -> None:
-        with self._mutex:
-            self._check(self._generation)
-            if self._keystore is not None or self._keystore_path is None:
-                return
-            path = self._keystore_path
+    def _prepare_keystore(self, *, create: bool, generation: int) -> None:
+        # Serialize preparation without blocking lock() during private input.
+        with self._prepare_mutex:
+            with self._mutex:
+                self._check(generation)
+                if self._keystore is not None or self._keystore_path is None:
+                    return
+                path = self._keystore_path
             if not create and not path.exists():
                 return
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self._keystore = Vault(CiphertextFile(path), protection=self._protection)
+            storage = CiphertextFile(path)
+            vault = None
+
+            def check():
+                with self._mutex:
+                    self._check(generation)
+                    self._protection.check()
+
+            try:
+                if storage.identity() is not None:
+                    raw, _ = storage.read()
+                    if not raw.startswith(b"W3VAULT"):
+                        vault = private_call(
+                            lambda: migrate_keystore(
+                                storage,
+                                path.with_name(path.name + ".legacy.bak"),
+                                protection=self._protection,
+                                password=self._password,
+                                check=check,
+                            )
+                        )
+                with self._mutex:
+                    check()
+                    if vault is None:
+                        vault = Vault(storage, protection=self._protection)
+                    else:
+                        self._legacy.lock()
+                        vault.add_lock_listener(self._clear_keys)
+                        self._keystore_bound = True
+                    self._keystore = vault
+            except BaseException:
+                if vault is not None:
+                    vault.close()
+                else:
+                    storage.close()
+                raise
+
+    def _store_available(self) -> bool:
+        return self._keystore is not None or (
+            self._keystore_path is not None and self._keystore_path.exists()
+        )
+
+    def _decrypt_legacy_from_vault(
+        self,
+        raw: bytes,
+        *,
+        source: str | Path,
+        password: str | None,
+        ask_password: bool,
+    ) -> bytes:
+        generation = self.generation
+        self._check_protection()
+        self._prepare_keystore(create=False, generation=generation)
+        self.unlock_keystore()
+        keystore = self._keystore
+        if keystore is None:
+            raise InteractionRequired()
+        epoch = keystore.checkpoint()
+        keys = [
+            keystore.read(identifier)
+            for identifier in keystore.find_metadata({"context": "w3plex.legacy-file"})
+        ]
+        candidate = (
+            None if password is None else hashlib.sha256(password.encode()).digest()
+        )
+
+        def answer(request):
+            nonlocal candidate
+            entered = self._legacy_password(request)
+            candidate = hashlib.sha256(entered.encode()).digest()
+            return entered
+
+        decoder = LegacyContext(None, input_handler=answer)
+        decoder.install_keys(keys)
+        try:
+            value = decoder.decrypt_bytes(
+                raw, source=source, password=password, ask_password=ask_password
+            )
+            with self._mutex, keystore.mutex:
+                self._check(generation)
+                self._check_keystore(epoch)
+                self._check_protection()
+                if (
+                    self._persist_keys
+                    and candidate is not None
+                    and candidate not in keys
+                ):
+                    keystore.save(candidate, metadata={"context": "w3plex.legacy-file"})
+            return value
+        finally:
+            decoder.lock()
+            keys.clear()
 
     def _stored_key(self, fingerprint: str) -> bytes | None:
         if self._keystore is None:
@@ -229,6 +324,10 @@ class EncryptedIOContext:
         if kind == "plain":
             return raw
         if kind == "legacy":
+            if use_keystore and self._store_available():
+                return self._decrypt_legacy_from_vault(
+                    raw, source=source, password=password, ask_password=ask_password
+                )
             value = self._legacy.decrypt_bytes(
                 raw,
                 source=source,
@@ -242,7 +341,9 @@ class EncryptedIOContext:
         envelope = file_format.parse(raw)
         self._check_protection()
         if use_keystore:
-            self._prepare_keystore(create=self._persist_keys and ask_password)
+            self._prepare_keystore(
+                create=self._persist_keys and ask_password, generation=generation
+            )
         if use_keystore and self._keystore is not None:
             self.unlock_keystore()
         store_generation = (
@@ -376,7 +477,7 @@ class EncryptedIOContext:
             else Path(src).with_suffix(Path(src).suffix + ".enc")
         )
         with CiphertextFile(
-            destination, maximum_size=file_format.MAXIMUM_SIZE, private=False
+            destination, maximum_size=file_format.MAXIMUM_SIZE
         ) as storage:
             expected = storage.identity()
             if storage.path == source and expected != FileIdentity(
@@ -414,7 +515,7 @@ class EncryptedIOContext:
             else Path(src).with_suffix(".dec")
         )
         with CiphertextFile(
-            destination, maximum_size=file_format.MAXIMUM_SIZE, private=False
+            destination, maximum_size=file_format.MAXIMUM_SIZE
         ) as storage:
             expected = storage.identity()
             if storage.path == source and expected != FileIdentity(
@@ -474,8 +575,9 @@ class EncryptedIOContext:
                 if kind == "legacy":
                     if not self._legacy.persist_keys:
                         self._legacy.lock()
-                    elif attempt < 2:
-                        print(f"Incorrect password, {2 - attempt} attempts left")
+                remaining = 2 - attempt
+                suffix = "" if remaining == 1 else "s"
+                print(f"Incorrect password, {remaining} attempt{suffix} left")
                 if attempt == 2:
                     raise
         buffer = io.BytesIO(plain)
