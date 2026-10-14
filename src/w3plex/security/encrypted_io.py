@@ -146,32 +146,37 @@ class EncryptedIOContext:
 
     def unlock_keystore(self) -> None:
         generation = self.generation
-        self._check_protection()
-        self._prepare_keystore(create=True, generation=generation)
-        keystore = self._keystore
-        if keystore is None:
-            raise InteractionRequired()
-        if keystore.is_unlocked:
+        # Preparation and master input belong to one serialized workflow.
+        # lock() never takes this mutex and can revoke active/queued requests.
+        with self._prepare_mutex:
             with self._mutex:
                 self._check(generation)
+            self._check_protection()
+            self._prepare_keystore(create=True, generation=generation)
+            keystore = self._keystore
+            if keystore is None:
+                raise InteractionRequired()
+            if keystore.is_unlocked:
+                with self._mutex:
+                    self._check(generation)
+                    if not self._keystore_bound:
+                        keystore.add_lock_listener(self._clear_keys)
+                        self._keystore_bound = True
+                return
+            password = self._password("master", keystore.path)
+            with self._mutex:
+                self._check(generation)
+            create = not keystore.path.exists()
+            if create and self._password("master_confirm", keystore.path) != password:
+                raise AuthenticationFailed()
+            with self._mutex:
+                self._check(generation)
+                if create:
+                    keystore.create(password.encode("utf-8"))
+                keystore.unlock(password.encode("utf-8"))
                 if not self._keystore_bound:
                     keystore.add_lock_listener(self._clear_keys)
                     self._keystore_bound = True
-            return
-        password = self._password("master", keystore.path)
-        with self._mutex:
-            self._check(generation)
-        create = not keystore.path.exists()
-        if create and self._password("master_confirm", keystore.path) != password:
-            raise AuthenticationFailed()
-        with self._mutex:
-            self._check(generation)
-            if create:
-                keystore.create(password.encode("utf-8"))
-            keystore.unlock(password.encode("utf-8"))
-            if not self._keystore_bound:
-                keystore.add_lock_listener(self._clear_keys)
-                self._keystore_bound = True
 
     def _prepare_keystore(self, *, create: bool, generation: int) -> None:
         # Serialize preparation without blocking lock() during private input.
