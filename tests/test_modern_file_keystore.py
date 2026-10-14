@@ -45,6 +45,43 @@ def read(owner):
         return stream.read()
 
 
+def test_existing_accessible_keystore_needs_no_permission_repair(tmp_path):
+    directory = tmp_path / "existing"
+    directory.mkdir(mode=0o755)
+    directory.chmod(0o755)
+    path = directory / "keys.vault"
+    requests = []
+
+    def answer(request):
+        requests.append(request.kind)
+        return PASSWORD if request.kind == "file" else MASTER.decode()
+
+    owner = EncryptedIOContext(
+        keystore_path=path, persist_keys=True, input_handler=answer
+    )
+    try:
+        expected = bytes.fromhex(
+            json.loads((FIXTURES / "manifest.json").read_text())["plaintext_hex"]
+        )
+        owner.enable()
+        with open(FIXTURES / "sample.enc", "rb") as stream:
+            assert stream.read() == expected
+        assert requests == ["master", "master_confirm", "file"]
+        assert directory.stat().st_mode & 0o777 == 0o755
+        path.chmod(0o644)
+        original = path.read_bytes()
+        owner.lock()
+        requests.clear()
+        with open(FIXTURES / "sample.enc", "rb") as stream:
+            assert stream.read() == expected
+        assert requests == ["master"]
+        assert path.read_bytes() == original
+        assert path.stat().st_mode & 0o777 == 0o644
+        assert directory.stat().st_mode & 0o777 == 0o755
+    finally:
+        owner.close()
+
+
 def test_remembered_key_reopens_without_file_password_and_no_plaintext_on_disk(
     keystore,
 ):

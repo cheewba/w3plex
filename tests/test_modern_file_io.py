@@ -22,6 +22,7 @@ from w3plex.security.memory import ProcessProtection
 
 FIXTURES = Path(__file__).parent / "fixtures/file-v1"
 PASSWORD = "PUBLIC-TEST-file-v1-password"
+LEGACY_FIXTURES = FIXTURES.parent / "legacy-security"
 
 
 @pytest.fixture
@@ -186,6 +187,101 @@ def test_wrong_password_retries_without_returning_plaintext(context):
     with pytest.raises(AuthenticationFailed):
         context.open(FIXTURES / "sample.enc", "rb")
     assert len(requests) == 3 and context._keys == {}
+
+
+@pytest.mark.parametrize("kind", ["legacy", "modern"])
+@pytest.mark.parametrize("master", [False, True])
+def test_open_has_three_attempts_and_preserves_inputs(tmp_path, capsys, kind, master):
+    fixtures = LEGACY_FIXTURES if kind == "legacy" else FIXTURES
+    source = tmp_path / "input.enc"
+    raw = (fixtures / "sample.enc").read_bytes()
+    source.write_bytes(raw)
+    path = tmp_path / "keystore.bin"
+    original = (LEGACY_FIXTURES / "ks01-4096.bin").read_bytes()
+    if master:
+        path.write_bytes(original)
+    requests = []
+    owner = EncryptedIOContext(
+        keystore_path=path if master else None,
+        input_handler=lambda request: (
+            requests.append(request.kind) or "PUBLIC-TEST-wrong"
+        ),
+    )
+    try:
+        with pytest.raises(AuthenticationFailed):
+            owner.open(source, "rb")
+        assert requests == ["master" if master else "file"] * 3
+        output = capsys.readouterr()
+        assert output.out.splitlines() == [
+            "Incorrect password, 2 attempts left",
+            "Incorrect password, 1 attempt left",
+            "Incorrect password, 0 attempts left",
+        ]
+        assert not output.err
+        assert source.read_bytes() == raw
+        assert owner._keys == {}
+        if master:
+            assert path.read_bytes() == original
+            assert not path.with_name(path.name + ".legacy.bak").exists()
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_retry_feedback_stops_after_success_or_cancellation(context, capsys, cancel):
+    requests = []
+
+    def answer(request):
+        requests.append(request.kind)
+        if len(requests) == 1:
+            return "PUBLIC-TEST-wrong"
+        if cancel:
+            raise KeyboardInterrupt()
+        return PASSWORD
+
+    context._input = answer
+    source = FIXTURES / "sample.enc"
+    if cancel:
+        with pytest.raises(KeyboardInterrupt):
+            context.open(source, "rb")
+        assert context._keys == {}
+    else:
+        with context.open(source, "rb") as stream:
+            assert stream.read()
+    assert requests == ["file", "file"]
+    assert capsys.readouterr().out == "Incorrect password, 2 attempts left\n"
+
+
+@pytest.mark.parametrize("kind", ["legacy", "modern"])
+def test_wrong_master_then_correct_password_migrates_and_continues(
+    tmp_path, capsys, kind
+):
+    fixtures = LEGACY_FIXTURES if kind == "legacy" else FIXTURES
+    path = tmp_path / "keystore.bin"
+    original = (LEGACY_FIXTURES / "ks01-4096.bin").read_bytes()
+    path.write_bytes(original)
+    source = fixtures / "sample.enc"
+    master = json.loads((LEGACY_FIXTURES / "manifest.json").read_text())[
+        "master_password"
+    ]
+    requests = []
+
+    def answer(request):
+        requests.append(request.kind)
+        if len(requests) == 1:
+            return "PUBLIC-TEST-wrong"
+        return master if request.kind == "master" else PASSWORD
+
+    owner = EncryptedIOContext(keystore_path=path, input_handler=answer)
+    try:
+        with owner.open(source, "rb") as stream:
+            assert stream.read()
+        assert requests == ["master", "master"] + (["file"] if kind == "modern" else [])
+        assert capsys.readouterr().out == "Incorrect password, 2 attempts left\n"
+        assert path.read_bytes().startswith(b"W3VAULT1")
+        assert path.with_name(path.name + ".legacy.bak").read_bytes() == original
+    finally:
+        owner.close()
 
 
 def test_cancel_and_lock_during_password_never_cache_a_key(context):

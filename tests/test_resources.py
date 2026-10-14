@@ -105,8 +105,8 @@ with builtins.open(encrypted, "rb") as stream:
 descriptor = os.open(source, os.O_RDONLY)
 with builtins.open(descriptor) as stream:
     assert stream.read() == "hello\\n"
-assert Path(os.environ["W3PLEX_SECRET_STORE"]).exists()
-assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
+assert Path(os.environ["W3PLEX_KEYSTORE"]).exists()
+assert not (Path.cwd() / "private" / "secrets.vault").exists()
 """
     import os
 
@@ -116,7 +116,7 @@ assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
         env={
             **os.environ,
             "W3PLEX_KEYSTORE": str(tmp_path / "keystore.bin"),
-            "W3PLEX_SECRET_STORE": str(tmp_path / "private" / "secrets.vault"),
+            "W3PLEX_SECRET_STORE": str(tmp_path / "keystore.bin"),
         },
         capture_output=True,
         text=True,

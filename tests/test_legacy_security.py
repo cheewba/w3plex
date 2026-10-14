@@ -20,6 +20,31 @@ from w3plex.security.errors import AuthenticationFailed, InvalidStore
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 
 
+@pytest.mark.parametrize("n", [4096, 8192, 16384, 32768])
+def test_fixed_keystore_unlock_is_cached_then_revoked_on_lock(tmp_path, n):
+    manifest = json.loads((FIXTURES / "manifest.json").read_text())
+    path = tmp_path / "keystore.bin"
+    original = (FIXTURES / f"ks01-{n}.bin").read_bytes()
+    path.write_bytes(original)
+    requests = []
+    context = security.LegacyContext(
+        path,
+        input_handler=lambda request: (
+            requests.append(request.kind) or manifest["master_password"]
+        ),
+    )
+    raw = (FIXTURES / "sample.enc").read_bytes()
+    expected = bytes.fromhex(manifest["plaintext_hex"])
+    assert context.decrypt_bytes(raw, source="fixture") == expected
+    assert context.decrypt_bytes(raw, source="fixture") == expected
+    assert requests == ["master"]
+    context.lock()
+    assert context.decrypt_bytes(raw, source="fixture") == expected
+    assert requests == ["master", "master"]
+    context.lock()
+    assert path.read_bytes() == original
+
+
 @pytest.fixture
 def legacy(monkeypatch, tmp_path):
     monkeypatch.setenv("W3PLEX_KEYSTORE", str(tmp_path / "store.bin"))

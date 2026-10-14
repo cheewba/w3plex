@@ -167,30 +167,13 @@ class LegacyContext:
         else:
             assert self.path is not None
             password = self._password("master", self.path)
-            keys = None
-            for n in _HISTORICAL_N:
-                derived = hashlib.scrypt(
-                    password.encode(),
-                    salt=self._salt,
-                    n=n,
-                    r=8,
-                    p=1,
-                    dklen=32,
-                    maxmem=128 * 1024 * 1024,
-                )
-                try:
-                    plain = Fernet(base64.urlsafe_b64encode(derived)).decrypt(
-                        payload[4:]
-                    )
-                except InvalidToken:
-                    continue
-                keys = self.parse_keys(plain)
-                if self._persist_keys or keep_master:
-                    self._master_key = derived
-                break
-            if keys is None:
+            try:
+                keys, derived = _decode_keystore(raw, password)
+            except AuthenticationFailed:
                 self._master_key = None
-                raise AuthenticationFailed()
+                raise
+            if self._persist_keys or keep_master:
+                self._master_key = derived
         self._keys = keys
         return keys
 
@@ -511,3 +494,36 @@ class LegacyContext:
             yield self
         finally:
             self.disable()
+
+
+def _decode_keystore(
+    raw: bytes, password: str | None
+) -> tuple[list[bytes], bytes | None]:
+    if type(raw) is not bytes or not 16 <= len(raw) <= _MAX_STORE:
+        raise InvalidStore()
+    salt, payload = raw[:16], raw[16:]
+    if not payload.startswith(b"KS01"):
+        return LegacyContext.parse_keys(payload), None
+    if password is None:
+        raise InteractionRequired()
+    for n in _HISTORICAL_N:
+        derived = hashlib.scrypt(
+            password.encode(),
+            salt=salt,
+            n=n,
+            r=8,
+            p=1,
+            dklen=32,
+            maxmem=128 * 1024 * 1024,
+        )
+        try:
+            plain = Fernet(base64.urlsafe_b64encode(derived)).decrypt(payload[4:])
+        except InvalidToken:
+            continue
+        return LegacyContext.parse_keys(plain), derived
+    raise AuthenticationFailed()
+
+
+def decode_keystore(raw: bytes, password: str | None = None) -> list[bytes]:
+    """Decode a bounded captured KS01/plain legacy store without filesystem I/O."""
+    return _decode_keystore(raw, password)[0]

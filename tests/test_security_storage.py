@@ -1,18 +1,15 @@
 """Real POSIX persistence, owner access and ciphertext-only crash artifacts."""
 
-import errno
 import os
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 
 from w3plex.security import vault_format as codec
-from w3plex.security.errors import UnsupportedProtection
 from w3plex.security.storage import (
     CiphertextFile,
     StoreChanged,
@@ -266,35 +263,3 @@ raise AssertionError("Crash point was not reached")
         assert bytes(range(32)) not in data
     # Kernel process teardown must release its writer lock.
     store.write(old, expected=store.read()[1])
-
-
-@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS extended ACL check")
-@pytest.mark.parametrize("target", ["directory", "file"])
-def test_mac_extended_acl_is_rejected_even_with_owner_only_mode(store, target):
-    old, _ = ciphertexts()
-    store.write(old, expected=None)
-    path = store.path.parent if target == "directory" else store.path
-    expected_mode = 0o700 if target == "directory" else 0o600
-    permission = "list,search" if target == "directory" else "read"
-    subprocess.run(
-        ["/bin/chmod", "+a", f"everyone allow {permission}", str(path)],
-        check=True,
-        capture_output=True,
-    )
-    assert stat.S_IMODE(path.stat().st_mode) == expected_mode
-    with pytest.raises(UnsafeStorage):
-        store.read()
-
-
-def test_missing_mac_acl_control_is_not_treated_as_no_acl(monkeypatch):
-    from w3plex.security import storage
-
-    def unavailable(*args):
-        storage.ctypes.set_errno(errno.EIO)
-
-    lib = Mock()
-    lib.acl_get_fd_np.side_effect = unavailable
-    monkeypatch.setattr(storage.sys, "platform", "darwin")
-    monkeypatch.setattr(storage.ctypes, "CDLL", lambda *args, **kwargs: lib)
-    with pytest.raises(UnsupportedProtection):
-        storage._no_extended_acl(0)

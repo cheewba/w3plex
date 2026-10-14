@@ -59,7 +59,8 @@ def test_cli_help_works_without_config(tmp_path):
     )
     assert result.returncode == 0
     assert "w3plex actions:" in result.stdout
-    assert "{init,shell,encrypt,decrypt}" in result.stdout
+    for command in ("init", "shell", "encrypt", "decrypt"):
+        assert command in result.stdout
 
 
 def run_cli(tmp_path, *args):

@@ -42,18 +42,23 @@ def default_context() -> EncryptedIOContext:
                 getattr(opener, "__self__", None), "_w3plex_security_context", False
             ):
                 opener = io.open
+            legacy_path = os.environ.get("W3PLEX_KEYSTORE")
+            modern_path = os.environ.get("W3PLEX_SECRET_STORE")
+            if (
+                legacy_path
+                and modern_path
+                and (
+                    Path(legacy_path).expanduser().absolute()
+                    != Path(modern_path).expanduser().absolute()
+                )
+            ):
+                raise ValueError(
+                    "Use one keystore path: W3PLEX_KEYSTORE and W3PLEX_SECRET_STORE differ"
+                )
+            path = Path(legacy_path or modern_path or "~/.keystore.bin").expanduser()
             _CONTEXT = EncryptedIOContext(
-                legacy_keystore_path=Path(
-                    os.environ.get(
-                        "W3PLEX_KEYSTORE", str(Path.home() / ".keystore.bin")
-                    )
-                ).expanduser(),
-                keystore_path=Path(
-                    os.environ.get(
-                        "W3PLEX_SECRET_STORE",
-                        str(Path.home() / ".w3plex/secrets.vault"),
-                    )
-                ).expanduser(),
+                legacy_keystore_path=path,
+                keystore_path=path,
                 input_handler=_terminal_password,
                 opener=opener,
                 persist_keys=True,
