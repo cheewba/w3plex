@@ -106,10 +106,17 @@ class LegacyContext:
         with self._lock:
             self._keys = list(keys)
 
+    def _check(self, generation: int) -> None:
+        if self._epoch != generation:
+            raise PermissionDenied()
+
     def _password(self, kind: str, source: Path) -> str:
         if self._input is None:
             raise InteractionRequired()
+        generation = self.generation
         value = self._input(LegacyPasswordRequest(kind, source))
+        with self._lock:
+            self._check(generation)
         if not isinstance(value, str):
             raise InteractionRequired()
         return value
@@ -158,7 +165,9 @@ class LegacyContext:
     def _read_keys(self, *, keep_master: bool = False) -> list[bytes]:
         if self._keys is not None and not keep_master:
             return self._keys
+        generation = self._epoch
         raw = self._raw_store()
+        self._check(generation)
         if raw is None:
             return []
         self._salt, payload = raw[:16], raw[16:]
@@ -172,18 +181,22 @@ class LegacyContext:
             except AuthenticationFailed:
                 self._master_key = None
                 raise
+            self._check(generation)
             if self._persist_keys or keep_master:
                 self._master_key = derived
+        self._check(generation)
         self._keys = keys
         return keys
 
     def unlock_keystore(self) -> None:
         with self._lock:
+            generation = self._epoch
             if self._master_key is not None:
                 return
             if self.path is None:
                 raise InvalidStore()
             raw = self._raw_store()
+            self._check(generation)
             if raw is not None:
                 self._salt = raw[:16]
                 if raw[16:].startswith(b"KS01"):
@@ -197,9 +210,11 @@ class LegacyContext:
             # KS01 omitted work settings. Retain its historical adaptive writer.
             for n in _HISTORICAL_N:
                 try:
-                    self._master_key = hashlib.scrypt(
+                    derived = hashlib.scrypt(
                         password.encode(), salt=self._salt, n=n, r=8, p=1, dklen=32
                     )
+                    self._check(generation)
+                    self._master_key = derived
                     return
                 except ValueError as error:
                     if not any(
@@ -212,7 +227,9 @@ class LegacyContext:
     def _save_keys(self, keys: list[bytes]) -> None:
         if len(keys) > 4096:
             raise InvalidStore()
+        generation = self._epoch
         self.unlock_keystore()
+        self._check(generation)
         assert (
             self.path is not None
             and self._salt is not None
@@ -226,6 +243,7 @@ class LegacyContext:
             + b"KS01"
             + Fernet(base64.urlsafe_b64encode(self._master_key)).encrypt(data)
         )
+        self._check(generation)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(
             prefix="." + self.path.name + ".", dir=self.path.parent
@@ -235,6 +253,7 @@ class LegacyContext:
                 stream.write(ciphertext)
                 stream.flush()
                 os.fsync(stream.fileno())
+            self._check(generation)
             os.replace(temporary, self.path)
         except BaseException:
             self.lock()
@@ -244,6 +263,7 @@ class LegacyContext:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+        self._check(generation)
         self._keys = list(keys)
 
     def _add_key(self, key: bytes, *, persist: bool) -> None:
@@ -263,12 +283,15 @@ class LegacyContext:
         if len(data) > _MAX_FILE:
             raise InvalidStore()
         with self._lock:
+            generation = self._epoch
             key = hashlib.sha256(password.encode()).digest()
             ciphertext = b"ENC1" + Fernet(base64.urlsafe_b64encode(key)).encrypt(data)
             if len(ciphertext) > _MAX_FILE:
                 raise InvalidStore()
+            self._check(generation)
             if add_to_keystore:
                 self._add_key(key, persist=True)
+            self._check(generation)
             return ciphertext
 
     def _decrypt_bytes(
@@ -285,11 +308,14 @@ class LegacyContext:
         if len(raw) > _MAX_FILE:
             raise InvalidStore()
         with self._lock:
+            generation = self._epoch
             token = raw[4:]
             if use_keystore and not password:
                 for key in self._read_keys():
                     try:
-                        return Fernet(base64.urlsafe_b64encode(key)).decrypt(token)
+                        plain = Fernet(base64.urlsafe_b64encode(key)).decrypt(token)
+                        self._check(generation)
+                        return plain
                     except InvalidToken:
                         continue
             if password:
@@ -309,8 +335,10 @@ class LegacyContext:
                 pass
             if not success:
                 raise AuthenticationFailed()
+            self._check(generation)
             if not password and use_keystore:
                 self._add_key(key, persist=self._persist_keys)
+            self._check(generation)
             return plain
 
     def decrypt_bytes(
