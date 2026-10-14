@@ -308,6 +308,13 @@ class EncryptedIOContext:
         if self._keystore is not None and self._keystore.checkpoint() != generation:
             raise PermissionDenied()
 
+    def _keystore_checkpoint(self) -> int | None:
+        keystore = self._keystore
+        if keystore is None:
+            return None
+        with keystore.mutex:
+            return keystore.checkpoint() if keystore.is_unlocked else None
+
     def decrypt_bytes(
         self,
         raw: bytes,
@@ -396,15 +403,31 @@ class EncryptedIOContext:
                         )
         return value
 
-    def _encrypted(self, data: bytes, password: str, *, add_to_keystore: bool) -> bytes:
+    def _encrypted(
+        self,
+        data: bytes,
+        password: str,
+        *,
+        add_to_keystore: bool,
+        store_generation: int | None = None,
+    ) -> tuple[bytes, int | None]:
         generation = self.generation
         self._check_protection()
+        if store_generation is None:
+            store_generation = self._keystore_checkpoint()
         envelope, key = file_format.seal(data, password.encode("utf-8"))
         raw = envelope.serialize()
         if add_to_keystore:
             self.unlock_keystore()
-        with self._mutex:
+            if store_generation is None:
+                store_generation = self._keystore_checkpoint()
+        with (
+            self._mutex,
+            nullcontext() if self._keystore is None else self._keystore.mutex,
+        ):
             self._check(generation)
+            if store_generation is not None or add_to_keystore:
+                self._check_keystore(store_generation)
             fingerprint = hashlib.sha256(raw).hexdigest()
             if add_to_keystore:
                 self._remember_key(fingerprint, key)
@@ -415,7 +438,7 @@ class EncryptedIOContext:
                     self._keys[fingerprint] = LockedBuffer(
                         key, protection=self._protection
                     )
-        return raw
+        return raw, store_generation
 
     def encrypt_data(
         self,
@@ -431,7 +454,7 @@ class EncryptedIOContext:
         if isinstance(data, str):
             data = data.encode("utf-8")
         password = secrets.token_urlsafe(32) if password is None else password
-        raw = self._encrypted(data, password, add_to_keystore=add_to_keystore)
+        raw, _ = self._encrypted(data, password, add_to_keystore=add_to_keystore)
         return base64.b64encode(raw).decode("ascii"), password
 
     def decrypt_data(
@@ -484,12 +507,23 @@ class EncryptedIOContext:
                 *snapshot.identity, hashlib.sha256(snapshot.raw).digest()
             ):
                 raise StoreChanged()
+            store_generation = self._keystore_checkpoint()
             secret = self._password("file", source) if password is None else password
             with self._mutex:
                 self._check(generation)
-            raw = self._encrypted(snapshot.raw, secret, add_to_keystore=add_to_keystore)
-            with self._mutex:
+            raw, store_generation = self._encrypted(
+                snapshot.raw,
+                secret,
+                add_to_keystore=add_to_keystore,
+                store_generation=store_generation,
+            )
+            with (
+                self._mutex,
+                nullcontext() if self._keystore is None else self._keystore.mutex,
+            ):
                 self._check(generation)
+                if store_generation is not None:
+                    self._check_keystore(store_generation)
                 storage.write(raw, expected=expected)
         return destination
 

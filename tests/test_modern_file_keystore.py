@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from w3plex.security import EncryptedIOContext
+from w3plex.security import EncryptedIOContext, file_format
 from w3plex.security.errors import (
     AuthenticationFailed,
     InteractionRequired,
@@ -203,6 +203,73 @@ def test_lock_during_file_input_cannot_save_key(keystore, lock_owner):
         with pytest.raises(PermissionDenied):
             read(owner)
         assert keystore.path.read_bytes() == before and owner._keys == {}
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("phase", ["input", "seal"])
+@pytest.mark.parametrize("output", ["missing", "existing", "inplace"])
+def test_vault_reunlock_during_encryption_cannot_save_or_write(
+    keystore, tmp_path, monkeypatch, phase, output
+):
+    before = keystore.path.read_bytes()
+    source = tmp_path / "source"
+    original = b"PUBLIC-TEST-encryption-source"
+    source.write_bytes(original)
+    destination = source if output == "inplace" else tmp_path / "destination"
+    if output == "existing":
+        destination.write_bytes(b"PUBLIC-TEST-existing-output")
+    previous = destination.read_bytes() if destination.exists() else None
+
+    def revoke():
+        keystore.lock()
+        keystore.unlock(MASTER)
+
+    def answer(request):
+        if phase == "input":
+            revoke()
+        return PASSWORD
+
+    seal = file_format.seal
+
+    def interrupted_seal(*args, **kwargs):
+        result = seal(*args, **kwargs)
+        revoke()
+        return result
+
+    if phase == "seal":
+        monkeypatch.setattr(file_format, "seal", interrupted_seal)
+    owner = EncryptedIOContext(
+        protection=keystore.protection, keystore=keystore, input_handler=answer
+    )
+    try:
+        with pytest.raises(PermissionDenied):
+            owner.encrypt_file(source, dst=destination, add_to_keystore=True)
+        assert source.read_bytes() == original
+        assert keystore.path.read_bytes() == before
+        assert destination.exists() is (previous is not None)
+        if previous is not None:
+            assert destination.read_bytes() == previous
+    finally:
+        owner.close()
+
+
+def test_vault_reunlock_during_data_encryption_cannot_save(keystore, monkeypatch):
+    before = keystore.path.read_bytes()
+    seal = file_format.seal
+
+    def interrupted_seal(*args, **kwargs):
+        result = seal(*args, **kwargs)
+        keystore.lock()
+        keystore.unlock(MASTER)
+        return result
+
+    monkeypatch.setattr(file_format, "seal", interrupted_seal)
+    owner = EncryptedIOContext(protection=keystore.protection, keystore=keystore)
+    try:
+        with pytest.raises(PermissionDenied):
+            owner.encrypt_data("PUBLIC-TEST-data", password=PASSWORD)
+        assert keystore.path.read_bytes() == before
     finally:
         owner.close()
 
