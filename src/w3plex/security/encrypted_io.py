@@ -331,7 +331,9 @@ class EncryptedIOContext:
         if kind == "plain":
             return raw
         if kind == "legacy":
-            if use_keystore and self._store_available():
+            if use_keystore and (
+                self._store_available() or (self._persist_keys and ask_password)
+            ):
                 return self._decrypt_legacy_from_vault(
                     raw, source=source, password=password, ask_password=ask_password
                 )

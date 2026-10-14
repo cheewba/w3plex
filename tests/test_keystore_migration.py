@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from w3plex.security import EncryptedIOContext, LegacyContext, file_format
+from w3plex.security import (
+    EncryptedIOContext,
+    LegacyContext,
+    file_format,
+    io as encryption_io,
+)
 from w3plex.security.errors import (
     AuthenticationFailed,
     PermissionDenied,
@@ -78,6 +83,91 @@ def owner(path, *, answers=None):
         ),
         requests,
     )
+
+
+@pytest.mark.parametrize("selection", ["explicit", "default"])
+def test_first_persistent_enc1_read_creates_one_modern_store(
+    tmp_path, monkeypatch, selection
+):
+    path = tmp_path / "selected"
+    requests = []
+
+    def answer(request):
+        requests.append(request.kind)
+        return MANIFEST["file_password"] if request.kind == "file" else MASTER
+
+    if selection == "default":
+        monkeypatch.setenv("W3PLEX_KEYSTORE", str(path))
+        monkeypatch.delenv("W3PLEX_SECRET_STORE", raising=False)
+        monkeypatch.setattr(encryption_io, "_CONTEXT", None)
+
+        def terminal_answer(prompt):
+            kind = (
+                "master_confirm"
+                if prompt == "Master password confirm: "
+                else "master"
+                if prompt == "Master password: "
+                else "file"
+            )
+            requests.append(kind)
+            return MANIFEST["file_password"] if kind == "file" else MASTER
+
+        monkeypatch.setattr(encryption_io, "request_password", terminal_answer)
+        context = encryption_io.default_context()
+    else:
+        context = EncryptedIOContext(
+            keystore_path=path, persist_keys=True, input_handler=answer
+        )
+    raw = (FIXTURES / "sample.enc").read_bytes()
+    expected = bytes.fromhex(MANIFEST["plaintext_hex"])
+    try:
+        assert context.decrypt_bytes(raw, source="legacy-file") == expected
+        saved = path.read_bytes()
+        assert saved.startswith(b"W3VAULT1")
+        assert requests == ["master", "master_confirm", "file"]
+        assert context.decrypt_bytes(raw, source="legacy-file") == expected
+        assert path.read_bytes() == saved
+        assert requests == ["master", "master_confirm", "file"]
+        context.lock()
+        requests.clear()
+        assert context.decrypt_bytes(raw, source="legacy-file") == expected
+        assert requests == ["master"]
+        assert path.read_bytes() == saved
+        assert [item for item in tmp_path.iterdir() if item.stat().st_size] == [path]
+        assert not path.with_name(path.name + ".legacy.bak").exists()
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize(
+    ("persist", "ask", "use_keystore"),
+    [(False, True, True), (True, False, True), (True, True, False)],
+)
+def test_enc1_read_without_store_creation_leaves_selected_path_absent(
+    tmp_path, persist, ask, use_keystore
+):
+    path = tmp_path / "selected"
+    requests = []
+    context = EncryptedIOContext(
+        keystore_path=path,
+        persist_keys=persist,
+        input_handler=lambda request: (
+            requests.append(request.kind) or MANIFEST["file_password"]
+        ),
+    )
+    try:
+        assert context.decrypt_bytes(
+            (FIXTURES / "sample.enc").read_bytes(),
+            source="legacy-file",
+            password=None if ask else MANIFEST["file_password"],
+            use_keystore=use_keystore,
+            ask_password=ask,
+        ) == bytes.fromhex(MANIFEST["plaintext_hex"])
+        assert requests == (["file"] if ask else [])
+        assert not path.exists()
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        context.close()
 
 
 @pytest.mark.parametrize("n", [4096, 8192, 16384, 32768])
