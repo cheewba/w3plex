@@ -11,15 +11,33 @@ from w3ext import Account
 from web3 import Web3
 
 from ..security import ISecretRef, SecretString
+from ..security.diagnostics import private_async
 from ..security.errors import PermissionDenied
 from ..security.refs import safe_call
 from .filter import TemplateFilter
 
 type FileOpener = Callable[[str | Path], ISecretRef[bytes]]
+type AsyncFileOpener = Callable[[str | Path], Awaitable[ISecretRef[bytes]]]
 
 _FILE_OPENER: ContextVar[FileOpener | None] = ContextVar(
     "w3plex_file_opener", default=None
 )
+_ASYNC_FILE_OPENER: ContextVar[AsyncFileOpener | None] = ContextVar(
+    "w3plex_async_file_opener", default=None
+)
+
+
+def get_async_file_opener() -> AsyncFileOpener | None:
+    return _ASYNC_FILE_OPENER.get()
+
+
+@contextmanager
+def using_async_file_opener(opener: AsyncFileOpener | None) -> Iterator[None]:
+    token = _ASYNC_FILE_OPENER.set(opener)
+    try:
+        yield
+    finally:
+        _ASYNC_FILE_OPENER.reset(token)
 
 
 def get_file_opener() -> FileOpener | None:
@@ -38,15 +56,20 @@ def using_file_opener(opener: FileOpener | None) -> Iterator[None]:
 class FileLoaderConfig(TypedDict):
     file: str | Path | ISecretRef[bytes]
     filter: NotRequired[str]
-    opener: NotRequired[FileOpener]
+    opener: NotRequired[FileOpener | None]
+    async_opener: NotRequired[AsyncFileOpener | None]
 
 
 class FileLoader[T]:
     def __init__(self, **config: Unpack[FileLoaderConfig]):
         self.config = config
         self._opener = config.get("opener", _FILE_OPENER.get())
+        self._async_opener = config.get("async_opener", _ASYNC_FILE_OPENER.get())
         self._source: ISecretRef[bytes] | None = None
         self._source_lock = threading.Lock() if self._opener is not None else None
+        self._async_source_lock = (
+            asyncio.Lock() if self._async_opener is not None else None
+        )
 
     def __call__(self, *args, **kwargs):
         return self.process(*args, **kwargs)
@@ -69,8 +92,16 @@ class FileLoader[T]:
         )
 
         file = self.config["file"]
-        if isinstance(file, ISecretRef) or self._opener is not None:
-            source = await asyncio.to_thread(self._capture)
+        if (
+            isinstance(file, ISecretRef)
+            or self._async_opener is not None
+            or self._opener is not None
+        ):
+            source = (
+                await self._capture_async()
+                if self._async_opener is not None
+                else await asyncio.to_thread(self._capture)
+            )
             lines = safe_call(
                 lambda: self._reference_lines(source, source.ref(silent=True), flt)
             )
@@ -97,6 +128,25 @@ class FileLoader[T]:
 
     def process_line(self, line: str | SecretString, fn: Callable[[Any], Any]) -> Any:
         return fn(line)
+
+    @private_async
+    async def _capture_async(self) -> ISecretRef[bytes]:
+        file = self.config["file"]
+        if isinstance(file, ISecretRef):
+            return file
+        lock = self._async_source_lock
+        if lock is None:
+            raise PermissionDenied()
+        async with lock:
+            if self._source is None:
+                opener = self._async_opener
+                if opener is None:
+                    raise PermissionDenied()
+                source = await opener(file)
+                if not isinstance(source, ISecretRef):
+                    raise PermissionDenied()
+                self._source = source
+            return self._source
 
     def _capture(self) -> ISecretRef[bytes]:
         file = self.config["file"]
