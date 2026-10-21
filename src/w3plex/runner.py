@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager
 from copy import deepcopy
 from inspect import iscoroutine, iscoroutinefunction, isfunction
 from typing import Any
@@ -158,8 +158,18 @@ class Runner:
         return wrap_app(app)
 
     async def init(
-        self, cfg: dict, cfg_path: str, *, file_opener: FileOpener | None = None
+        self,
+        cfg: dict,
+        cfg_path: str,
+        *,
+        file_opener: FileOpener | None = None,
+        resource_owner: AsyncExitStack | None = None,
     ):
+        """Build a tree; an optional owner retains resources even if init fails.
+
+        When supplied, the caller must close that stack and finalize the Runner
+        after success or failure. The tree does not close caller-owned resources.
+        """
         assert self.cfg is None, "Already initialized. Finalize first."
 
         loader = config_loader.clone()
@@ -170,9 +180,12 @@ class Runner:
         self.cfg_path = cfg_path
         self._file_opener = file_opener
         try:
-            self._tree = await loader.parse(cfg, cfg_path, file_opener=file_opener)
+            self._tree = await loader.parse(
+                cfg, cfg_path, file_opener=file_opener, resource_owner=resource_owner
+            )
         except BaseException:
-            await self.finalize()
+            if resource_owner is None:
+                await self.finalize()
             raise
 
     def _parse_log_handler(self, config) -> Any:

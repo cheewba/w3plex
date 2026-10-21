@@ -181,13 +181,22 @@ class _ConfigLoader:
         return node
 
     async def parse(
-        self, cfg: dict, cfg_path: str, *, file_opener: FileOpener | None = None
+        self,
+        cfg: dict,
+        cfg_path: str,
+        *,
+        file_opener: FileOpener | None = None,
+        resource_owner: AsyncExitStack | None = None,
     ) -> ConfigTree:
-        """Resolve dependencies once, including forward references inside lists."""
+        """Resolve dependencies once, including forward references inside lists.
+
+        With resource_owner, the caller closes constructed resources on both
+        success and failure. Otherwise parse/tree retain their usual ownership.
+        """
         collections = defaultdict(AttrDict)
         memo: dict[tuple[str, ...], Any] = {}
         active: set[tuple[str, ...]] = set()
-        resources = AsyncExitStack()
+        resources = resource_owner if resource_owner is not None else AsyncExitStack()
         owned: set[int] = set()
         root_dir = os.path.dirname(os.path.abspath(cfg_path))
 
@@ -285,9 +294,12 @@ class _ConfigLoader:
             with using_file_opener(file_opener):
                 tree = await parse(cfg, (), root_dir)
         except BaseException:
-            await resources.aclose()
+            if resource_owner is None:
+                await resources.aclose()
             raise
-        return ConfigTree(tree, collections, resources)
+        return ConfigTree(
+            tree, collections, resources if resource_owner is None else None
+        )
 
 
 class ConfigTree(AttrDict):
