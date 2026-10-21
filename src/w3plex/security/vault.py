@@ -15,7 +15,7 @@ from typing import Any
 from .diagnostics import safe_error_type
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .memory import LockedBuffer, ProcessProtection
-from .storage import CiphertextFile, FileIdentity
+from .storage import CiphertextFile, FileIdentity, StoreChanged
 from .vault_format import (
     DEFAULT_KDF,
     Envelope,
@@ -149,6 +149,49 @@ class Vault:
                     buffer.close()
                     raise
                 self._key, self._envelope, self._identity = buffer, envelope, identity
+
+        return private_call(operation)
+
+    def reload(self) -> None:
+        """Authenticate current storage using this session's retained data key.
+
+        Only append/delete changes with the same store and password wrapper are
+        accepted. Surviving records are immutable. Success preserves checkpoints;
+        failure locks this owner and clears borrowed material through its listeners.
+        This does not unlock a locked vault or detect replay of valid old storage.
+        """
+
+        def operation():
+            with self._mutex:
+                try:
+                    previous, key = self._unlocked()
+                    generation = self._generation
+                    data, identity = self._storage.read()
+                    envelope = parse(data)
+                    if envelope.wrapped_key != previous.wrapped_key or {
+                        name: value
+                        for name, value in envelope.header.items()
+                        if name != "data_nonce"
+                    } != {
+                        name: value
+                        for name, value in previous.header.items()
+                        if name != "data_nonce"
+                    }:
+                        raise AuthenticationFailed()
+                    records = self.validate_records(open_payload(envelope, key))
+                    existing = {record["id"]: record for record in self._records()}
+                    if any(
+                        record["id"] in existing
+                        and canonical(record) != canonical(existing[record["id"]])
+                        for record in records
+                    ):
+                        raise AuthenticationFailed()
+                    if self.checkpoint() != generation:
+                        raise PermissionDenied()
+                    self._envelope, self._identity = envelope, identity
+                except BaseException:
+                    self.lock()
+                    raise
 
         return private_call(operation)
 
@@ -329,6 +372,58 @@ class Vault:
                     raise
                 self._envelope, self._identity = updated, identity
                 return tuple(record["id"] for record in additions)
+
+        return private_call(operation)
+
+    def delete_entries(self, selected: Iterable[str]) -> tuple[str, ...]:
+        """Delete selected record IDs atomically and return removed IDs in order.
+
+        Validate at most 4096 selections before touching storage. Duplicates and
+        absent IDs are harmless; an empty or already-absent selection checks
+        freshness without rewriting. Stale state or a commit failure locks this
+        owner. A failed commit may already be visible: unlock and reread before
+        deciding whether cleanup needs another attempt.
+        """
+
+        def operation():
+            if isinstance(selected, (str, bytes)) or not isinstance(selected, Iterable):
+                raise InvalidStore()
+            identifiers = set()
+            for index, identifier in enumerate(selected):
+                if (
+                    index >= 4096
+                    or type(identifier) is not str
+                    or len(identifier) != 32
+                    or any(c not in "0123456789abcdef" for c in identifier)
+                ):
+                    raise InvalidStore()
+                identifiers.add(identifier)
+            with self._mutex:
+                envelope, key = self._unlocked()
+                records = self._records()
+                removed = tuple(
+                    record["id"] for record in records if record["id"] in identifiers
+                )
+                survivors = [
+                    record for record in records if record["id"] not in identifiers
+                ]
+                plaintext = canonical({"records": survivors})
+                self.validate_records(plaintext)
+                try:
+                    if not removed:
+                        with self._storage.writer_guard():
+                            if self._storage.read()[1] != self._identity:
+                                raise StoreChanged()
+                        return ()
+                    updated = update_payload(envelope, key, plaintext)
+                    identity = self._storage.write(
+                        updated.serialize(), expected=self._identity
+                    )
+                except BaseException:
+                    self.lock()
+                    raise
+                self._envelope, self._identity = updated, identity
+                return removed
 
         return private_call(operation)
 

@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from w3plex.security import SecretStore
-from w3plex.security.errors import InvalidStore
+from w3plex.security.errors import InvalidStore, PermissionDenied
 from w3plex.security.memory import ProcessProtection
-from w3plex.security.storage import CiphertextFile
+from w3plex.security.storage import CiphertextFile, StoreChanged
 from w3plex.security.vault import Vault
 
 FIXTURES = Path(__file__).parent / "fixtures/security"
@@ -59,3 +59,47 @@ def test_invalid_generic_batch_commits_nothing(secret_store):
     with pytest.raises(InvalidStore):
         vault.import_entries([(b"valid", {}), ("invalid", {})])
     assert vault._storage.read()[0] == original
+
+
+def test_independent_unlocked_owners_cache_reads_and_refuse_stale_append(secret_store):
+    vault = secret_store._vault
+    first = vault.save(b"PUBLIC-TEST-first", metadata={"tag": [1, "synthetic"]})
+    other = Vault(CiphertextFile(vault.path), protection=vault.protection)
+    try:
+        other.unlock(b"PUBLIC-TEST-snapshot-password")
+        checkpoint = other.checkpoint()
+        second = vault.save(b"PUBLIC-TEST-second")
+        assert other.identifiers() == (first,)
+        assert other.read(first) == b"PUBLIC-TEST-first"
+        assert other.metadata(first) == {"tag": [1, "synthetic"]}
+        assert other.checkpoint() == checkpoint
+        with pytest.raises(PermissionDenied):
+            other.read(second)
+        committed = vault.path.read_bytes()
+        with pytest.raises(StoreChanged):
+            other.save(b"PUBLIC-TEST-stale")
+        assert not other.is_unlocked and vault.is_unlocked
+        assert vault.path.read_bytes() == committed
+        other.unlock(b"PUBLIC-TEST-snapshot-password")
+        assert other.identifiers() == (first, second)
+    finally:
+        other.close()
+
+
+def test_password_rotation_preserves_records_and_changes_data_key(secret_store):
+    from w3plex.security import vault_format as codec
+
+    vault = secret_store._vault
+    identifier = vault.save(b"PUBLIC-TEST-value", metadata={"source": "synthetic"})
+    before = codec.parse(vault.path.read_bytes())
+    old_key = codec.unwrap(before, b"PUBLIC-TEST-snapshot-password")
+    plaintext = codec.open_payload(before, old_key)
+    vault.change_password(b"PUBLIC-TEST-snapshot-password", b"PUBLIC-TEST-replacement")
+    after = codec.parse(vault.path.read_bytes())
+    new_key = codec.unwrap(after, b"PUBLIC-TEST-replacement")
+    assert new_key != old_key and before.wrapped_key != after.wrapped_key
+    assert before.header["store_id"] == after.header["store_id"]
+    assert codec.open_payload(after, new_key) == plaintext
+    assert not vault.is_unlocked
+    vault.unlock(b"PUBLIC-TEST-replacement")
+    assert vault.read(identifier) == b"PUBLIC-TEST-value"

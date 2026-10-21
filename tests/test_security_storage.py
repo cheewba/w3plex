@@ -1,6 +1,8 @@
 """Real POSIX persistence, owner access and ciphertext-only crash artifacts."""
 
+import asyncio
 import os
+import selectors
 import stat
 import subprocess
 import sys
@@ -189,7 +191,7 @@ with CiphertextFile(sys.argv[1]) as storage:
     else:
         raise AssertionError("Concurrent writer was admitted")
 """
-    with store._writer():
+    with store.writer_guard():
         result = subprocess.run(
             [sys.executable, "-I", "-c", script, str(store.path)],
             capture_output=True,
@@ -201,6 +203,110 @@ with CiphertextFile(sys.argv[1]) as storage:
         with pytest.raises(WriterBusy):
             store.write(new, expected=expected)
     assert store.path.read_bytes() == old
+
+
+def test_writer_cleanup_after_interruption_and_rejected_lock_links(store, tmp_path):
+    with pytest.raises(KeyboardInterrupt), store.writer_guard():
+        raise KeyboardInterrupt
+    with store.writer_guard():
+        pass
+    lock = store.path.with_name("." + store.path.name + ".lock")
+    linked = tmp_path / "lock-alias"
+    os.link(lock, linked)
+    with pytest.raises(UnsafeStorage), store.writer_guard():
+        pytest.fail("Hard-linked lock was admitted")
+    linked.unlink()
+    lock.unlink()
+    lock.symlink_to(linked)
+    with pytest.raises(OSError), store.writer_guard():
+        pytest.fail("Symbolic lock was admitted")
+    lock.unlink()
+    with store.writer_guard():
+        pass
+
+
+def test_public_guard_separate_anchor_releases_on_async_cancellation(tmp_path):
+    script = """import sys
+from w3plex.security.storage import CiphertextFile, WriterBusy
+with CiphertextFile(sys.argv[1]) as anchor:
+    try:
+        with anchor.writer_guard():
+            pass
+    except WriterBusy:
+        sys.exit(23)
+"""
+    with (
+        CiphertextFile(tmp_path / "coordination") as anchor,
+        CiphertextFile(tmp_path / "first") as first,
+        CiphertextFile(tmp_path / "second") as second,
+    ):
+
+        def contender():
+            return subprocess.run(
+                [sys.executable, "-I", "-c", script, str(anchor.path)],
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+
+        async def scenario():
+            ready = asyncio.Event()
+
+            async def owner():
+                with anchor.writer_guard():
+                    first.write(b"PUBLIC-TEST-first", expected=None)
+                    second.write(b"PUBLIC-TEST-second", expected=None)
+                    ready.set()
+                    await asyncio.Future()
+
+            task = asyncio.create_task(owner())
+            try:
+                await asyncio.wait_for(ready.wait(), 10)
+                result = contender()
+                assert result.returncode == 23, result.stderr
+                assert first.read()[0] == b"PUBLIC-TEST-first"
+                assert second.read()[0] == b"PUBLIC-TEST-second"
+                assert not anchor.path.exists()
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(scenario())
+        result = contender()
+        assert result.returncode == 0, result.stderr
+
+
+def test_public_guard_owner_process_death_releases_lock(tmp_path):
+    script = """import sys
+from w3plex.security.storage import CiphertextFile
+with CiphertextFile(sys.argv[1]) as anchor, anchor.writer_guard():
+    print("ready", flush=True)
+    sys.stdin.read()
+"""
+    with CiphertextFile(tmp_path / "coordination") as anchor:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", script, str(anchor.path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(20), "Guard owner did not become ready"
+            assert process.stdout.readline() == "ready\n"
+            with pytest.raises(WriterBusy), anchor.writer_guard():
+                pytest.fail("Concurrent guard owner was admitted")
+            process.kill()
+            process.wait(timeout=20)
+            with anchor.writer_guard():
+                pass
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=20)
 
 
 @pytest.mark.parametrize(

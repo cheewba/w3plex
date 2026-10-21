@@ -5,6 +5,7 @@ import pickle
 
 import pytest
 
+from w3plex.security.adapters import SecretJson, SecretString
 from w3plex.security.errors import InvalidStore, PermissionDenied
 from w3plex.security.refs import SecretStore
 from w3plex.security.storage import CiphertextFile
@@ -12,6 +13,26 @@ from w3plex.security.vault import Vault
 
 PASSWORD = b"PUBLIC-TEST-snapshot-password"
 VALUE = b"PUBLIC-TEST-snapshot-value-19041"
+
+
+def test_child_extraction_and_metadata_restore_without_source_reread(
+    secret_store, tmp_path
+):
+    source = tmp_path / "source.json"
+    source.write_bytes(b'{"nested":["PUBLIC-TEST-child"]}')
+    parent = secret_store.capture_file(source)
+    child = SecretJson(SecretString(parent), ("nested", 0))
+    metadata = secret_store._vault.metadata(parent.identifier)
+    checkpoint = secret_store._vault.checkpoint()
+    assert child.ref(silent=True) == "PUBLIC-TEST-child"
+    secret_store._vault.lock()
+    source.unlink()
+    secret_store._vault.unlock(PASSWORD)
+    assert secret_store._vault.checkpoint() != checkpoint
+    assert child.parent.parent.identifier == parent.identifier
+    assert child.path == ("nested", 0)
+    assert secret_store._vault.metadata(parent.identifier) == metadata
+    assert child.ref(silent=True) == "PUBLIC-TEST-child"
 
 
 def test_source_change_and_delete_do_not_change_snapshot(secret_store, tmp_path):

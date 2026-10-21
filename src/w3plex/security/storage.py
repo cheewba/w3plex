@@ -175,7 +175,14 @@ class CiphertextFile:
             os.close(fd)
 
     @contextmanager
-    def _writer(self):
+    def writer_guard(self):
+        """Hold the checked per-path POSIX writer lock without waiting.
+
+        Contention raises WriterBusy. Use a separate shared anchor path to
+        coordinate work spanning several files, including their own writes.
+        The scope is not reentrant. Callers own deadlines, retry, cancellation,
+        and cross-file recovery. Do not remove or replace its lock file.
+        """
         import fcntl
 
         self._check_directory()
@@ -207,6 +214,9 @@ class CiphertextFile:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    # Existing application tests and the POSIX storage prototype use this name.
+    _writer = writer_guard
+
     def identity(self) -> FileIdentity | None:
         """Check the approved target before a caller prepares its replacement."""
         self._check_directory()
@@ -222,7 +232,7 @@ class CiphertextFile:
         """
         if type(plaintext) is not bytes or len(plaintext) > self.maximum_size:
             raise UnsafeStorage()
-        with self._writer():
+        with self.writer_guard():
             if self._target_identity() != expected:
                 raise StoreChanged()
             flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -267,7 +277,7 @@ class CiphertextFile:
             or not 1 <= len(ciphertext) <= self.maximum_size
         ):
             raise UnsafeStorage()
-        with self._writer():
+        with self.writer_guard():
             if self._target_identity() != expected:
                 raise StoreChanged()
             temporary = "." + self.path.name + "." + secrets.token_hex(16) + ".tmp"
