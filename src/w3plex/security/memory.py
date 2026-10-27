@@ -1,7 +1,7 @@
 """Explicit POSIX process controls and locked, private native allocations.
 
-This controls owned pages and core-file production. It cannot protect a full
-privileged snapshot or erase immutable copies made by Python/crypto libraries.
+This controls owned pages, core-file production and debugger attachment. It
+cannot protect a full privileged snapshot or erase immutable Python/crypto copies.
 Native Windows controls require a separately verified implementation.
 """
 
@@ -12,6 +12,8 @@ import sys
 from dataclasses import dataclass
 
 from .errors import UnsupportedProtection
+
+_PT_DENY_ATTACH = 31
 
 
 @dataclass(frozen=True)
@@ -30,7 +32,8 @@ class ProcessProtection:
         """Irreversibly lower this process's core limit before private input.
 
         Only the trusted process bootstrap should call this. No policy changes
-        happen on import. Inspection restriction is currently Linux-specific.
+        happen on import. Darwin refuses future debugger attachment; activating
+        while already traced terminates the process under the native API.
         """
         if sys.platform not in {"darwin", "linux"}:
             raise UnsupportedProtection()
@@ -38,6 +41,7 @@ class ProcessProtection:
 
         ok = False
         inspection = False
+        self._status = None
         try:
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             ok = resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
@@ -55,8 +59,19 @@ class ProcessProtection:
                     lib.prctl(4, 0, 0, 0, 0) == 0 and lib.prctl(3, 0, 0, 0, 0) == 0
                 )
                 ok = ok and inspection
+            else:
+                lib = ctypes.CDLL(None, use_errno=True)
+                lib.ptrace.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                ]
+                lib.ptrace.restype = ctypes.c_int
+                inspection = lib.ptrace(_PT_DENY_ATTACH, 0, None, 0) == 0
+                ok = ok and inspection
         except (OSError, ValueError, AttributeError):
-            pass
+            ok = False
         if not ok:
             raise UnsupportedProtection()
         self._status = ProtectionStatus(sys.platform, True, inspection, os.getpid())

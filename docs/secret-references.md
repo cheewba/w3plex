@@ -163,6 +163,11 @@ DTOs; the generic vault treats record metadata as opaque data.
 
 Existing CLI entry points, transparent plain/ENC1 reads and KS01 stores remain.
 New library imports do not enable encrypted `open()` or change process policy.
+Explicit process protection lowers core limits irreversibly. On macOS it also
+uses `PT_DENY_ATTACH` to reject debugger attachment. Activating it in an already
+traced process terminates that process under the native API. Debug ordinary
+standalone code without activating this mode; protected hosts must keep it
+enabled before private input. This does not block privileged full-memory snapshots.
 Legacy contexts require explicit activation. Original files are not rewritten;
 old vault records remain readable by the generic storage engine. Experimental
 policy modules moved to `cryptopal.runtime`; their old library aliases are gone.
