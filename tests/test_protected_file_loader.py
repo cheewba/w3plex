@@ -7,7 +7,7 @@ import pytest
 
 from w3plex.security import SecretString
 from w3plex.security.errors import PermissionDenied, SecurityError
-from w3plex.utils.loader import FileLoader
+from w3plex.utils.loader import FileLoader, using_file_opener
 
 PASSWORD = b"PUBLIC-TEST-snapshot-password"
 
@@ -36,7 +36,8 @@ def test_existing_reader_captures_once_across_concurrent_reads_and_lock(
         calls.append(path)
         return secret_store.capture_file(path)
 
-    reader = FileLoader(file=data, opener=opener)
+    with using_file_opener(opener):
+        reader = FileLoader(file=data)
 
     async def read():
         first, second = await asyncio.gather(reader(), reader())
@@ -64,8 +65,10 @@ def test_protected_opener_failure_never_falls_back_to_plain_read(tmp_path):
     def denied(path):
         raise PermissionDenied()
 
+    with using_file_opener(denied):
+        reader = FileLoader(file=data)
     with pytest.raises(PermissionDenied):
-        asyncio.run(FileLoader(file=data, opener=denied)())
+        asyncio.run(reader())
 
 
 @pytest.mark.parametrize("failure", ["wrong-result", "private-error"])
@@ -77,8 +80,10 @@ def test_bad_protected_opener_returns_a_safe_error(tmp_path, failure):
             raise RuntimeError(secret)
         return secret
 
+    with using_file_opener(opener):
+        reader = FileLoader(file=tmp_path / "data.txt")
     with pytest.raises(SecurityError) as caught:
-        asyncio.run(FileLoader(file=tmp_path / "data.txt", opener=opener)())
+        asyncio.run(reader())
     assert secret not in str(caught.value)
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None

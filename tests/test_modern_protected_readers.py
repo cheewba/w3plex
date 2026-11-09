@@ -22,7 +22,7 @@ from w3plex.security.errors import (
     InvalidStore,
     PermissionDenied,
 )
-from w3plex.utils.loader import FileLoader
+from w3plex.utils.loader import FileLoader, using_file_opener
 from w3plex.w3 import Account
 
 MASTER = b"PUBLIC-TEST-snapshot-password"
@@ -195,9 +195,8 @@ def test_failed_authentication_cannot_import_ciphertext_as_plaintext(
     source = tmp_path / "data.enc"
     encrypted(source, b"PUBLIC-TEST-secret")
     context._input = lambda _: "PUBLIC-TEST-wrong-password"
-    reader = FileLoader(
-        file=source, opener=partial(secret_store.capture_file, context=context)
-    )
+    with using_file_opener(partial(secret_store.capture_file, context=context)):
+        reader = FileLoader(file=source)
     before = secret_store._vault.path.read_bytes()
     with pytest.raises(AuthenticationFailed):
         asyncio.run(reader())

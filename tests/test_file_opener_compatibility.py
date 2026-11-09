@@ -29,6 +29,13 @@ def reveal(values):
     return [value.ref(silent=True) for value in values]
 
 
+@pytest.mark.parametrize("factory", [FileLoader, accounts_loader])
+@pytest.mark.parametrize("option", ["opener", "async_opener"])
+def test_reader_rejects_explicit_openers(factory, option):
+    with pytest.raises(TypeError, match=option):
+        factory(file="unused", **{option: lambda path: Reference(b"unused")})
+
+
 def test_sync_opener_runs_in_worker_and_reuses_capture_across_loops():
     calls = []
     owner = threading.get_ident()
@@ -39,26 +46,30 @@ def test_sync_opener_runs_in_worker_and_reuses_capture_across_loops():
             asyncio.get_running_loop()
         return Reference(b"first\n")
 
-    reader = FileLoader(file="unused", opener=opener)
+    with using_file_opener(opener):
+        reader = FileLoader(file="unused")
     assert reveal(asyncio.run(reader())) == ["first"]
     assert reveal(asyncio.run(reader())) == ["first"]
     assert len(calls) == 1
     assert calls[0] != owner
 
 
-def test_explicit_sync_defaults_and_reference_precedence(tmp_path):
+def test_nested_sync_contexts_and_reference_precedence(tmp_path):
     path = tmp_path / "data.txt"
     path.write_text("plain\n")
     outer = lambda path: Reference(b"outer\n")
-    explicit = lambda path: Reference(b"explicit\n")
+    nested = lambda path: Reference(b"nested\n")
     with using_file_opener(outer):
         inherited = FileLoader(file=path)
-        overridden = FileLoader(file=path, opener=explicit)
-        plain = FileLoader(file=path, opener=None)
-        existing = FileLoader(file=Reference(b"reference\n"), opener=explicit)
+        with using_file_opener(nested):
+            overridden = FileLoader(file=path)
+            existing = FileLoader(file=Reference(b"reference\n"))
+        with using_file_opener(None):
+            plain = FileLoader(file=path)
+        assert get_file_opener() is outer
     assert get_file_opener() is None
     assert reveal(asyncio.run(inherited())) == ["outer"]
-    assert reveal(asyncio.run(overridden())) == ["explicit"]
+    assert reveal(asyncio.run(overridden())) == ["nested"]
     assert asyncio.run(plain()) == ["plain"]
     assert reveal(asyncio.run(existing())) == ["reference"]
 
@@ -72,7 +83,8 @@ def test_sync_failure_retries_without_partial_cache():
             raise PermissionDenied()
         return Reference(b"recovered\n")
 
-    reader = FileLoader(file="unused", opener=opener)
+    with using_file_opener(opener):
+        reader = FileLoader(file="unused")
     with pytest.raises(PermissionDenied):
         asyncio.run(reader())
     assert reveal(asyncio.run(reader())) == ["recovered"]
@@ -90,7 +102,8 @@ def test_cancelled_sync_wait_does_not_cancel_worker_capture():
         assert release.wait(5)
         return Reference(b"captured\n")
 
-    reader = FileLoader(file="unused", opener=opener)
+    with using_file_opener(opener):
+        reader = FileLoader(file="unused")
 
     async def check():
         task = asyncio.create_task(reader())
@@ -135,7 +148,8 @@ def test_accounts_loader_stays_callable_and_captures_only_on_call():
         calls.append(path)
         return Reference(("11" * 32 + "\n").encode())
 
-    reader = accounts_loader(file="unused", opener=opener)
+    with using_file_opener(opener):
+        reader = accounts_loader(file="unused")
     assert callable(reader)
     assert calls == []
     first = asyncio.run(reader())[0]

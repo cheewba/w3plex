@@ -18,12 +18,7 @@ from .constants import (
 )
 from .log import logger
 from .utils import load_path
-from .utils.loader import (
-    AsyncFileOpener,
-    FileOpener,
-    using_async_file_opener,
-    using_file_opener,
-)
+from .utils.loader import FileOpener, using_file_opener
 
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
@@ -89,7 +84,6 @@ class Runner:
         self.loop: asyncio.AbstractEventLoop = loop
         self._log_sinks: list[int] = []
         self._file_opener: FileOpener | None = None
-        self._async_file_opener: AsyncFileOpener | None = None
 
     @property
     def is_initialized(self) -> bool:
@@ -169,7 +163,6 @@ class Runner:
         cfg_path: str,
         *,
         file_opener: FileOpener | None = None,
-        async_file_opener: AsyncFileOpener | None = None,
         resource_owner: AsyncExitStack | None = None,
     ):
         """Build a tree; an optional owner retains resources even if init fails.
@@ -186,13 +179,11 @@ class Runner:
         self.cfg = deepcopy(cfg)
         self.cfg_path = cfg_path
         self._file_opener = file_opener
-        self._async_file_opener = async_file_opener
         try:
             self._tree = await loader.parse(
                 cfg,
                 cfg_path,
                 file_opener=file_opener,
-                async_file_opener=async_file_opener,
                 resource_owner=resource_owner,
             )
         except BaseException:
@@ -234,7 +225,6 @@ class Runner:
             self.cfg = None
             self.cfg_path = None
             self._file_opener = None
-            self._async_file_opener = None
             for sink in self._log_sinks:
                 logger.remove(sink)
             self._log_sinks.clear()
@@ -251,7 +241,6 @@ class Runner:
         app_cfg = cfg.pop(APPLICATIONS_CFG_KEY).get(app.name)
         with (
             using_file_opener(self._file_opener),
-            using_async_file_opener(self._async_file_opener),
             create_context(
                 {
                     CONTEXT_CONFIG_KEY: dict(app_cfg),

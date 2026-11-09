@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import re
 import threading
 from collections.abc import Awaitable, Callable, Iterator
@@ -16,28 +17,13 @@ from ..security.errors import PermissionDenied
 from ..security.refs import safe_call
 from .filter import TemplateFilter
 
-type FileOpener = Callable[[str | Path], ISecretRef[bytes]]
-type AsyncFileOpener = Callable[[str | Path], Awaitable[ISecretRef[bytes]]]
+type FileOpener = Callable[
+    [str | Path], ISecretRef[bytes] | Awaitable[ISecretRef[bytes]]
+]
 
 _FILE_OPENER: ContextVar[FileOpener | None] = ContextVar(
     "w3plex_file_opener", default=None
 )
-_ASYNC_FILE_OPENER: ContextVar[AsyncFileOpener | None] = ContextVar(
-    "w3plex_async_file_opener", default=None
-)
-
-
-def get_async_file_opener() -> AsyncFileOpener | None:
-    return _ASYNC_FILE_OPENER.get()
-
-
-@contextmanager
-def using_async_file_opener(opener: AsyncFileOpener | None) -> Iterator[None]:
-    token = _ASYNC_FILE_OPENER.set(opener)
-    try:
-        yield
-    finally:
-        _ASYNC_FILE_OPENER.reset(token)
 
 
 def get_file_opener() -> FileOpener | None:
@@ -56,20 +42,19 @@ def using_file_opener(opener: FileOpener | None) -> Iterator[None]:
 class FileLoaderConfig(TypedDict):
     file: str | Path | ISecretRef[bytes]
     filter: NotRequired[str]
-    opener: NotRequired[FileOpener | None]
-    async_opener: NotRequired[AsyncFileOpener | None]
 
 
 class FileLoader[T]:
-    def __init__(self, **config: Unpack[FileLoaderConfig]):
-        self.config = config
-        self._opener = config.get("opener", _FILE_OPENER.get())
-        self._async_opener = config.get("async_opener", _ASYNC_FILE_OPENER.get())
+    def __init__(
+        self, *, file: str | Path | ISecretRef[bytes], filter: str | None = None
+    ):
+        self.config: FileLoaderConfig = {"file": file}
+        if filter is not None:
+            self.config["filter"] = filter
+        self._opener = get_file_opener()
         self._source: ISecretRef[bytes] | None = None
         self._source_lock = threading.Lock() if self._opener is not None else None
-        self._async_source_lock = (
-            asyncio.Lock() if self._async_opener is not None else None
-        )
+        self._async_source_lock = asyncio.Lock() if self._opener is not None else None
 
     def __call__(self, *args, **kwargs):
         return self.process(*args, **kwargs)
@@ -92,16 +77,8 @@ class FileLoader[T]:
         )
 
         file = self.config["file"]
-        if (
-            isinstance(file, ISecretRef)
-            or self._async_opener is not None
-            or self._opener is not None
-        ):
-            source = (
-                await self._capture_async()
-                if self._async_opener is not None
-                else await asyncio.to_thread(self._capture)
-            )
+        if isinstance(file, ISecretRef) or self._opener is not None:
+            source = await self._capture()
             lines = safe_call(
                 lambda: self._reference_lines(source, source.ref(silent=True), flt)
             )
@@ -130,7 +107,7 @@ class FileLoader[T]:
         return fn(line)
 
     @private_async
-    async def _capture_async(self) -> ISecretRef[bytes]:
+    async def _capture(self) -> ISecretRef[bytes]:
         file = self.config["file"]
         if isinstance(file, ISecretRef):
             return file
@@ -139,16 +116,38 @@ class FileLoader[T]:
             raise PermissionDenied()
         async with lock:
             if self._source is None:
-                opener = self._async_opener
+                opener = self._opener
                 if opener is None:
                     raise PermissionDenied()
-                source = await opener(file)
+                if inspect.iscoroutinefunction(opener) or inspect.iscoroutinefunction(
+                    opener.__call__
+                ):
+                    source = opener(file)
+                else:
+                    capture = asyncio.create_task(asyncio.to_thread(self._capture_sync))
+                    try:
+                        source = await asyncio.shield(capture)
+                    except asyncio.CancelledError:
+                        capture.add_done_callback(self._discard_capture)
+                        raise
+                if inspect.isawaitable(source):
+                    source = await source
                 if not isinstance(source, ISecretRef):
                     raise PermissionDenied()
                 self._source = source
             return self._source
 
-    def _capture(self) -> ISecretRef[bytes]:
+    @staticmethod
+    def _discard_capture(capture: asyncio.Task) -> None:
+        """Close an unawaited coroutine if its calling reader was cancelled."""
+        try:
+            source = capture.result()
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 -- cancelled reader has no recipient for worker errors
+            return
+        if inspect.iscoroutine(source):
+            source.close()
+
+    def _capture_sync(self) -> ISecretRef[bytes] | Awaitable[ISecretRef[bytes]]:
         file = self.config["file"]
         if isinstance(file, ISecretRef):
             return file
@@ -161,6 +160,8 @@ class FileLoader[T]:
                 if opener is None:
                     raise PermissionDenied()
                 source = safe_call(lambda: opener(file))
+                if inspect.isawaitable(source):
+                    return source
                 if not isinstance(source, ISecretRef):
                     raise PermissionDenied()
                 self._source = source

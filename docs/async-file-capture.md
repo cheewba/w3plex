@@ -1,8 +1,8 @@
-# Optional async file capture
+# File capture with sync or async callbacks
 
-Trusted hosts can pass `async_file_opener` to `Runner.init` or
+Trusted hosts can pass `file_opener` to `Runner.init` or
 `config_loader.parse`. The callback accepts a file path and returns an
-`ISecretRef[bytes]` through an awaitable. The existing parser constructs the
+`ISecretRef[bytes]` directly or through an awaitable. The parser constructs the
 same readers and retains this callback for later Lazy factories and Runner
 application calls.
 
@@ -12,25 +12,41 @@ async def capture(path):
     # Return a protected immutable snapshot through a local reference.
     return await trusted_capture(path)
 
-await runner.init(config, config_path, async_file_opener=capture)
+await runner.init(config, config_path, file_opener=capture)
 ```
 
-`FileLoader(file=path, async_opener=capture)` selects the callback for one
-reader. `using_async_file_opener(capture)` supplies a contextual default;
-`get_async_file_opener()` reads it. An explicit `async_opener=None` disables
-that default for the reader. These APIs live in `w3plex.utils.loader`.
+Readers obtain their callbacks from context when constructed. For standalone
+use, create the reader inside `using_file_opener(capture)`:
 
-An existing reference supplied as `file` takes precedence over either opener.
-Otherwise an async opener takes precedence over the synchronous `opener`.
-Without an async opener the existing synchronous/threaded and ordinary file
-read paths keep their behavior. Setting `async_opener=None` allows a reader's
-synchronous opener or ordinary read path to run even under an async default.
+```python
+from w3plex.utils.loader import FileLoader, using_file_opener
 
-The async callback runs directly in the task awaiting the reader. A per-reader
-asyncio lock serializes first capture on that event loop. A successful capture
-is retained once; failed or cancelled capture leaves the reader available for
-retry. Callback failures use the existing private-error sanitizer. Line filters,
-transforms and SecretString byte offsets use the existing reader implementation.
+with using_file_opener(capture):
+    reader = FileLoader(file=path)
+
+values = await reader()
+```
+
+The reader retains the callback after leaving the context.
+`get_file_opener()` reads the current callback. These APIs live in
+`w3plex.utils.loader`. Reader constructors no longer accept `opener` or
+`async_opener`; use `using_file_opener` instead. The separate `AsyncFileOpener`,
+async context accessors and `async_file_opener` host argument have been removed;
+use `FileOpener`, the shared context and `file_opener` for both callback kinds.
+
+An existing reference supplied as `file` takes precedence over the opener.
+Without an opener, ordinary file reads keep their behavior. Constructing a
+reader inside `using_file_opener(None)` disables capture for that reader.
+Nested contexts restore the previous callback when they exit.
+
+Async functions and objects with an async `__call__` run directly in the task
+awaiting the reader. Synchronous callbacks run in a worker thread. If a
+synchronous callback returns an awaitable, the reader awaits it in the invoking
+task. A per-reader asyncio lock serializes first capture on that event loop.
+A successful capture is retained once. Failed or cancelled async capture can
+be retried; cancelling a synchronous reader's wait lets its worker finish and
+retain the snapshot. Callback failures use the existing private-error sanitizer.
+Line filters, transforms and SecretString byte offsets use the existing reader implementation.
 `accounts_loader` remains a deferred callable.
 
 The callback can run long after initialization. Obtain current operation/session

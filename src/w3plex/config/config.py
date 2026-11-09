@@ -24,14 +24,7 @@ from ..constants import (
 )
 from ..exceptions import ConfigError
 from ..utils import AttrDict, as_future, get_context, get_scope, load_path
-from ..utils.loader import (
-    AsyncFileOpener,
-    FileOpener,
-    get_async_file_opener,
-    get_file_opener,
-    using_async_file_opener,
-    using_file_opener,
-)
+from ..utils.loader import FileOpener, get_file_opener, using_file_opener
 
 __all__ = ["ConfigTree", "Lazy", "config_loader"]
 
@@ -193,7 +186,6 @@ class _ConfigLoader:
         cfg_path: str,
         *,
         file_opener: FileOpener | None = None,
-        async_file_opener: AsyncFileOpener | None = None,
         resource_owner: AsyncExitStack | None = None,
     ) -> ConfigTree:
         """Resolve dependencies once, including forward references inside lists.
@@ -299,10 +291,7 @@ class _ConfigLoader:
                 active.remove(parts)
 
         try:
-            with (
-                using_file_opener(file_opener),
-                using_async_file_opener(async_file_opener),
-            ):
+            with using_file_opener(file_opener):
                 tree = await parse(cfg, (), root_dir)
         except BaseException:
             if resource_owner is None:
@@ -464,7 +453,6 @@ class Lazy[T]:
         self.cfg = cfg
         self.path = path
         self._file_opener = get_file_opener()
-        self._async_file_opener = get_async_file_opener()
         self._resources = AsyncExitStack()
 
     @property
@@ -540,10 +528,7 @@ class Lazy[T]:
             return value
 
         kw = await resolve(kw)
-        with (
-            using_file_opener(self._file_opener),
-            using_async_file_opener(self._async_file_opener),
-        ):
+        with using_file_opener(self._file_opener):
             value = cast(T, await config_loader.get_node(kw, self.path))
             if isgenerator(value):
                 generator = value
