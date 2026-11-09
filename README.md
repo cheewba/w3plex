@@ -388,11 +388,8 @@ plaintext outputs, secret stores and credentials out of version control.
 
 ## Other modules
 
-`w3plex.modules.odos.Odos` provides quotes, transaction assembly, token approvals,
-and swaps using an account and a chain. Use it as an async context manager or
-call `await client.close()` to release its HTTP session. Calling `swap()` submits
-transactions; quote retrieval does not. It is a Python integration, with no
-built-in swap CLI application.
+The Odos provider has been removed. Remove `w3plex.modules.odos` and
+`w3plex.w3.Odos` imports and Odos configuration entries from existing scripts.
 
 `TokenLookup`, `ContractLookup`, and `ContractMethodLookup` in `w3plex.utils.filter`
 resolve `chain:token`, `chain:address`, and `chain:address:method` templates against

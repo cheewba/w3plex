@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 from w3ext.chain.providers import HTTPProviderPool
 
 from w3plex.modules.debank import Debank
-from w3plex.modules.odos import Odos
 
 MARKER = "PUBLIC-TEST-credential-trace"
 
@@ -54,20 +53,5 @@ def test_legacy_rpc_options_urls_and_pool_keys_retain_credentials():
         # A retained provider still owns its copied options after disconnection.
         assert MARKER in repr(provider._request_kwargs)
         assert MARKER in str(provider)
-
-    asyncio.run(check())
-
-
-def test_legacy_odos_session_has_no_wallet_key_authentication():
-    async def check():
-        client = Odos(object(), object())
-        session = await client.get_session()
-        assert dict(session.headers) == {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        assert not hasattr(client, "access_key")
-        await client.close()
-        assert session.closed and client._session is None
 
     asyncio.run(check())

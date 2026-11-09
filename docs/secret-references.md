@@ -148,8 +148,7 @@ debank = Debank(access_key=key)
 
 Account keeps the reference and public address, without a retained plaintext key
 or signing account. It resolves the reference with `ref(silent=True)` during use.
-DeBank resolves its access key when constructing per-request headers. Odos also
-accepts a reference for its referral field and works with the adapted Account.
+DeBank resolves its access key when constructing per-request headers.
 Their ordinary string arguments retain existing behavior. Unchanged w3ext
 classes remain re-exported by identity. Unsupported consumers require explicit
 retrieval through `ref()` before passing a plain value.

@@ -5,22 +5,19 @@ import sys
 import pytest
 
 from w3plex.modules.debank import Debank
-from w3plex.modules.odos import Odos
 from w3plex.modules.proxy import ProxyPool
 from w3plex.plugins.dashboard import DashboardManager, DashboardPage
 
 
-def test_http_clients_create_sessions_lazily_and_close_them():
-    clients = [Debank(), Odos(None, None)]
-
+def test_debank_creates_sessions_lazily_and_closes_them():
     async def check():
-        for client in clients:
-            assert client._session is None
-            async with client:
-                session = await client.get_session()
-                assert not session.closed
-            assert session.closed
-            await client.close()
+        client = Debank()
+        assert client._session is None
+        async with client:
+            session = await client.get_session()
+            assert not session.closed
+        assert session.closed
+        await client.close()
 
     asyncio.run(check())
 
