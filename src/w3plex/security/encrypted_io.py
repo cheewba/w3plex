@@ -636,9 +636,8 @@ class EncryptedIOContext:
                 plain = self.decrypt_bytes(raw, source=os.fsdecode(file))
                 break
             except AuthenticationFailed:
-                if kind == "legacy":
-                    if not self._legacy.persist_keys:
-                        self._legacy.lock()
+                if kind == "legacy" and not self._legacy.persist_keys:
+                    self._legacy.lock()
                 remaining = 2 - attempt
                 suffix = "" if remaining == 1 else "s"
                 print(f"Incorrect password, {remaining} attempt{suffix} left")

@@ -49,7 +49,7 @@ def test_concurrent_encrypted_reads_share_one_master_unlock(
         try:
             start.wait(timeout=3)
             results.append(owner.decrypt_bytes(raw, source="sample"))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - Report all worker failures to the test thread.
             errors.append(exc)
 
     workers = [threading.Thread(target=read, daemon=True) for _ in range(2)]
@@ -131,7 +131,7 @@ def test_lock_revokes_queued_unlock_without_starting_another_dialog(
     def unlock():
         try:
             owner.unlock_keystore()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - Report all worker failures to the test thread.
             errors.append(exc)
 
     first = threading.Thread(target=unlock, daemon=True)

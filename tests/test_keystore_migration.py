@@ -261,6 +261,7 @@ raise AssertionError("Crash point not reached")
 """
     result = subprocess.run(
         [sys.executable, "-I", "-c", script, str(path), point],
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,
@@ -311,6 +312,7 @@ assert not Path("private").exists()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script, str(path), str(FIXTURES / "sample.enc")],
         cwd=tmp_path,
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,
@@ -337,6 +339,7 @@ main()
     result = subprocess.run(
         [sys.executable, "-I", "-c", script, str(path), str(FIXTURES / "sample.enc")],
         cwd=tmp_path,
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,
@@ -376,6 +379,7 @@ assert not list(Path(sys.argv[1]).iterdir())
     result = subprocess.run(
         [sys.executable, "-I", "-c", script, str(tmp_path), selection],
         cwd=tmp_path,
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,

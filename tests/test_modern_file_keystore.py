@@ -174,7 +174,7 @@ def test_vault_lock_after_decryption_prevents_plaintext_output(
             keystore.lock()
             if reunlock:
                 keystore.unlock(MASTER)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - Report all worker failures to the test thread.
             failures.append(exc)
 
     def decrypted(*args, **kwargs):

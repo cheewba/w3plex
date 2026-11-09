@@ -38,7 +38,7 @@ def test_concurrent_legacy_reads_reuse_one_master_unlock(tmp_path, mixed_formats
         try:
             gate.wait(timeout=3)
             results.append(context.decrypt_bytes(raw, source="legacy-file"))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - Report all worker failures to the test thread.
             errors.append(exc)
 
     workers = [threading.Thread(target=read, daemon=True) for _ in range(4)]
@@ -72,7 +72,7 @@ def test_legacy_private_input_does_not_block_lock_from_another_thread(
         started.set()
         try:
             context.lock()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - Report all worker failures to the test thread.
             errors.append(exc)
         finally:
             completed.set()
