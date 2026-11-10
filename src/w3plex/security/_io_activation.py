@@ -1,4 +1,4 @@
-"""Exclusive ownership of the explicitly activated built-in file opener."""
+"""Allow one context at a time to control builtins.open."""
 
 import builtins
 import threading
@@ -12,6 +12,17 @@ _ACTIVE: tuple[object, Callable[..., Any], Callable[..., Any]] | None = None
 
 
 def activate(owner: object, opener: Callable[..., Any]) -> None:
+    """Install a file opener and save the previous one.
+
+    Only one owner can be active at a time.
+
+    Args:
+        owner: The object that will control the installed opener.
+        opener: An open-compatible function to install as builtins.open.
+
+    Returns:
+        None.
+    """
     global _ACTIVE
     with _LOCK:
         if _ACTIVE is not None or getattr(
@@ -24,6 +35,16 @@ def activate(owner: object, opener: Callable[..., Any]) -> None:
 
 
 def deactivate(owner: object) -> None:
+    """Restore the previous file opener.
+
+    The owner and installed opener must still match.
+
+    Args:
+        owner: The object that installed the current opener.
+
+    Returns:
+        None.
+    """
     global _ACTIVE
     with _LOCK:
         if (
@@ -37,6 +58,14 @@ def deactivate(owner: object) -> None:
 
 
 def is_active(owner: object) -> bool:
+    """Check whether an owner still controls the file opener.
+
+    Args:
+        owner: The object whose ownership should be checked.
+
+    Returns:
+        True if this owner still controls the installed opener.
+    """
     with _LOCK:
         return (
             _ACTIVE is not None and _ACTIVE[0] is owner and builtins.open is _ACTIVE[1]

@@ -1,9 +1,8 @@
-"""Shared transparent reads of ordinary, ENC1 and W3FILE1 inputs."""
+"""Read plain, ENC1 and W3FILE1 files through one context."""
 
 import base64
 import hashlib
 import io
-import os
 import secrets
 import threading
 from collections.abc import Callable
@@ -13,7 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from . import file_format
-from .diagnostics import safe_error_type
+from ._io_activation import activate, deactivate, is_active
+from ._migration import migrate_keystore
+from ._streams import decrypted_stream
+from .diagnostics import private_call, safe_error_type
 from .errors import (
     AuthenticationFailed,
     InteractionRequired,
@@ -21,19 +23,24 @@ from .errors import (
     PermissionDenied,
     SecurityError,
 )
-from .io_activation import activate, deactivate, is_active
 from .legacy import LegacyContext, LegacyPasswordRequest
 from .memory import LockedBuffer, ProcessProtection
-from .migration import migrate_keystore
 from .snapshots import snapshot_file
 from .storage import CiphertextFile, FileIdentity, StoreChanged
-from .vault import Vault, private_call
+from .vault import Vault
 
 _MAXIMUM_KEYS = 1024
 
 
 @dataclass(frozen=True, repr=False)
 class PasswordRequest:
+    """Describe which password is needed and its source file.
+
+    Args:
+        kind: One of master, master_confirm or file.
+        source: Path or source name shown when requesting the password.
+    """
+
     kind: str
     source: Path
 
@@ -42,7 +49,14 @@ class PasswordRequest:
 
 
 def detect_format(prefix: bytes) -> str:
-    """Recognized unsupported containers must never become plaintext reads."""
+    """Identify a file format from its first bytes.
+
+    Args:
+        prefix: The start of a file, or its complete contents.
+
+    Returns:
+        plain, legacy or modern. Known but unsupported formats raise InvalidStore.
+    """
     if prefix.startswith(b"ENC1"):
         return "legacy"
     if prefix.startswith(file_format.MAGIC):
@@ -53,6 +67,8 @@ def detect_format(prefix: bytes) -> str:
 
 
 class EncryptedIOContext:
+    """Read plain, ENC1 and W3FILE1 files with a separate key cache."""
+
     _w3plex_security_context = True
 
     def __init__(
@@ -67,6 +83,25 @@ class EncryptedIOContext:
         persist_keys: bool = False,
         opener: Callable[..., Any] = io.open,
     ):
+        """Set up encrypted file reads without enabling them.
+
+        Args:
+            protection: Existing process protection. None creates protection that is
+                activated when needed.
+            input_handler: Optional callback returning a password for a PasswordRequest.
+            legacy_keystore_path: Path of a legacy key store used by legacy reads.
+            persist_legacy_keys: Whether legacy reads save newly found keys to their
+                legacy store.
+            keystore: An existing Vault to borrow. Closing this context locks it but
+                leaves its storage open.
+            keystore_path: Path of a vault owned by this context. Cannot be used
+                together with keystore.
+            persist_keys: Whether to save newly found keys in the selected vault.
+            opener: Underlying open-compatible function used to access ordinary files.
+
+        Returns:
+            None.
+        """
         if (
             type(persist_keys) is not bool
             or (keystore is not None and keystore_path is not None)
@@ -92,6 +127,8 @@ class EncryptedIOContext:
             opener=opener,
         )
         self._keys: dict[str, LockedBuffer] = {}
+
+        # lock() must be able to reject work while a password is being entered.
         self._mutex = threading.RLock()
         self._key_mutex = threading.RLock()
         self._prepare_mutex = threading.RLock()
@@ -105,11 +142,21 @@ class EncryptedIOContext:
 
     @property
     def generation(self) -> int:
+        """Return the number used to detect a session change.
+
+        Returns:
+            The current context generation. lock() increases this number.
+        """
         with self._mutex:
             return self._generation
 
     @property
     def active(self) -> bool:
+        """Check whether this context controls builtins.open.
+
+        Returns:
+            True while this context owns the installed opener.
+        """
         return is_active(self)
 
     def _check(self, generation: int) -> None:
@@ -124,7 +171,14 @@ class EncryptedIOContext:
             self._protection.check()
 
     def file_password(self, source: str | Path) -> str:
-        """Trusted explicit CLI input, after required modern process controls."""
+        """Read a file password after checking process protection.
+
+        Args:
+            source: Path shown in the password request.
+
+        Returns:
+            The entered password text.
+        """
         self._check_protection()
         generation = self.generation
         value = self._password("file", source)
@@ -145,6 +199,11 @@ class EncryptedIOContext:
         return self._password(request.kind, request.source)
 
     def unlock_keystore(self) -> None:
+        """Prepare and unlock the selected key store.
+
+        Returns:
+            None.
+        """
         generation = self.generation
         # Preparation and master input belong to one serialized workflow.
         # lock() never takes this mutex and can revoke active/queued requests.
@@ -163,6 +222,7 @@ class EncryptedIOContext:
                         keystore.add_lock_listener(self._clear_keys)
                         self._keystore_bound = True
                 return
+            # Private input runs without the state mutex so lock() can interrupt it.
             password = self._password("master", keystore.path)
             with self._mutex:
                 self._check(generation)
@@ -330,6 +390,19 @@ class EncryptedIOContext:
         use_keystore: bool = True,
         ask_password: bool = True,
     ) -> bytes:
+        """Decrypt ENC1 or W3FILE1 data and leave other bytes unchanged.
+
+        Args:
+            raw: Source bytes to inspect and decrypt.
+            source: Source name used in password requests. This path is not opened here.
+            password: Optional file password. If given, stored key lookup is skipped.
+            use_keystore: Whether to allow saved or cached keys when no password is
+                given.
+            ask_password: Whether to ask for a missing file password.
+
+        Returns:
+            The decrypted bytes, or the original raw input if it is plain.
+        """
         generation = self.generation
         kind = detect_format(raw)
         use_keystore = use_keystore and password is None
@@ -354,6 +427,7 @@ class EncryptedIOContext:
             with self._mutex:
                 self._check(generation)
             return value
+
         envelope = file_format.parse(raw)
         self._check_protection()
         if use_keystore:
@@ -367,7 +441,9 @@ class EncryptedIOContext:
             if self._keystore is None or not use_keystore
             else self._keystore.checkpoint()
         )
+        # Use the hash of the whole file, including its header, to look up keys.
         fingerprint = hashlib.sha256(raw).hexdigest()
+
         with self._mutex:
             self._check(generation)
             with self._key_mutex:
@@ -382,6 +458,7 @@ class EncryptedIOContext:
             with self._key_mutex:
                 if key is None and len(self._keys) >= _MAXIMUM_KEYS:
                     raise InvalidStore()
+
         if key is None:
             if password is None and not ask_password:
                 raise AuthenticationFailed()
@@ -391,7 +468,10 @@ class EncryptedIOContext:
                 if use_keystore:
                     self._check_keystore(store_generation)
             key = file_format.unwrap(envelope, secret.encode("utf-8"))
+
         value = file_format.open_payload(envelope, key)
+
+        # Password input may have locked the context or vault before returning.
         with (
             self._mutex,
             nullcontext() if self._keystore is None else self._keystore.mutex,
@@ -456,6 +536,17 @@ class EncryptedIOContext:
         password: str | None = None,
         add_to_keystore: bool = True,
     ) -> tuple[str, str]:
+        """Encrypt bytes or text and return its file password.
+
+        Args:
+            data: Bytes or text to encrypt. Text is encoded as UTF-8.
+            password: File password. None creates a random password when key saving is
+                enabled.
+            add_to_keystore: Whether to save the key for later reads.
+
+        Returns:
+            A pair containing base64 encrypted text and the password used.
+        """
         if password is None and not add_to_keystore:
             raise ValueError(
                 "Either password must be provided or add_to_keystore must be True"
@@ -469,6 +560,17 @@ class EncryptedIOContext:
     def decrypt_data(
         self, encrypted: str, *, password: str | None = None, use_keystore: bool = True
     ) -> str:
+        """Decrypt recognized base64 input as UTF-8 text.
+
+        Args:
+            encrypted: Base64 text containing encrypted data.
+            password: Optional file password. Without it, saved keys may be used.
+            use_keystore: Whether to allow saved keys when no password is given.
+
+        Returns:
+            Decrypted text for a supported container, otherwise the original input
+            string.
+        """
         raw = None
         try:
             raw = base64.b64decode(encrypted.encode("ascii"), validate=True)
@@ -495,6 +597,19 @@ class EncryptedIOContext:
         inplace: bool = False,
         add_to_keystore: bool = False,
     ) -> Path:
+        """Encrypt a file and return the output path.
+
+        Args:
+            src: Path of the source file.
+            password: File password. None requests a password through the input
+                callback.
+            dst: Output path. None uses the source path with .enc added.
+            inplace: If True, replace the source file instead of writing to dst.
+            add_to_keystore: Whether to save the file key for later reads.
+
+        Returns:
+            The path of the encrypted output file.
+        """
         self._check_protection()
         generation = self.generation
         source = Path(src).absolute()
@@ -545,6 +660,18 @@ class EncryptedIOContext:
         inplace: bool = False,
         use_keystore: bool = False,
     ) -> Path:
+        """Decrypt a file and write its output.
+
+        Args:
+            src: Path of the encrypted source file.
+            password: File password. None uses key lookup or the input callback.
+            dst: Output path. None uses the source path with a .dec suffix.
+            inplace: If True, replace the source file instead of writing to dst.
+            use_keystore: Whether saved keys can be used when no password is given.
+
+        Returns:
+            The path of the decrypted output file.
+        """
         generation = self.generation
         use_keystore = use_keystore and password is None
         source = Path(src).absolute()
@@ -608,61 +735,71 @@ class EncryptedIOContext:
         closefd=True,
         opener=None,
     ):
-        args = (file, mode, buffering, encoding, errors, newline, closefd, opener)
-        handle = self._opener(*args)
-        if (
-            set(mode) - {"r", "b", "t"}
-            or isinstance(file, int)
-            or not handle.seekable()
-        ):
-            return handle
-        try:
-            binary = "b" in mode
-            stream = handle if binary else handle.buffer
-            kind = detect_format(stream.read(16))
-            handle.seek(0)
-            if kind == "plain":
-                return handle
-            raw = stream.read(file_format.MAXIMUM_SIZE + 1)
-            if len(raw) > file_format.MAXIMUM_SIZE:
-                raise InvalidStore()
-        except BaseException:
-            handle.close()
-            raise
-        handle.close()
-        plain = b""
-        for attempt in range(3):
-            try:
-                plain = self.decrypt_bytes(raw, source=os.fsdecode(file))
-                break
-            except AuthenticationFailed:
-                if kind == "legacy" and not self._legacy.persist_keys:
-                    self._legacy.lock()
-                remaining = 2 - attempt
-                suffix = "" if remaining == 1 else "s"
-                print(f"Incorrect password, {remaining} attempt{suffix} left")
-                if attempt == 2:
-                    raise
-        buffer = io.BytesIO(plain)
-        buffer.name = os.fsdecode(file)
-        return (
-            buffer
-            if binary
-            else io.TextIOWrapper(
-                buffer, encoding=encoding, errors=errors, newline=newline
-            )
+        """Open files normally and decrypt supported read-only files.
+
+        Args:
+            file: A path or file descriptor, as accepted by builtins.open.
+            mode: Open mode. Only read-only file paths are decrypted; other modes pass
+                through.
+            buffering: Buffer size passed to the underlying file opener.
+            encoding: Encoding used to read decrypted bytes as text.
+            errors: How text decoding errors are handled.
+            newline: How line endings are handled in text mode.
+            closefd: Whether closing a stream also closes its file descriptor.
+            opener: Optional low-level file-opening callback, as in builtins.open.
+
+        Returns:
+            A file-like stream. The caller must close it.
+        """
+
+        def on_failure(kind, remaining):
+            if kind == "legacy" and not self._legacy.persist_keys:
+                self._legacy.lock()
+            suffix = "" if remaining == 1 else "s"
+            print(f"Incorrect password, {remaining} attempt{suffix} left")
+
+        handle = self._opener(
+            file, mode, buffering, encoding, errors, newline, closefd, opener
+        )
+        return decrypted_stream(
+            handle,
+            file=file,
+            mode=mode,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+            maximum_size=file_format.MAXIMUM_SIZE,
+            detect=detect_format,
+            decrypt=self.decrypt_bytes,
+            on_failure=on_failure,
         )
 
     def enable(self) -> None:
+        """Install this context as the built-in file opener.
+
+        Returns:
+            None.
+        """
         with self._mutex:
             self._check(self._generation)
             activate(self, self.open)
 
     def disable(self) -> None:
+        """Restore the file opener used before this context.
+
+        Returns:
+            None.
+        """
         deactivate(self)
 
     @contextmanager
     def activated(self):
+        """Use this file opener within a with block.
+
+        Returns:
+            A context manager that yields this context and restores the previous opener
+            on exit.
+        """
         self.enable()
         try:
             yield self
@@ -691,8 +828,14 @@ class EncryptedIOContext:
                 raise failure()
 
     def lock(self) -> None:
+        """Clear cached keys and reject work from the previous session.
+
+        Returns:
+            None.
+        """
         with self._mutex:
             self._generation += 1
+
             try:
                 self._clear_keys()
             finally:
@@ -701,6 +844,14 @@ class EncryptedIOContext:
                     self._keystore.lock()
 
     def close(self) -> None:
+        """Stop encrypted I/O and clear the context's keys.
+
+        A vault opened from keystore_path is closed. An injected vault is locked but
+        left open for its owner.
+
+        Returns:
+            None.
+        """
         failure: type[SecurityError] | None = None
         interruption: BaseException | None = None
         with self._mutex:

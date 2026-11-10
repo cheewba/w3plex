@@ -1,11 +1,11 @@
-"""Version 1 vault codec; never uses or changes the legacy ENC1/KS01 format."""
+"""Version 1 vault format. Legacy ENC1/KS01 formats are unchanged."""
 
 import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
 
-from .crypto import (
+from ._crypto import (
     DEFAULT_KDF as DEFAULT_KDF,  # noqa: PLC0414 -- public re-export for type checkers
     KdfSettings as KdfSettings,  # noqa: PLC0414 -- public re-export for type checkers
     canonical as canonical,  # noqa: PLC0414 -- public re-export for type checkers
@@ -25,6 +25,14 @@ MAXIMUM_SIZE = 8 * 1024 * 1024
 
 @dataclass(frozen=True, repr=False)
 class Envelope:
+    """Keep a W3VAULT1 header and its encrypted records.
+
+    Args:
+        header: Format settings, salts, nonces and the store ID.
+        wrapped_key: Data key encrypted with the password key, including its tag.
+        payload: Encrypted record JSON, including its authentication tag.
+    """
+
     header: dict[str, Any]
     wrapped_key: bytes
     payload: bytes
@@ -33,6 +41,11 @@ class Envelope:
         return "Envelope(<private>)"
 
     def serialize(self) -> bytes:
+        """Encode the header and encrypted record document in W3VAULT1 format.
+
+        Returns:
+            The complete container bytes, within the format size limit.
+        """
         data = MAGIC + canonical(
             {
                 "header": self.header,
@@ -46,6 +59,17 @@ class Envelope:
 
 
 def parse(data: bytes) -> Envelope:
+    """Check a W3VAULT1 file without decrypting it.
+
+    This checks the file layout and work limits. Decryption must still check the
+    authentication tags.
+
+    Args:
+        data: Complete container bytes to parse.
+
+    Returns:
+        A Envelope with the checked header and encrypted data.
+    """
     if (
         not isinstance(data, bytes)
         or not data.startswith(MAGIC)
@@ -119,6 +143,15 @@ def parse(data: bytes) -> Envelope:
 
 
 def unwrap(envelope: Envelope, password: bytes) -> bytes:
+    """Use the password to decrypt the data key.
+
+    Args:
+        envelope: A container returned by parse() or seal().
+        password: Password bytes used to protect the data key.
+
+    Returns:
+        The 32-byte data key.
+    """
     key = derive_key(password, envelope.header)
     return decrypt(
         key,
@@ -135,6 +168,15 @@ def _wrapping_aad(header: dict[str, Any]) -> bytes:
 
 
 def open_payload(envelope: Envelope, data_key: bytes) -> bytes:
+    """Check and decrypt the record document.
+
+    Args:
+        envelope: A container returned by parse() or seal().
+        data_key: The 32-byte key returned by unwrap() or seal().
+
+    Returns:
+        The decrypted bytes. Failed authentication raises an error.
+    """
     return decrypt(
         data_key,
         decode_bytes(envelope.header["data_nonce"], size=12),
@@ -151,9 +193,26 @@ def seal(
     settings: KdfSettings = DEFAULT_KDF,
     store_id: str | None = None,
 ) -> tuple[Envelope, bytes]:
+    """Encrypt a record document and protect its data key.
+
+    Args:
+        plaintext: JSON record bytes to encrypt.
+        password: Password bytes used to protect the data key.
+        data_key: An existing 32-byte data key, or None to create a new one.
+        settings: Argon2id settings that control the time and memory used to derive a
+            key.
+        store_id: Existing store ID to preserve, or None to create a new ID.
+
+    Returns:
+        A pair containing the Envelope and its 32-byte data key.
+    """
     settings.validate()
     key = secrets.token_bytes(32) if data_key is None else data_key
     if len(key) != 32 or len(plaintext) > MAXIMUM_SIZE // 2:
+        raise InvalidStore()
+    if store_id and (
+        len(store_id) != 32 or any(char not in "0123456789abcdef" for char in store_id)
+    ):
         raise InvalidStore()
     wrapping_nonce, data_nonce = secrets.token_bytes(12), secrets.token_bytes(12)
     if wrapping_nonce == data_nonce:
@@ -179,13 +238,20 @@ def seal(
     wrapped = encrypt(wrapping_key, wrapping_nonce, key, _wrapping_aad(header))
     payload = encrypt(key, data_nonce, plaintext, aad + b"\0records\0" + wrapped)
     envelope = Envelope(header, wrapped, payload)
-    # Apply the same bounded format validation to newly written files.
-    parse(envelope.serialize())
     return envelope, key
 
 
 def update_payload(envelope: Envelope, data_key: bytes, plaintext: bytes) -> Envelope:
-    """Update records without retaining the password or wrapping key."""
+    """Update encrypted records without keeping the password.
+
+    Args:
+        envelope: The current vault header and encrypted data.
+        data_key: The 32-byte key for this vault.
+        plaintext: New record document bytes.
+
+    Returns:
+        A new Envelope with the same password wrapper and a new payload nonce.
+    """
     if len(data_key) != 32 or len(plaintext) > MAXIMUM_SIZE // 2:
         raise InvalidStore()
     header = dict(envelope.header)
@@ -203,5 +269,4 @@ def update_payload(envelope: Envelope, data_key: bytes, plaintext: bytes) -> Env
         canonical(header) + b"\0records\0" + envelope.wrapped_key,
     )
     result = Envelope(header, envelope.wrapped_key, encrypted)
-    parse(result.serialize())
     return result

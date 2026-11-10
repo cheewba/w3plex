@@ -57,6 +57,7 @@ def _get_close(node):
 
 
 def validate_relative_path(path, root=None):
+    """Find an existing file relative to root. Leave other values unchanged."""
     if not root or not isinstance(path, str):
         return path
 
@@ -68,6 +69,7 @@ def validate_relative_path(path, root=None):
 
 
 def validate_relative_import(path, root=None):
+    """Turn an import starting with dots into a full import path."""
     if not root or not isinstance(path, str) or not path.startswith("."):
         return path
 
@@ -95,11 +97,13 @@ class _Resolver:
         self._later = defaultdict(list)
 
     def register(self, key, value):
+        """Save a value and call the callbacks waiting for its key."""
         self._idx[key] = value
         for callback in self._later.pop(key, []):
             callback(value)
 
     def resolve_once_ready(self, value, callback):
+        """Call the callback now and return True, or queue it and return False."""
         if value in self._idx:
             callback(self._idx[value])
             return True
@@ -108,6 +112,7 @@ class _Resolver:
         return False
 
     def get_unresolved(self) -> list[str]:
+        """Return the keys that still have waiting callbacks."""
         return list(self._later.keys())
 
 
@@ -122,6 +127,7 @@ class _ConfigLoader:
         ] = []
 
     def clone(self) -> _ConfigLoader:
+        """Copy the node registrations into a separate loader."""
         loader = _ConfigLoader()
         loader._filters = self._filters.copy()
         return loader
@@ -131,6 +137,7 @@ class _ConfigLoader:
         flt: Callable[[Any, str], bool] | str,
         collection: str | Callable[[Any], str] | None = None,
     ) -> Callable[[F], F]:
+        """Register a node factory using a condition or path expression."""
         predicate = self._regexp_flt(flt) if isinstance(flt, str) else flt
 
         def inner(fn: F) -> F:
@@ -155,7 +162,7 @@ class _ConfigLoader:
         relative_path: str | None = None,
         prepare: Callable[[Any], Awaitable[Any]] | None = None,
     ) -> Any:
-
+        """Try matching node factories from the last registered to the first."""
         node = cfg
         is_var = isinstance(cfg, dict) and cfg.pop(VAR_KEY, False)
         for flt, node_fn, collection in self._filters[::-1]:
@@ -187,11 +194,19 @@ class _ConfigLoader:
         *,
         resource_owner: AsyncExitStack | None = None,
     ) -> ConfigTree:
-        """Resolve dependencies once, including forward references inside lists.
+        """Build the config tree and resolve its object references.
 
-        Readers and lazy factories inherit the caller's file opener context.
-        With resource_owner, the caller closes constructed resources on both
-        success and failure. Otherwise parse/tree retain their usual ownership.
+        Readers use the current file opener context. Without resource_owner, the parser
+        closes resources on failure and the returned tree owns them on success.
+
+        Args:
+            cfg: Config data to turn into a tree.
+            cfg_path: Config filename used to resolve relative file paths.
+            resource_owner: Optional AsyncExitStack for created resources. The caller
+                must close it even if parsing fails.
+
+        Returns:
+            A ConfigTree containing the created objects and named collections.
         """
         collections = defaultdict(AttrDict)
         memo: dict[tuple[str, ...], Any] = {}
@@ -302,6 +317,8 @@ class _ConfigLoader:
 
 
 class ConfigTree(AttrDict):
+    """Provide config values, named collections and cleanup for owned resources."""
+
     def __init__(
         self,
         tree,
@@ -313,12 +330,15 @@ class ConfigTree(AttrDict):
         self._resources = resources or AsyncExitStack()
 
     def get_collection(self, name: str):
+        """Return a named collection, or None when it is absent."""
         return self._collections.get(name)
 
     def get_collections(self):
+        """Return a copy of the mapping of named collections."""
         return dict(self._collections)
 
     async def close(self):
+        """Close the tree's resources in the reverse order they were created."""
         await self._resources.aclose()
 
 
@@ -352,6 +372,7 @@ def _get_entity_collection(entity: Any) -> str:
 
 @config_loader.add_node(_entity_filter, _get_entity_collection)
 async def entity_factory(cfg: NodeConfig, path: str) -> NodeFactoryOutput:
+    """Create a configured object, or delay it if it needs Lazy values."""
     conf = dict(cfg)  # create a copy to modify it
     init_path = conf.pop(IMPORT_KEY)
     init = load_path(init_path)
@@ -387,6 +408,7 @@ async def load_chain[R: Chain](cfg: NodeConfig, path: str, cls: type[R]) -> R: .
 async def load_chain(
     cfg: NodeConfig, path: str, cls: type[Chain] | None = None
 ) -> Chain:
+    """Connect a chain and load the tokens listed in its config."""
     cls = cls or Chain
     if isinstance(rpc := cfg.get("rpc"), str) and "${" in rpc:
         raise ConfigError(f"{path}: set the RPC environment variable {rpc}")
@@ -428,6 +450,7 @@ def _lazy_filter(cfg: Any, path: str) -> bool:
 
 @config_loader.add_node(_lazy_filter)
 async def lazy_factory(cfg: NodeConfig, path: str) -> dict[str, Any] | Lazy[Any]:
+    """Create a Lazy value, or keep application and action settings as dictionaries."""
     if APPLICATIONS_CFG_RE.match(path) or ACTION_CONFIG_RE.match(path):
         # Application and Action can't be Lazy instance
         # but seems they have a field expected to be a Lazy
@@ -441,6 +464,8 @@ async def lazy_factory(cfg: NodeConfig, path: str) -> dict[str, Any] | Lazy[Any]
 
 
 class Lazy[T]:
+    """Create a value when called and cache it unless configured as a factory."""
+
     _as_factory = False
     _as_lazy = False
 
@@ -456,23 +481,26 @@ class Lazy[T]:
 
     @property
     def as_lazy(self):
+        """Return whether argument handling should leave this value for a later call."""
         return self._as_lazy or self._as_factory
 
     @property
     def as_factory(self):
+        """Return whether each call creates a new value instead of using a cached one."""
         return self._as_factory
 
     @property
     def type(self) -> type[T] | None:
+        """Return the cached value's type, or the configured class if it is known."""
         if (cached := getattr(self, "_cached", empty)) is not empty:
             return cast(type[T], type(cached))
         initializer = getattr(self, "cfg", {}).get(IMPORT_KEY)
         cls = load_path(initializer) if initializer else None
         return cls if isinstance(cls, type) else None
 
-    def _resolve_path(self, path: str, vars: dict[str, Any]) -> Any:
+    def _resolve_path(self, path: str, variables: dict[str, Any]) -> Any:
         """
-        Resolves a dot-separated path against the provided vars.
+        Resolves a dot-separated path against the provided variables.
         Each segment can resolve as:
         - Mapping key (dict-like)
         - Object attribute (getattr)
@@ -481,7 +509,7 @@ class Lazy[T]:
         if not isinstance(path, str):
             raise TypeError("path must be a string")
 
-        return _resolve_segments(vars, filter(None, path.split(".")), path)
+        return _resolve_segments(variables, filter(None, path.split(".")), path)
 
     def _set_cached(self, value: T):
         if get_scope() == ContextScope.action:
@@ -510,14 +538,14 @@ class Lazy[T]:
 
         ctx = get_context() or {}
 
-        vars = {
+        variables = {
             "vars": ctx.get(CONTEXT_VARS_KEY) or {},
             "context": ctx,
         }
 
         async def resolve(value):
             if isinstance(value, str) and (match := LAZY_ITEM_RE.match(value)):
-                value = self._resolve_path(match.group(1), vars)
+                value = self._resolve_path(match.group(1), variables)
             if isinstance(value, Lazy) and not value.as_lazy:
                 return await value()
             if isinstance(value, dict):
@@ -552,6 +580,7 @@ class Lazy[T]:
         return cast(T, value)
 
     async def close(self):
+        """Close resources created by this lazy value or its factory calls."""
         resources = getattr(self, "_resources", None)
         if resources is not None:
             await resources.aclose()
@@ -570,14 +599,14 @@ class LazyVar[T](Lazy[T]):
 
         ctx = get_context() or {}
 
-        vars = {
+        variables = {
             "vars": ctx.get(CONTEXT_VARS_KEY) or {},
             "context": ctx,
         }
         match = LAZY_ITEM_RE.match(self.var)
         if match is None:
             raise ConfigError(f"Invalid lazy variable: {self.var}")
-        value = self._resolve_path(match.group(1), vars)
+        value = self._resolve_path(match.group(1), variables)
         if isinstance(value, Lazy) and not value.as_lazy:
             value = await value()
         resolved = cast(T, value)

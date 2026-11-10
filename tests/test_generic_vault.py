@@ -90,11 +90,20 @@ def test_password_rotation_preserves_records_and_changes_data_key(secret_store):
     from w3plex.security import vault_format as codec
 
     vault = secret_store._vault
+    notifications = []
+
+    class Observer:
+        def locked(self):
+            notifications.append(vault.is_unlocked)
+
+    observer = Observer()
+    vault.add_lock_listener(observer.locked)
     identifier = vault.save(b"PUBLIC-TEST-value", metadata={"source": "synthetic"})
     before = codec.parse(vault.path.read_bytes())
     old_key = codec.unwrap(before, b"PUBLIC-TEST-snapshot-password")
     plaintext = codec.open_payload(before, old_key)
     vault.change_password(b"PUBLIC-TEST-snapshot-password", b"PUBLIC-TEST-replacement")
+    assert notifications == [False]
     after = codec.parse(vault.path.read_bytes())
     new_key = codec.unwrap(after, b"PUBLIC-TEST-replacement")
     assert new_key != old_key and before.wrapped_key != after.wrapped_key

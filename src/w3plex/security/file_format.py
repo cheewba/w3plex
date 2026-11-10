@@ -1,11 +1,11 @@
-"""Authenticated single-payload external files, distinct from record vaults."""
+"""Format for encrypted files, separate from vaults with several records."""
 
 import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
 
-from .crypto import (
+from ._crypto import (
     DEFAULT_KDF,
     KdfSettings,
     canonical,
@@ -27,6 +27,14 @@ MAXIMUM_SIZE = len(MAGIC) + 4 + MAXIMUM_HEADER + 48 + MAXIMUM_PLAINTEXT + 16
 
 @dataclass(frozen=True, repr=False)
 class FileEnvelope:
+    """Keep a W3FILE1 header and its encrypted content.
+
+    Args:
+        header: Format settings, salts, nonces and the file ID.
+        wrapped_key: Data key encrypted with the password key, including its tag.
+        payload: Encrypted file bytes, including their authentication tag.
+    """
+
     header: dict[str, Any]
     wrapped_key: bytes
     payload: bytes
@@ -35,6 +43,11 @@ class FileEnvelope:
         return "FileEnvelope(<private>)"
 
     def serialize(self) -> bytes:
+        """Encode the header and encrypted file content in W3FILE1 format.
+
+        Returns:
+            The complete container bytes, within the format size limit.
+        """
         header = canonical(self.header)
         if not 1 <= len(header) <= MAXIMUM_HEADER:
             raise InvalidStore()
@@ -51,6 +64,17 @@ class FileEnvelope:
 
 
 def parse(raw: bytes) -> FileEnvelope:
+    """Check a W3FILE1 file without decrypting it.
+
+    This checks the file layout and work limits. Decryption must still check the
+    authentication tags.
+
+    Args:
+        raw: Complete container bytes to parse.
+
+    Returns:
+        A FileEnvelope with the checked header and encrypted data.
+    """
     if (
         type(raw) is not bytes
         or len(raw) > MAXIMUM_SIZE
@@ -117,6 +141,15 @@ def parse(raw: bytes) -> FileEnvelope:
 
 
 def unwrap(envelope: FileEnvelope, password: bytes) -> bytes:
+    """Use the password to decrypt the data key.
+
+    Args:
+        envelope: A container returned by parse() or seal().
+        password: Password bytes used to protect the data key.
+
+    Returns:
+        The 32-byte data key.
+    """
     return decrypt(
         derive_key(password, envelope.header),
         decode_bytes(envelope.header["wrap_nonce"], size=12),
@@ -126,6 +159,15 @@ def unwrap(envelope: FileEnvelope, password: bytes) -> bytes:
 
 
 def open_payload(envelope: FileEnvelope, key: bytes) -> bytes:
+    """Check and decrypt the file content.
+
+    Args:
+        envelope: A container returned by parse() or seal().
+        key: The 32-byte key returned by unwrap() or seal().
+
+    Returns:
+        The decrypted bytes. Failed authentication raises an error.
+    """
     return decrypt(
         key,
         decode_bytes(envelope.header["data_nonce"], size=12),
@@ -140,6 +182,17 @@ def seal(
     *,
     settings: KdfSettings = DEFAULT_KDF,
 ) -> tuple[FileEnvelope, bytes]:
+    """Encrypt file content with a new key, salt and nonces.
+
+    Args:
+        plaintext: Bytes to encrypt, within the file size limit.
+        password: Password bytes used to protect the new data key.
+        settings: Argon2id settings that control the time and memory used to derive a
+            key.
+
+    Returns:
+        A pair containing the FileEnvelope and its 32-byte data key.
+    """
     settings.validate()
     if type(plaintext) is not bytes or len(plaintext) > MAXIMUM_PLAINTEXT:
         raise InvalidStore()
@@ -170,5 +223,4 @@ def seal(
         key, data_nonce, plaintext, MAGIC + b"\0file\0" + encoded + wrapped
     )
     envelope = FileEnvelope(header, wrapped, payload)
-    parse(envelope.serialize())
     return envelope, key

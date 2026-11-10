@@ -156,6 +156,7 @@ def test_bytes_filename_and_explicit_absence_of_keystore(tmp_path, monkeypatch):
         None, input_handler=lambda request: manifest["file_password"]
     )
     with context.open(os.fsencode(path), "rb") as stream:
+        assert stream.name == str(os.fsencode(path))
         assert stream.read() == bytes.fromhex(manifest["plaintext_hex"])
     assert context.path is None
     context.lock()

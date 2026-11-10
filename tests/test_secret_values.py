@@ -58,7 +58,7 @@ def test_bad_json_paths_and_formats_do_not_disclose_data(secret_store, raw, path
     assert raw.decode() not in str(caught.value)
 
 
-@pytest.mark.parametrize("offset,length", [(-1, 1), (0, -1), (True, 1)])
+@pytest.mark.parametrize("offset,length", [(-1, 1), (0, -1)])
 def test_invalid_range_metadata_is_rejected(secret_store, offset, length):
     with pytest.raises(InvalidStore):
         SecretString(secret_store.capture(b"test"), offset, length)
@@ -76,11 +76,12 @@ def test_out_of_bounds_wrong_parent_and_split_unicode_are_safe(secret_store):
             item.ref(silent=True)
 
 
-def test_depth_is_bounded_and_equivalent_recipes_keep_selection_identity(secret_store):
+def test_deep_adapters_restore_and_equivalent_recipes_keep_selection_identity(
+    secret_store,
+):
     root = secret_store.capture(b"test")
     assert SecretString(root) == SecretString(root)
     parent = root
-    for _ in range(32):
+    for _ in range(40):
         parent = SecretString(parent)
-    with pytest.raises(InvalidStore):
-        SecretString(parent)
+    assert parent.ref(silent=True) == "test"

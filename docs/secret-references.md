@@ -175,10 +175,11 @@ Lock the vault and any legacy contexts on session end. The host controls idle
 locking. Legacy caches contain Python key copies; locking them clears their
 references but does not prove erasure of every dependency copy.
 
-Captured values are bounded to 1 MiB and a vault envelope to 8 MiB. JSON paths
-and nested adapters are bounded to avoid unbounded restoration. AEAD authenticates
-the complete encrypted payload before any value is returned; a range does not
-permit an unauthenticated seek into ciphertext.
+A captured value can contain up to 1 MiB. A vault file can contain up to 8 MiB.
+Adapters use standard Python paths and encoding names. They do not set a custom
+limit on nesting. A byte range must fit the value read from the store. Before
+returning any part of a value, AEAD checks the complete encrypted payload.
+Selecting a range does not skip this check.
 
 Native owned buffers are cleared after use, but Python parsers, cryptography,
 signing and HTTP/TLS dependencies create temporary copies. A reference protocol

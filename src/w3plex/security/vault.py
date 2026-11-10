@@ -12,7 +12,10 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from .diagnostics import safe_error_type
+from .diagnostics import (
+    private_call as private_call,  # noqa: PLC0414 -- retain the existing host import
+    safe_error_type,
+)
 from .errors import AuthenticationFailed, InvalidStore, PermissionDenied, SecurityError
 from .memory import LockedBuffer, ProcessProtection
 from .storage import CiphertextFile, FileIdentity, StoreChanged
@@ -31,25 +34,19 @@ from .vault_format import (
 )
 
 
-def private_call[T](function: Callable[[], T]) -> T:
-    """Raise fixed codes without the dependency exception or its cause chain.
-
-    Exception frames still belong to the private host; never log their locals.
-    """
-    error = None
-    try:
-        return function()
-    except SecurityError as exc:
-        error = safe_error_type(exc)
-    except Exception:  # noqa: BLE001 -- private library errors are never forwarded
-        error = SecurityError
-    del function
-    # Outside the exception handler: no __context__ chain with private locals.
-    raise error()
-
-
 class Vault:
+    """Store encrypted records and keep their data key only while unlocked."""
+
     def __init__(self, storage: CiphertextFile, *, protection: ProcessProtection):
+        """Use file storage and process protection for a new vault object.
+
+        Args:
+            storage: Encrypted file storage. The vault closes it in close().
+            protection: Process protection used by the vault and its key buffers.
+
+        Returns:
+            None.
+        """
         self._storage = storage
         self._protection = protection
         self._mutex = threading.RLock()
@@ -66,11 +63,26 @@ class Vault:
 
     @property
     def path(self) -> Path:
-        """Trusted storage location for private input; never a public RPC field."""
+        """Return the path of the vault file.
+
+        Returns:
+            The storage path as a Path object.
+        """
         return self._storage.path
 
     def bind_lock(self, callback: Callable[[], None] | None) -> None:
-        """One host session owns lock notification; standalone vaults need none."""
+        """Set the main host callback for lock notifications.
+
+        A second live main callback is not allowed. Use add_lock_listener() for other
+        listeners.
+
+        Args:
+            callback: A bound method called when the vault locks. None removes the main
+                callback.
+
+        Returns:
+            None.
+        """
         with self._mutex:
             if (
                 callback is not None
@@ -83,7 +95,14 @@ class Vault:
             )
 
     def add_lock_listener(self, callback: Callable[[], None]) -> None:
-        """Notify borrowed data owners without replacing the primary host owner."""
+        """Add another callback without replacing the main host callback.
+
+        Args:
+            callback: A bound method to call when the vault locks.
+
+        Returns:
+            None.
+        """
         with self._mutex:
             self._lock_observers = [
                 reference
@@ -96,7 +115,11 @@ class Vault:
 
     @property
     def is_unlocked(self) -> bool:
-        """Host-only state check; never returns unlock material."""
+        """Check whether this vault has a live data key.
+
+        Returns:
+            True if the vault is open and unlocked.
+        """
         with self._mutex:
             return (
                 not self._closed
@@ -105,6 +128,11 @@ class Vault:
             )
 
     def check(self):
+        """Check that process protection is active and the vault is open.
+
+        Returns:
+            None.
+        """
         self._protection.check()
         if self._closed:
             raise PermissionDenied()
@@ -116,7 +144,18 @@ class Vault:
         return self._envelope, self._key.copy_bytes()
 
     def create(self, password: bytes, *, settings: KdfSettings = DEFAULT_KDF):
-        """Trusted private setup. Exclusive creation never overwrites any store."""
+        """Create an empty vault without replacing an existing file.
+
+        The vault stays locked after setup.
+
+        Args:
+            password: Master password bytes for the new vault.
+            settings: Argon2id settings that control the time and memory used to derive
+                a key.
+
+        Returns:
+            None.
+        """
 
         def operation():
             with self._mutex:
@@ -133,14 +172,25 @@ class Vault:
         return private_call(operation)
 
     def unlock(self, password: bytes):
-        """Trusted private input; retain only a locked data-key allocation."""
+        """Unlock the vault using its master password.
+
+        The vault keeps its data key in locked memory. It does not keep the password.
+
+        Args:
+            password: Master password bytes for the existing vault.
+
+        Returns:
+            None.
+        """
 
         def operation():
             with self._mutex:
                 self.check()
                 self.lock()
+
                 data, identity = self._storage.read()
                 envelope = parse(data)
+
                 buffer = LockedBuffer(bytes(32), protection=self._protection)
                 try:
                     buffer.replace(unwrap(envelope, password))
@@ -148,17 +198,20 @@ class Vault:
                 except BaseException:
                     buffer.close()
                     raise
+
                 self._key, self._envelope, self._identity = buffer, envelope, identity
 
         return private_call(operation)
 
     def reload(self) -> None:
-        """Authenticate current storage using this session's retained data key.
+        """Load file changes using the current data key.
 
-        Only append/delete changes with the same store and password wrapper are
-        accepted. Surviving records are immutable. Success preserves checkpoints;
-        failure locks this owner and clears borrowed material through its listeners.
-        This does not unlock a locked vault or detect replay of valid old storage.
+        The file must use the same store ID and password wrapper. Values of records that
+        remain in the file cannot change. Success keeps the session number. Any failure
+        locks the vault. This does not detect an older valid copy of the file.
+
+        Returns:
+            None.
         """
 
         def operation():
@@ -178,6 +231,7 @@ class Vault:
                         if name != "data_nonce"
                     }:
                         raise AuthenticationFailed()
+                    # Reload can add or remove records, but cannot change existing values.
                     records = self.validate_records(open_payload(envelope, key))
                     existing = {record["id"]: record for record in self._records()}
                     if any(
@@ -196,12 +250,22 @@ class Vault:
         return private_call(operation)
 
     def lock(self):
+        """Remove the session key and notify all listeners.
+
+        All listeners are called even if a cleanup step fails. The error is reported
+        after cleanup.
+
+        Returns:
+            None.
+        """
         failure: type[SecurityError] | None = None
         interruption: BaseException | None = None
         with self._mutex:
+            # Mark the session as locked before calling cleanup callbacks.
             self._generation += 1
             buffer, self._key = self._key, None
             self._envelope = self._identity = None
+
             try:
                 if buffer is not None:
                     buffer.close()
@@ -211,6 +275,7 @@ class Vault:
                 failure = SecurityError
             except BaseException as exc:  # noqa: BLE001 -- finish cleanup before cancellation
                 interruption = exc
+            # A failing listener must not prevent other owners from clearing caches.
             references = (
                 [] if self._lock_listener is None else [self._lock_listener]
             ) + self._lock_observers
@@ -225,6 +290,7 @@ class Vault:
                         failure = SecurityError
                     except BaseException as exc:  # noqa: BLE001 -- finish notifying every data owner
                         interruption = exc
+
         if interruption is not None:
             raise interruption
         if failure is not None:
@@ -237,13 +303,29 @@ class Vault:
 
     @property
     def mutex(self):
+        """Return the shared lock for operations that need several vault calls.
+
+        Returns:
+            The vault's reentrant thread lock.
+        """
         return self._mutex
 
     @property
     def protection(self) -> ProcessProtection:
+        """Return the process protection used by this vault.
+
+        Returns:
+            The ProcessProtection object shared with the key buffers.
+        """
         return self._protection
 
     def checkpoint(self) -> int:
+        """Return the current unlocked session number.
+
+        Returns:
+            A number that changes when the vault is locked or unlocked. Compare it later
+            to detect a session change.
+        """
         with self._mutex:
             self.check()
             if not self.is_unlocked:
@@ -251,6 +333,14 @@ class Vault:
             return self._generation
 
     def validate_records(self, plaintext: bytes) -> list[dict[str, Any]]:
+        """Check a decrypted record document before using it.
+
+        Args:
+            plaintext: UTF-8 JSON bytes from a checked and decrypted vault payload.
+
+        Returns:
+            The list of validated record dictionaries.
+        """
         document = json.loads(
             plaintext,
             object_pairs_hook=unique_fields,
@@ -284,6 +374,12 @@ class Vault:
         return document["records"]
 
     def identifiers(self) -> tuple[str, ...]:
+        """List record IDs from the current unlocked data.
+
+        Returns:
+            A tuple of IDs in stored record order.
+        """
+
         def operation():
             with self._mutex:
                 return tuple(record["id"] for record in self._records())
@@ -291,6 +387,15 @@ class Vault:
         return private_call(operation)
 
     def metadata(self, identifier: str) -> dict[str, Any]:
+        """Read a record's metadata without returning its stored value.
+
+        Args:
+            identifier: ID of the record to read.
+
+        Returns:
+            A metadata dictionary without the id and value fields.
+        """
+
         def operation():
             with self._mutex:
                 for record in self._records():
@@ -305,7 +410,15 @@ class Vault:
         return private_call(operation)
 
     def find_metadata(self, criteria: dict[str, str]) -> tuple[str, ...]:
-        """Find opaque metadata without repeatedly decrypting the entire store."""
+        """Find records by metadata without decrypting once per field.
+
+        Args:
+            criteria: Metadata field/value pairs to match. The id and value fields
+                cannot be used.
+
+        Returns:
+            Matching record IDs in stored record order.
+        """
 
         def operation():
             if (
@@ -331,12 +444,30 @@ class Vault:
         return private_call(operation)
 
     def save(self, value: bytes, *, metadata: dict[str, Any] | None = None) -> str:
+        """Save one value and its optional metadata.
+
+        Args:
+            value: Bytes to save as a record that cannot change later.
+            metadata: Optional record details. The id and value fields are managed by
+                the vault.
+
+        Returns:
+            The new record ID.
+        """
         return self.import_entries([(value, metadata or {})])[0]
 
     def import_entries(
         self, selected: Iterable[tuple[bytes, dict[str, Any]]]
     ) -> tuple[str, ...]:
-        """Validate generic values and opaque metadata, then commit once."""
+        """Save several values in one file update.
+
+        Args:
+            selected: Pairs of value bytes and metadata dictionaries. Each value can
+                contain up to 1 MiB.
+
+        Returns:
+            New record IDs in the same order as the input values.
+        """
 
         def operation():
             with self._mutex:
@@ -376,13 +507,17 @@ class Vault:
         return private_call(operation)
 
     def delete_entries(self, selected: Iterable[str]) -> tuple[str, ...]:
-        """Delete selected record IDs atomically and return removed IDs in order.
+        """Remove selected records in one file update.
 
-        Validate at most 4096 selections before touching storage. Duplicates and
-        absent IDs are harmless; an empty or already-absent selection checks
-        freshness without rewriting. Stale state or a commit failure locks this
-        owner. A failed commit may already be visible: unlock and reread before
-        deciding whether cleanup needs another attempt.
+        An empty selection still checks whether the stored file has changed. A failed
+        write locks the vault; read the file again before retrying.
+
+        Args:
+            selected: Up to 4096 record IDs to remove. Duplicate and missing IDs are
+                ignored.
+
+        Returns:
+            Removed IDs in their original record order.
         """
 
         def operation():
@@ -428,6 +563,15 @@ class Vault:
         return private_call(operation)
 
     def read(self, identifier: str) -> bytes:
+        """Read a record from the current unlocked data.
+
+        Args:
+            identifier: ID of the record to read.
+
+        Returns:
+            The stored bytes.
+        """
+
         def operation():
             with self._mutex:
                 for record in self._records():
@@ -444,39 +588,60 @@ class Vault:
         *,
         settings: KdfSettings = DEFAULT_KDF,
     ):
+        """Set a new password and data key.
+
+        The vault is locked after the call, even if it fails.
+
+        Args:
+            current_password: Current master password bytes.
+            replacement: New master password bytes.
+            settings: Argon2id settings that control the time and memory used to derive
+                a key.
+
+        Returns:
+            None.
+        """
+
         def operation():
-            with self._mutex:
-                self.check()
-                data, identity = self._storage.read()
-                existing = parse(data)
-                with (
-                    LockedBuffer(bytes(32), protection=self._protection) as buffer,
-                    LockedBuffer(
-                        bytes(32), protection=self._protection
-                    ) as replacement_buffer,
-                ):
-                    buffer.replace(unwrap(existing, current_password))
-                    plaintext = open_payload(existing, buffer.copy_bytes())
-                    self.validate_records(plaintext)
-                    # Rotate the data key too; no old key is persisted.
-                    replacement_envelope, replacement_key = seal(
-                        plaintext,
-                        replacement,
-                        settings=settings,
-                        store_id=existing.header["store_id"],
-                    )
-                    replacement_buffer.replace(replacement_key)
-                    self._storage.write(
-                        replacement_envelope.serialize(), expected=identity
-                    )
+            self.check()
+            data, identity = self._storage.read()
+            existing = parse(data)
+            with (
+                LockedBuffer(bytes(32), protection=self._protection) as buffer,
+                LockedBuffer(
+                    bytes(32), protection=self._protection
+                ) as replacement_buffer,
+            ):
+                buffer.replace(unwrap(existing, current_password))
+                plaintext = open_payload(existing, buffer.copy_bytes())
+                self.validate_records(plaintext)
+                # Rotate the data key too; no old key is persisted.
+                replacement_envelope, replacement_key = seal(
+                    plaintext,
+                    replacement,
+                    settings=settings,
+                    store_id=existing.header["store_id"],
+                )
+                replacement_buffer.replace(replacement_key)
+                self._storage.write(replacement_envelope.serialize(), expected=identity)
+
+        # Lock the vault before another thread can use the updated file.
+        with self._mutex:
+            try:
+                return private_call(operation)
+            finally:
                 self.lock()
 
-        try:
-            return private_call(operation)
-        finally:
-            self.lock()
-
     def backup(self, destination: CiphertextFile):
+        """Copy the current encrypted file without replacing an existing backup.
+
+        Args:
+            destination: CiphertextFile for a new backup path. The caller must close it.
+
+        Returns:
+            None.
+        """
+
         def operation():
             with self._mutex:
                 self.check()
@@ -490,6 +655,13 @@ class Vault:
         return private_call(operation)
 
     def close(self):
+        """Lock the vault and close its file storage.
+
+        Storage is closed even if a lock listener fails.
+
+        Returns:
+            None.
+        """
         with self._mutex:
             try:
                 self.lock()

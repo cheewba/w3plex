@@ -1,4 +1,4 @@
-"""Automatic conversion of captured legacy file keys with recoverable backups."""
+"""Move legacy file keys to a vault and keep a backup."""
 
 import base64
 import secrets
@@ -21,6 +21,21 @@ def migrate_keystore(
     password: Callable[[str, Path], str],
     check: Callable[[], None],
 ) -> Vault:
+    """Move legacy file keys into a vault and keep a backup.
+
+    Args:
+        storage: The selected legacy key file. It will contain the new vault after
+            migration.
+        backup: Path for a backup of the original file. A plain source gets an encrypted
+            backup.
+        protection: Active process protection for temporary keys and the returned vault.
+        password: Callback taking a password kind and source path, and returning the
+            entered text.
+        check: Callback that checks whether the current operation is still allowed.
+
+    Returns:
+        An unlocked Vault using the supplied storage. The caller must close it.
+    """
     raw, identity = storage.read()
 
     def unchanged():
@@ -53,6 +68,7 @@ def migrate_keystore(
             raise AuthenticationFailed()
         unchanged()
     keys = decode_keystore(raw, entered)
+    # Build the replacement before creating or verifying the recovery backup.
     records = [
         {
             "id": secrets.token_hex(16),
@@ -69,6 +85,7 @@ def migrate_keystore(
         unchanged()
         with CiphertextFile(backup) as destination:
             previous = destination.identity()
+            # A retry can reuse a backup only when it matches this captured source.
             if previous is not None:
                 saved, previous = destination.read()
                 if encrypted:
@@ -89,6 +106,7 @@ def migrate_keystore(
             unchanged()
             if destination.identity() != previous:
                 raise StoreChanged()
+            # Replace the key store only after checking its backup.
             storage.write(envelope.serialize(), expected=identity)
             check()
             if destination.identity() != previous:

@@ -1,4 +1,4 @@
-"""Bounded ciphertext storage, pinned paths and atomic exclusive writes."""
+"""Read encrypted files and write updates atomically."""
 
 import hashlib
 import os
@@ -24,6 +24,17 @@ class WriterBusy(SecurityError):
 
 
 class FileIdentity(NamedTuple):
+    """Keep file details used to detect changes.
+
+    Args:
+        device: Device ID reported by the file system.
+        inode: File ID within that device.
+        size: File size in bytes.
+        modified_ns: Last content change time, in nanoseconds.
+        changed_ns: Last metadata change time, in nanoseconds.
+        fingerprint: SHA-256 content hash, or empty bytes when the content was not read.
+    """
+
     device: int
     inode: int
     size: int
@@ -39,12 +50,25 @@ def _identity(value: os.stat_result) -> FileIdentity:
 
 
 class CiphertextFile:
+    """Read encrypted files and write updates through an open parent directory."""
+
     def __init__(
         self,
         path: str | Path,
         *,
         maximum_size: int = 8 * 1024 * 1024,
     ):
+        """Open the parent directory for later file operations.
+
+        The directory stays open until close() is called.
+
+        Args:
+            path: Path of the file to manage. Relative paths are made absolute.
+            maximum_size: Largest file content allowed, in bytes.
+
+        Returns:
+            None.
+        """
         if os.name != "posix" or not all(
             hasattr(os, name) for name in ("O_NOFOLLOW", "O_DIRECTORY")
         ):
@@ -66,6 +90,14 @@ class CiphertextFile:
 
     @staticmethod
     def open_directory(path: Path) -> int:
+        """Open each part of an absolute directory path without following links.
+
+        Args:
+            path: Absolute path to the directory.
+
+        Returns:
+            An open directory descriptor. The caller must close it.
+        """
         descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
         try:
             for part in path.parts[1:]:
@@ -98,14 +130,28 @@ class CiphertextFile:
             raise UnsafeStorage()
 
     def check_directory(self, descriptor: int) -> os.stat_result:
-        """Validate an opened directory; applications may add access policy."""
+        """Check an open directory before use.
+
+        Args:
+            descriptor: Open descriptor of the directory to check.
+
+        Returns:
+            Its os.stat_result. Subclasses may add access checks.
+        """
         info = os.fstat(descriptor)
         if not stat.S_ISDIR(info.st_mode):
             raise UnsafeStorage()
         return info
 
     def check_file(self, descriptor: int) -> os.stat_result:
-        """Validate an opened file before use, including lock and temporary files."""
+        """Check an open file before use.
+
+        Args:
+            descriptor: Open descriptor of a regular file with one hard link.
+
+        Returns:
+            Its os.stat_result. Subclasses may add access checks.
+        """
         info = os.fstat(descriptor)
         self._check_file(info)
         return info
@@ -149,6 +195,11 @@ class CiphertextFile:
             os.close(fd)
 
     def read(self) -> tuple[bytes, FileIdentity]:
+        """Read bytes and reject changes to the file or its parent directory.
+
+        Returns:
+            A pair containing the file bytes and their FileIdentity.
+        """
         self._check_directory()
         fd = os.open(
             self.path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self._fd
@@ -176,12 +227,14 @@ class CiphertextFile:
 
     @contextmanager
     def writer_guard(self):
-        """Hold the checked per-path POSIX writer lock without waiting.
+        """Hold the file writer lock without waiting for other writers.
 
-        Contention raises WriterBusy. Use a separate shared anchor path to
-        coordinate work spanning several files, including their own writes.
-        The scope is not reentrant. Callers own deadlines, retry, cancellation,
-        and cross-file recovery. Do not remove or replace its lock file.
+        Another writer causes WriterBusy. The lock cannot be entered twice by the same
+        operation. Use a separate shared path to coordinate writes across several files.
+        Do not remove or replace its lock file.
+
+        Returns:
+            A context manager that holds the lock until exit.
         """
         import fcntl
 
@@ -196,7 +249,6 @@ class CiphertextFile:
         acquired = False
         try:
             info = self.check_file(fd)
-            self._check_file(info)
             named = os.stat(lock_name, dir_fd=self._fd, follow_symlinks=False)
             if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
                 raise UnsafeStorage()
@@ -218,17 +270,29 @@ class CiphertextFile:
     _writer = writer_guard
 
     def identity(self) -> FileIdentity | None:
-        """Check the approved target before a caller prepares its replacement."""
+        """Check which file is currently stored at the target path.
+
+        Returns:
+            The current FileIdentity, or None if the target does not exist.
+        """
         self._check_directory()
         return self._target_identity()
 
     def write_plaintext(
         self, plaintext: bytes, *, expected: FileIdentity | None
     ) -> None:
-        """Explicit final plaintext output, with no plaintext temporary file.
+        """Write decrypted bytes directly to the final output file.
 
-        This direct output is not atomic; interruption can leave a partial final
-        file. Ciphertext commits must use write instead.
+        This write is not atomic. An interruption can leave a partial output file. Use
+        write() for encrypted data.
+
+        Args:
+            plaintext: Bytes to write. No temporary file contains these bytes.
+            expected: Identity of the file to replace. None requires the target to be
+                absent.
+
+        Returns:
+            None.
         """
         if type(plaintext) is not bytes or len(plaintext) > self.maximum_size:
             raise UnsafeStorage()
@@ -240,8 +304,7 @@ class CiphertextFile:
                 flags |= os.O_CREAT | os.O_EXCL
             fd = os.open(self.path.name, flags, 0o600, dir_fd=self._fd)
             try:
-                info = self.check_file(fd)
-                self._check_file(info)
+                self.check_file(fd)
                 if expected is not None and self._file_identity(fd) != expected:
                     raise StoreChanged()
                 self._check_directory()
@@ -267,10 +330,18 @@ class CiphertextFile:
     def write(
         self, ciphertext: bytes, *, expected: FileIdentity | None
     ) -> FileIdentity:
-        """Commit a complete ciphertext; expected=None means exclusive creation.
+        """Write complete encrypted content using an atomic file update.
 
-        On a failure after publication, the complete new file can already be visible.
-        The caller must invalidate cached state and reread, never retry blindly.
+        A failure after the update can leave the complete new file visible. Read the
+        file again before deciding whether to retry.
+
+        Args:
+            ciphertext: Encrypted bytes to write.
+            expected: Identity of the file to replace. None creates a new file without
+                replacing an existing target.
+
+        Returns:
+            The FileIdentity of the new file.
         """
         if (
             not isinstance(ciphertext, bytes)
@@ -280,6 +351,7 @@ class CiphertextFile:
         with self.writer_guard():
             if self._target_identity() != expected:
                 raise StoreChanged()
+            # Create and move the temporary file through the same open directory.
             temporary = "." + self.path.name + "." + secrets.token_hex(16) + ".tmp"
             descriptor = os.open(
                 temporary,
@@ -305,6 +377,7 @@ class CiphertextFile:
                     raise StoreChanged()
                 if self._target_identity() != expected:
                     raise StoreChanged()
+                # Creating a new target must not replace a file that appeared meanwhile.
                 if expected is None:
                     collision = False
                     try:
@@ -345,6 +418,13 @@ class CiphertextFile:
                     pass
 
     def close(self):
+        """Close the saved parent directory descriptor.
+
+        Calling close() again after a successful close has no effect.
+
+        Returns:
+            None.
+        """
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None

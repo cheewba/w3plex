@@ -16,6 +16,8 @@ from ..utils import get_context
 
 
 class ApplicationAction(_ApplicationAction):
+    """Prepare action arguments and add a logger with details about each item."""
+
     async def _process_action(self, item: Any, action: Any):
         # lazyplex treats every iterable result as a collection of actions.
         # Strings and bytes are complete values, not character-level actions.
@@ -24,6 +26,7 @@ class ApplicationAction(_ApplicationAction):
         return await super()._process_action(item, action)
 
     async def get_item_context(self, *args, **kwargs):
+        """Add a logger with item details to the action context."""
         ctx = await super().get_item_context(*args, **kwargs)
         logger = get_context()[CONTEXT_LOGGER_KEY]
         logger = logger.bind(
@@ -33,6 +36,7 @@ class ApplicationAction(_ApplicationAction):
         return {CONTEXT_LOGGER_KEY: logger, **ctx}
 
     async def process_item(self, item: Any, *args, **kwargs):
+        """Process an item using its ActionData index and any SkipItem result."""
         try:
             if isinstance(item, ActionData):
                 kwargs["index"] = item.index
@@ -50,6 +54,8 @@ class ApplicationAction(_ApplicationAction):
     async def parse_args(
         self, *args, **kwargs
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        """Read Lazy values that should run now, including values inside containers."""
+
         async def resolve_value(value: Any) -> Any:
             if isinstance(value, dict):
                 return {
@@ -70,14 +76,18 @@ class ApplicationAction(_ApplicationAction):
 
 
 class Application(_Application):
+    """Add configured logging and Lazy argument handling to a lazyplex application."""
+
     action_class = ApplicationAction
 
     async def process_action_data(self, action, data, counter=None, kwargs=None):
+        """Process text or bytes as one item when protected_items is disabled."""
         if isinstance(data, (str, bytes)) and not self.protected_items:
             data = [data]
         return await super().process_action_data(action, data, counter, kwargs)
 
     async def update_application_context(self, ctx):
+        """Add a logger with application details to its context."""
         await super().update_application_context(ctx)
         _logger = logger.bind(
             application=self.name,
@@ -89,6 +99,8 @@ class Application(_Application):
 
 @dataclass
 class ActionData[T]:
+    """Keep an action item together with its processing index."""
+
     item: T
     index: int
 
@@ -102,10 +114,9 @@ def application(
 
 
 def application(*args, **kwargs):
-    """Wrapper around ``lazyplex.application`` that accepts function as argument only.
+    """Create a w3plex application from a function.
 
-    There's no need to pass the name of the application, since
-    it's taken from the config file.
+    The config supplies the application name, so the decorator does not need one.
     """
     kwargs["application_class"] = Application
     if args and isinstance(args[0], Callable):

@@ -38,6 +38,7 @@ class _AppProxy:
 
     @property
     def tree(self) -> dict:
+        """Return a shallow copy of this application's configuration."""
         return dict(self.__cfg)
 
     def __getattr__(self, name: str) -> Any:
@@ -70,12 +71,15 @@ class _AppProxy:
 
 
 class Runner:
+    """Create configured applications and run them with their context and resources."""
+
     cfg: dict | None = None
     cfg_path: str | None = None
 
     _tree: ConfigTree | None = None
 
     def __init__(self, loop=None) -> None:
+        """Bind an existing event loop or create one for blocking calls."""
         if loop is None:
             try:
                 loop = asyncio.get_running_loop()
@@ -87,15 +91,18 @@ class Runner:
 
     @property
     def is_initialized(self) -> bool:
+        """Return whether this runner has configuration."""
         return self.cfg is not None
 
     @property
     def tree(self) -> ConfigTree:
+        """Return the config tree. Initialization must have completed first."""
         if self._tree is None:
             raise RuntimeError("Runner is not initialized")
         return self._tree
 
     async def resolve_value(self, value) -> Any:
+        """Read or call a value, leaving Lazy values for the action context."""
         if isinstance(value, Lazy):
             # Lazy should be resolved on action level,
             # when action context is defined
@@ -109,6 +116,7 @@ class Runner:
     async def resolve_args(
         self, app: _Application, *args, **kwargs
     ) -> tuple[list[Any], dict[str, Any]]:
+        """Prepare positional and keyword arguments before calling an application."""
         a, kw = (
             [await self.resolve_value(arg) for arg in args],
             {key: (await self.resolve_value(value)) for key, value in kwargs.items()},
@@ -116,6 +124,7 @@ class Runner:
         return a, kw
 
     def blocking_call(self, coro):
+        """Run a coroutine on the runner's loop and block for its result."""
         if self.loop.is_running():
             try:
                 current_loop = asyncio.get_running_loop()
@@ -135,11 +144,14 @@ class Runner:
             return self.loop.run_until_complete(coro)
 
     async def run_application(self, app: _Application, *args, **kwargs):
+        """Resolve arguments and invoke an application within its runner context."""
         with self._app_context(app):
             args, kwargs = await self.resolve_args(app, *args, **kwargs)
             return await app(*args, **kwargs)
 
     async def init_application(self, cfg: dict, path: str):
+        """Load an application and prepare its configured arguments for this runner."""
+
         def wrap_app(app):
             return _AppProxy(app, self, cfg)
 
@@ -165,10 +177,21 @@ class Runner:
         file_opener: FileOpener | None = None,
         resource_owner: AsyncExitStack | None = None,
     ):
-        """Build a tree; an optional owner retains resources even if init fails.
+        """Build the config tree and prepare this runner.
 
-        When supplied, the caller must close that stack and finalize the Runner
-        after success or failure. The tree does not close caller-owned resources.
+        Without resource_owner, the tree owns its resources and a failed initialization
+        is cleaned up automatically.
+
+        Args:
+            cfg: Config data containing applications and other configured objects.
+            cfg_path: Config filename used to resolve relative paths.
+            file_opener: Optional sync or async callback that captures file bytes as a
+                reference.
+            resource_owner: Optional AsyncExitStack. If supplied, the caller must close
+                it and finalize the runner after success or failure.
+
+        Returns:
+            None.
         """
         assert self.cfg is None, "Already initialized. Finalize first."
 
@@ -203,6 +226,7 @@ class Runner:
         return sys.stderr
 
     def init_loggers(self, loggers: list[dict], path: str):
+        """Create log outputs and keep their IDs so finalize() can remove them."""
         for log in loggers:
             log = log.copy()
             is_file = "file" in log
@@ -217,6 +241,7 @@ class Runner:
         return loggers
 
     async def finalize(self):
+        """Close owned resources, remove log outputs and reset the runner."""
         try:
             if self._tree is not None:
                 await self._tree.close()
@@ -256,6 +281,7 @@ class Runner:
 
 
 def load_applications(name: str):
+    """Load one application, or find the applications defined in a module."""
     loaded = load_path(name)
     if isinstance(loaded, _Application):
         return [loaded]

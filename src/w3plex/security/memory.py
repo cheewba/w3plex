@@ -18,6 +18,16 @@ _PT_DENY_ATTACH = 31
 
 @dataclass(frozen=True)
 class ProtectionStatus:
+    """Describe the protection enabled for a process.
+
+    Args:
+        platform: Name of the platform where the controls were enabled.
+        core_files_disabled: Whether core dump files are disabled.
+        inspection_restricted: Whether the supported OS inspection controls were
+            applied.
+        process_id: ID of the process to which the protection applies.
+    """
+
     platform: str
     core_files_disabled: bool
     inspection_restricted: bool
@@ -25,15 +35,20 @@ class ProtectionStatus:
 
 
 class ProcessProtection:
+    """Enable and check process protection before using secrets."""
+
     def __init__(self):
         self._status: ProtectionStatus | None = None
 
     def activate(self) -> ProtectionStatus:
-        """Irreversibly lower this process's core limit before private input.
+        """Enable process protection before reading passwords.
 
-        Only the trusted process bootstrap should call this. No policy changes
-        happen on import. Darwin refuses future debugger attachment; activating
-        while already traced terminates the process under the native API.
+        This lowers the core dump limit for the rest of the process. On macOS it blocks
+        future debugger connections. Calling it while a debugger is attached can end the
+        process.
+
+        Returns:
+            ProtectionStatus describing the active controls and process ID.
         """
         if sys.platform not in {"darwin", "linux"}:
             raise UnsupportedProtection()
@@ -87,6 +102,11 @@ class ProcessProtection:
         return self._status
 
     def check(self):
+        """Check that protection is active for this process and platform.
+
+        Returns:
+            None.
+        """
         if (
             self._status is None
             or self._status.process_id != os.getpid()
@@ -112,11 +132,12 @@ class ProcessProtection:
 
 
 class LockedBuffer:
-    """Own one private page allocation; check mlock before copying any secret.
+    """Keep bytes in locked native memory.
 
-    ``copy_bytes`` is service-internal and creates an immutable dependency copy.
-    This object must never cross a model/RPC boundary. It is not an in-process
-    security boundary. Close explicitly; do not rely on finalizers for locking.
+    Pages are locked before the value is copied. copy_bytes() creates a normal Python
+    bytes copy, which must stay private. Close the buffer explicitly. It belongs in
+    trusted code, not RPC or model responses. It does not isolate secrets from other
+    code in the same process.
     """
 
     def __init__(
@@ -126,6 +147,17 @@ class LockedBuffer:
         protection: ProcessProtection,
         max_size: int = 65536,
     ):
+        """Lock memory pages before copying a value into them.
+
+        Args:
+            value: Non-empty bytes to keep in the buffer.
+            protection: Active protection for the current process.
+            max_size: Largest value allowed, in bytes. The buffer cannot grow after
+                creation.
+
+        Returns:
+            None.
+        """
         protection.check()
         if type(max_size) is not int or not 1 <= max_size <= 1024 * 1024:
             raise ValueError("Invalid secret buffer limit")
@@ -175,12 +207,24 @@ class LockedBuffer:
         return "LockedBuffer(<private>)"
 
     def copy_bytes(self) -> bytes:
+        """Copy the stored value into a Python bytes object.
+
+        Returns:
+            A bytes copy of the value. The copy is outside the locked buffer.
+        """
         if self._memory is None or self._pid != os.getpid():
             raise UnsupportedProtection()
         return self._memory[: self._size]
 
     def replace(self, value: bytes) -> None:
-        """Copy into already protected pages; never resize a secret allocation."""
+        """Replace the value without changing the buffer size.
+
+        Args:
+            value: New bytes. Their length must match the original value.
+
+        Returns:
+            None.
+        """
         if self._memory is None or self._pid != os.getpid():
             raise UnsupportedProtection()
         if not isinstance(value, bytes) or len(value) != self._size:
@@ -188,6 +232,11 @@ class LockedBuffer:
         self._memory[: self._size] = value
 
     def close(self):
+        """Clear the memory pages, unlock them and release the buffer.
+
+        Returns:
+            None.
+        """
         area = self._memory
         if area is None:
             return

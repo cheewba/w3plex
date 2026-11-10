@@ -22,13 +22,14 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from ._io_activation import activate, deactivate, is_active
+from ._streams import decrypted_stream
 from .errors import (
     AuthenticationFailed,
     InteractionRequired,
     InvalidStore,
     PermissionDenied,
 )
-from .io_activation import activate, deactivate, is_active
 
 _HISTORICAL_N = (32768, 16384, 8192, 4096)
 _MAX_STORE = 1024 * 1024
@@ -37,6 +38,13 @@ _MAX_FILE = 64 * 1024 * 1024
 
 @dataclass(frozen=True, repr=False)
 class LegacyPasswordRequest:
+    """Describe which legacy password is needed and its source file.
+
+    Args:
+        kind: One of master, master_confirm or file.
+        source: Path or source name shown when requesting the password.
+    """
+
     kind: str
     source: Path
 
@@ -45,6 +53,8 @@ class LegacyPasswordRequest:
 
 
 class LegacyContext:
+    """Read and write ENC1/KS01 files with a separate cache of file keys."""
+
     _w3plex_security_context = True
 
     def __init__(
@@ -55,6 +65,19 @@ class LegacyContext:
         opener: Callable[..., Any] = io.open,
         persist_keys: bool = False,
     ):
+        """Set up legacy file reads without enabling them.
+
+        Args:
+            keystore_path: Path of a legacy key store, or None to use no file store.
+            input_handler: Optional callback returning a password for a
+                LegacyPasswordRequest.
+            opener: Underlying open-compatible function used to access files.
+            persist_keys: Whether to save newly found keys instead of keeping them only
+                in memory.
+
+        Returns:
+            None.
+        """
         self.path = None if keystore_path is None else Path(keystore_path)
         self._input = input_handler
         self._opener = opener
@@ -72,24 +95,53 @@ class LegacyContext:
         return "LegacyContext(<private>)"
 
     def lock(self):
+        """Clear cached keys and reject work from the previous session.
+
+        Returns:
+            None.
+        """
         with self._lock:
             self._keys = self._salt = self._master_key = None
             self._epoch += 1
 
     @property
     def generation(self) -> int:
+        """Return the number used to detect a session change.
+
+        Returns:
+            The current context generation. lock() increases this number.
+        """
         with self._lock:
             return self._epoch
 
     @property
     def persist_keys(self) -> bool:
+        """Check whether new file keys are saved.
+
+        Returns:
+            True if the context saves newly found file keys.
+        """
         return self._persist_keys
 
     @property
     def active(self) -> bool:
+        """Check whether this context controls builtins.open.
+
+        Returns:
+            True while this context owns the installed opener.
+        """
         return is_active(self)
 
     def fork(self, *, input_handler: Callable[[LegacyPasswordRequest], str]):
+        """Copy cached keys into a separate context for private input.
+
+        Args:
+            input_handler: Password callback used by the new context.
+
+        Returns:
+            A pair containing the parent generation and a context that does not save new
+            keys.
+        """
         with self._operations, self._lock:
             context = LegacyContext(
                 self.path, input_handler=input_handler, opener=self._opener
@@ -98,12 +150,29 @@ class LegacyContext:
             return self._epoch, context
 
     def merge(self, context: "LegacyContext", *, generation: int) -> None:
+        """Copy discovered keys back if the parent session has not changed.
+
+        Args:
+            context: A working context returned by fork().
+            generation: The parent generation returned by the same fork() call.
+
+        Returns:
+            None.
+        """
         with self._operations, context._operations, self._lock, context._lock:
             if self._epoch != generation or context.path != self.path:
                 raise PermissionDenied()
             self._keys = None if context._keys is None else list(context._keys)
 
     def install_keys(self, keys: list[bytes]) -> None:
+        """Replace cached file keys with a copy of the given list.
+
+        Args:
+            keys: A list of 32-byte file keys.
+
+        Returns:
+            None.
+        """
         if any(type(key) is not bytes or len(key) != 32 for key in keys):
             raise InvalidStore()
         with self._operations, self._lock:
@@ -131,6 +200,14 @@ class LegacyContext:
 
     @staticmethod
     def parse_keys(plain: bytes) -> list[bytes]:
+        """Check and decode a plain legacy key document.
+
+        Args:
+            plain: JSON bytes containing a keys list.
+
+        Returns:
+            The decoded 32-byte file keys.
+        """
         valid = False
         keys: list[bytes] = []
         try:
@@ -202,6 +279,11 @@ class LegacyContext:
             return keys
 
     def unlock_keystore(self) -> None:
+        """Prepare and unlock the selected key store.
+
+        Returns:
+            None.
+        """
         generation = self.generation
         with self._operations:
             self._unlock_keystore(generation)
@@ -334,6 +416,8 @@ class LegacyContext:
             with self._lock:
                 self._check(generation)
             token = raw[4:]
+
+            # Try cached file keys before requesting a password.
             if use_keystore and not password:
                 for key in self._read_keys(generation):
                     try:
@@ -343,6 +427,7 @@ class LegacyContext:
                             return plain
                     except InvalidToken:
                         continue
+
             if password:
                 key = hashlib.sha256(password.encode()).digest()
             elif ask_password:
@@ -351,6 +436,7 @@ class LegacyContext:
                 ).digest()
             else:
                 raise AuthenticationFailed()
+
             success = False
             plain = b""
             try:
@@ -360,6 +446,7 @@ class LegacyContext:
                 pass
             if not success:
                 raise AuthenticationFailed()
+            # Return keys and data only if the session has not changed.
             if not password and use_keystore:
                 self._add_key(key, persist=self._persist_keys, generation=generation)
             with self._lock:
@@ -375,7 +462,19 @@ class LegacyContext:
         use_keystore: bool = True,
         ask_password: bool = True,
     ) -> bytes:
-        """Private read; ordinary contexts never rewrite the source keystore."""
+        """Decrypt ENC1 data and leave other bytes unchanged.
+
+        Args:
+            raw: Source bytes to inspect and decrypt.
+            source: Source name used in password requests. This path is not opened here.
+            password: Optional file password. If given, stored key lookup is skipped.
+            use_keystore: Whether to allow saved or cached keys when no password is
+                given.
+            ask_password: Whether to ask for a missing file password.
+
+        Returns:
+            The decrypted bytes, or the original raw input if it is plain.
+        """
         return (
             self._decrypt_bytes(
                 raw,
@@ -401,6 +500,19 @@ class LegacyContext:
         inplace: bool = False,
         add_to_keystore: bool = False,
     ) -> Path:
+        """Encrypt a file and return the output path.
+
+        Args:
+            src: Path of the source file.
+            password: File password. None requests a password through the input
+                callback.
+            dst: Output path. None uses the source path with .enc added.
+            inplace: If True, replace the source file instead of writing to dst.
+            add_to_keystore: Whether to save the file key for later reads.
+
+        Returns:
+            The path of the encrypted output file.
+        """
         source = Path(src)
         data = self._read_file(source)
         if data.startswith(b"ENC1"):
@@ -426,6 +538,18 @@ class LegacyContext:
         inplace: bool = False,
         use_keystore: bool = False,
     ) -> Path:
+        """Decrypt a file and write its output.
+
+        Args:
+            src: Path of the encrypted source file.
+            password: File password. None uses key lookup or the input callback.
+            dst: Output path. None uses the source path with a .dec suffix.
+            inplace: If True, replace the source file instead of writing to dst.
+            use_keystore: Whether saved keys can be used when no password is given.
+
+        Returns:
+            The path of the decrypted output file.
+        """
         source = Path(src)
         plain = self._decrypt_bytes(
             self._read_file(source),
@@ -446,6 +570,17 @@ class LegacyContext:
         password: str | None = None,
         add_to_keystore: bool = True,
     ) -> tuple[str, str]:
+        """Encrypt bytes or text and return its file password.
+
+        Args:
+            data: Bytes or text to encrypt. Text is encoded as UTF-8.
+            password: File password. None creates a random password when key saving is
+                enabled.
+            add_to_keystore: Whether to save the key for later reads.
+
+        Returns:
+            A pair containing base64 encrypted text and the password used.
+        """
         if password is None and not add_to_keystore:
             raise ValueError(
                 "Either password must be provided or add_to_keystore must be True"
@@ -462,6 +597,17 @@ class LegacyContext:
     def decrypt_data(
         self, encrypted: str, *, password: str | None = None, use_keystore: bool = True
     ) -> str:
+        """Decrypt recognized base64 input as UTF-8 text.
+
+        Args:
+            encrypted: Base64 text containing encrypted data.
+            password: Optional file password. Without it, saved keys may be used.
+            use_keystore: Whether to allow saved keys when no password is given.
+
+        Returns:
+            Decrypted text for a supported container, otherwise the original input
+            string.
+        """
         try:
             raw = base64.b64decode(encrypted.encode("ascii"))
         except (ValueError, UnicodeEncodeError):
@@ -487,61 +633,71 @@ class LegacyContext:
         closefd=True,
         opener=None,
     ):
-        args = (file, mode, buffering, encoding, errors, newline, closefd, opener)
-        handle = self._opener(*args)
-        if (
-            set(mode) - {"r", "b", "t"}
-            or isinstance(file, int)
-            or not handle.seekable()
-        ):
-            return handle
-        try:
-            binary = "b" in mode
-            stream = handle if binary else handle.buffer
-            prefix = stream.read(4)
-            handle.seek(0)
-            if prefix != b"ENC1":
-                return handle
-            raw = stream.read(_MAX_FILE + 1)
-        except BaseException:
-            handle.close()
-            raise
-        handle.close()
-        if len(raw) > _MAX_FILE:
-            raise InvalidStore()
-        plain = b""
-        for attempt in range(3):
-            try:
-                plain = self.decrypt_bytes(raw, source=os.fsdecode(file))
-                break
-            except AuthenticationFailed:
-                if not self._persist_keys:
-                    self.lock()
-                if attempt == 2:
-                    raise
-                if self._persist_keys:
-                    sys.stdout.write(
-                        f"Incorrect password, {2 - attempt} attempts left\r\n"
-                    )
-                    sys.stdout.flush()
-        buffer = io.BytesIO(plain)
-        buffer.name = str(file)
-        return (
-            buffer
-            if binary
-            else io.TextIOWrapper(
-                buffer, encoding=encoding, errors=errors, newline=newline
-            )
+        """Open files normally and decrypt supported read-only files.
+
+        Args:
+            file: A path or file descriptor, as accepted by builtins.open.
+            mode: Open mode. Only read-only file paths are decrypted; other modes pass
+                through.
+            buffering: Buffer size passed to the underlying file opener.
+            encoding: Encoding used to read decrypted bytes as text.
+            errors: How text decoding errors are handled.
+            newline: How line endings are handled in text mode.
+            closefd: Whether closing a stream also closes its file descriptor.
+            opener: Optional low-level file-opening callback, as in builtins.open.
+
+        Returns:
+            A file-like stream. The caller must close it.
+        """
+
+        def on_failure(kind, remaining):
+            if not self._persist_keys:
+                self.lock()
+            elif remaining:
+                sys.stdout.write(f"Incorrect password, {remaining} attempts left\r\n")
+                sys.stdout.flush()
+
+        handle = self._opener(
+            file, mode, buffering, encoding, errors, newline, closefd, opener
+        )
+        return decrypted_stream(
+            handle,
+            file=file,
+            mode=mode,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+            maximum_size=_MAX_FILE,
+            detect=lambda prefix: "legacy" if prefix.startswith(b"ENC1") else "plain",
+            decrypt=self.decrypt_bytes,
+            on_failure=on_failure,
+            name=str(file),
         )
 
     def enable(self):
+        """Install this context as the built-in file opener.
+
+        Returns:
+            None.
+        """
         activate(self, self.open)
 
     def disable(self):
+        """Restore the file opener used before this context.
+
+        Returns:
+            None.
+        """
         deactivate(self)
 
     @contextmanager
     def activated(self):
+        """Use this file opener within a with block.
+
+        Returns:
+            A context manager that yields this context and restores the previous opener
+            on exit.
+        """
         self.enable()
         try:
             yield self
@@ -578,5 +734,13 @@ def _decode_keystore(
 
 
 def decode_keystore(raw: bytes, password: str | None = None) -> list[bytes]:
-    """Decode a bounded captured KS01/plain legacy store without filesystem I/O."""
+    """Read captured legacy key-store bytes without opening a file.
+
+    Args:
+        raw: Complete legacy store bytes, including the salt.
+        password: Master password for KS01 input. Plain stores do not need it.
+
+    Returns:
+        The decoded file keys.
+    """
     return _decode_keystore(raw, password)[0]

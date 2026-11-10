@@ -17,6 +17,14 @@ _CONTEXT_LOCK = threading.RLock()
 
 
 def request_password(prompt: str) -> str:
+    """Read a password from a terminal without showing it.
+
+    Args:
+        prompt: Text shown before reading the password.
+
+    Returns:
+        The entered password. Non-interactive input raises InteractionRequired.
+    """
     if not sys.stdin.isatty():
         raise InteractionRequired()
     return getpass.getpass(prompt)
@@ -32,7 +40,11 @@ def _terminal_password(request: PasswordRequest) -> str:
 
 
 def default_context() -> EncryptedIOContext:
-    """Lazy standalone context; independent consumers construct their own."""
+    """Get or create the shared context used by standalone helpers.
+
+    Returns:
+        The shared EncryptedIOContext. This call does not install it as builtins.open.
+    """
     global _CONTEXT
     with _CONTEXT_LOCK:
         if _CONTEXT is None:
@@ -69,7 +81,11 @@ def default_context() -> EncryptedIOContext:
 
 
 def enable_encrypted_io() -> EncryptedIOContext:
-    """Activate standalone reads; repeated activation by the same owner is safe."""
+    """Enable encrypted reads through the standalone context.
+
+    Returns:
+        The active EncryptedIOContext. Repeated calls by the same owner are allowed.
+    """
     with _CONTEXT_LOCK:
         context = default_context()
         if not context.active:
@@ -78,6 +94,11 @@ def enable_encrypted_io() -> EncryptedIOContext:
 
 
 def disable_encrypted_io() -> None:
+    """Restore the opener used before standalone encrypted reads.
+
+    Returns:
+        None.
+    """
     with _CONTEXT_LOCK:
         if _CONTEXT is None:
             raise ActivationConflict()
@@ -85,6 +106,11 @@ def disable_encrypted_io() -> None:
 
 
 def unlock_keystore() -> None:
+    """Prepare and unlock the standalone context's key store.
+
+    Returns:
+        None.
+    """
     default_context().unlock_keystore()
 
 
@@ -96,6 +122,18 @@ def encrypt_file(
     inplace: bool = False,
     add_to_keystore: bool = False,
 ) -> Path:
+    """Encrypt a file through the standalone context.
+
+    Args:
+        src: Path of the source file.
+        password: File password. None requests a password through the input callback.
+        dst: Output path. None uses the source path with .enc added.
+        inplace: If True, replace the source file instead of writing to dst.
+        add_to_keystore: Whether to save the file key for later reads.
+
+    Returns:
+        The path of the encrypted output file.
+    """
     return default_context().encrypt_file(
         src,
         password=password,
@@ -113,6 +151,18 @@ def decrypt_file(
     inplace: bool = False,
     use_keystore: bool = False,
 ) -> Path:
+    """Decrypt a file through the standalone context.
+
+    Args:
+        src: Path of the encrypted source file.
+        password: File password. None uses key lookup or the input callback.
+        dst: Output path. None uses the source path with a .dec suffix.
+        inplace: If True, replace the source file instead of writing to dst.
+        use_keystore: Whether saved keys can be used when no password is given.
+
+    Returns:
+        The path of the decrypted output file.
+    """
     return default_context().decrypt_file(
         src, password=password, dst=dst, inplace=inplace, use_keystore=use_keystore
     )
@@ -121,6 +171,17 @@ def decrypt_file(
 def encrypt_data(
     data: str | bytes, *, password: str | None = None, add_to_keystore: bool = True
 ) -> tuple[str, str]:
+    """Encrypt bytes or text through the standalone context.
+
+    Args:
+        data: Bytes or text to encrypt. Text is encoded as UTF-8.
+        password: File password. None creates a random password when key saving is
+            enabled.
+        add_to_keystore: Whether to save the key for later reads.
+
+    Returns:
+        A pair containing base64 encrypted text and the password used.
+    """
     return default_context().encrypt_data(
         data, password=password, add_to_keystore=add_to_keystore
     )
@@ -129,6 +190,16 @@ def encrypt_data(
 def decrypt_data(
     encrypted: str, *, password: str | None = None, use_keystore: bool = True
 ) -> str:
+    """Decrypt base64 input through the standalone context.
+
+    Args:
+        encrypted: Base64 text containing encrypted data.
+        password: Optional file password. Without it, saved keys may be used.
+        use_keystore: Whether to allow saved keys when no password is given.
+
+    Returns:
+        Decrypted text for a supported container, otherwise the original input string.
+    """
     return default_context().decrypt_data(
         encrypted, password=password, use_keystore=use_keystore
     )

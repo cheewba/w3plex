@@ -11,7 +11,7 @@ from aiohttp_socks import ProxyConnector as _ProxyConnector
 from w3ext import Chain, Currency, CurrencyAmount, Token, TokenAmount
 
 from ...security import ISecretRef
-from ...security.refs import safe_call
+from ...security.diagnostics import private_call
 from ..module import ModuleError
 from .constants import (
     AWAILABLE_CHAINS_API_URL,
@@ -29,6 +29,7 @@ OPEN_API_URL = "https://pro-openapi.debank.com/v1"
 class ProxyConnector(_ProxyConnector):
     @classmethod
     def from_url(cls, url: str, **kwargs: Any) -> "ProxyConnector":
+        """Create a proxy connector. Use remote DNS for socks5h URLs."""
         rdns = False
         if url.startswith("socks5h://"):
             rdns = True
@@ -43,6 +44,7 @@ class _DebankExt[TC: Currency](CurrencyAmount[TC]):
 
     @property
     def usd_price(self):
+        """Return the total USD value, rounded to two decimal places."""
         return round(self.to_fixed() * self.price, 2)
 
     def _new_amount(self: Self, amount: int | str) -> Self:
@@ -82,6 +84,7 @@ class Debank:
         self._official_chains: dict[str, Chain] | None = None
 
     async def close(self):
+        """Close the HTTP session without clearing the saved config."""
         if self._session is not None:
             await self._session.close()
             self._session = None
@@ -93,6 +96,7 @@ class Debank:
         await self.close()
 
     async def get_session(self) -> aiohttp.ClientSession:
+        """Get the current HTTP session, or create one if needed."""
         if self._session is None or self._session.closed:
             connector = ProxyConnector.from_url(self._proxy) if self._proxy else None
             self._session = aiohttp.ClientSession(connector=connector)
@@ -100,6 +104,7 @@ class Debank:
 
     @classmethod
     def account_link(cls, address: str):
+        """Return the DeBank profile URL for an address."""
         return PROFILE_PAGE.format(address=address)
 
     async def _format_balance_output(
@@ -173,7 +178,7 @@ class Debank:
             raise ModuleError("debank: access_key is required for the DeBank OpenAPI")
         reference = self.access_key
         access_key = (
-            safe_call(lambda: reference.ref(silent=True))
+            private_call(lambda: reference.ref(silent=True))
             if isinstance(reference, ISecretRef)
             else reference
         )
@@ -186,6 +191,7 @@ class Debank:
             return await response.json()
 
     async def get_request_headers(self, method, url, headers=None, **kwargs) -> dict:
+        """Build default request headers and apply the caller's changes."""
         return {
             "User-Agent": USER_AGENT,
             "Referer": "https://debank.com/",
@@ -205,6 +211,7 @@ class Debank:
         cached_only: bool = False,
         chains_filter: Callable[[Chain], bool] | None = None,
     ) -> dict["Chain", list[EstimatedCurrencyAmount | EstimatedTokenAmount]]:
+        """Return native and token balances, grouped by chain."""
         address = str(address).lower()
 
         if self.access_key:
@@ -265,11 +272,13 @@ class Debank:
         return result
 
     async def get_nft(self, address: str) -> list:
+        """Return NFT holdings for an address through the official API."""
         return await self._official_request(
             "user/all_nft_list", id=str(address).lower(), is_all="true"
         )
 
     async def get_projects(self, address: str) -> list:
+        """Return protocol positions for an address through the official API."""
         return await self._official_request(
             "user/all_complex_protocol_list", id=str(address).lower()
         )

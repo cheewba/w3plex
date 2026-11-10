@@ -1,4 +1,4 @@
-"""Config parsing without CLI imports, process environment changes or factories."""
+"""Read config data without importing the CLI or creating configured objects."""
 
 import io
 import os
@@ -12,8 +12,8 @@ from ruamel import yaml
 from w3plex.config.yaml import Dumper, Loader
 
 from ..security import ISecretRef
+from ..security.diagnostics import private_call
 from ..security.errors import InvalidStore, PermissionDenied
-from ..security.refs import safe_call
 from ..utils.dist import AttrDict
 
 Opener = Callable[..., TextIO]
@@ -34,10 +34,20 @@ def load_config(
     environment: Mapping[str, str],
     include_encoding: str | None = "utf-8",
 ) -> dict[str, Any]:
-    """Read trusted legacy YAML as data. Includes use the same explicit inputs.
+    """Read trusted YAML without running configuration factories.
 
-    This function does not instantiate YAML factories. Model-provided settings
-    must be validated separately against an application schema before use.
+    Includes use the same opener and environment. Validate untrusted settings before
+    using them as application configuration.
+
+    Args:
+        filename: Path of the root YAML file.
+        opener: Open-compatible function used for the root file and its includes.
+        environment: Variable names and text values used for expansion. Unknown names
+            stay unchanged.
+        include_encoding: Encoding for included files. None uses the system default.
+
+    Returns:
+        The config as a dictionary.
     """
     path = os.path.abspath(filename)
     env = dict(environment)
@@ -62,10 +72,15 @@ def load_config(
 def create_config(
     filename: str | Path, values: Mapping[str, Any], *, opener: Opener
 ) -> Path:
-    """Create a trusted public config exclusively; never replace an existing file.
+    """Create a config file without replacing an existing file.
 
-    The caller supplies public values and owns parent-directory creation.
-    Exclusive mode also rejects dangling symlinks and races with other creators.
+    Args:
+        filename: Path of the new file. Its parent directory must already exist.
+        values: Public config values to write as YAML.
+        opener: Open-compatible function used to create the file in exclusive mode.
+
+    Returns:
+        The path of the created file.
     """
     path = Path(filename)
     rendered = yaml.dump(dict(values), Dumper=Dumper)
@@ -81,12 +96,19 @@ def load_reference_config(
     filename: str | Path = "w3plex.yaml",
     includes: Mapping[str | Path, ISecretRef[bytes]] | None = None,
 ) -> AttrDict:
-    """Read optional captured YAML through the existing configuration loader.
+    """Read YAML from captured bytes instead of opening source files.
 
-    Includes must be preloaded explicitly; this function never reads a source
-    path from disk. Constructor names, paths and object references stay ordinary
-    strings. External-file readers obtain references separately. Parsed config
-    is private service data; Python parser objects cannot be reliably erased.
+    All includes must be provided in advance. The parsed config may contain private data
+    and remains in normal Python memory.
+
+    Args:
+        source: Reference to the root YAML bytes.
+        environment: Variable names and text values used for expansion.
+        filename: Source name used to resolve include paths. This file is not opened.
+        includes: Optional mapping from include paths to captured byte references.
+
+    Returns:
+        Config data with attribute access and the original include path information.
     """
 
     def operation():
@@ -118,4 +140,4 @@ def load_reference_config(
 
         return cast(AttrDict, bind(values))
 
-    return safe_call(operation)
+    return private_call(operation)

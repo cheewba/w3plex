@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from cryptography.exceptions import UnsupportedAlgorithm
 
-from w3plex.security import crypto, file_format as codec, vault_format
+from w3plex.security import _crypto as crypto, file_format as codec, vault_format
 from w3plex.security.errors import (
     AuthenticationFailed,
     InvalidStore,

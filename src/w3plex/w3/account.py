@@ -12,8 +12,8 @@ from hexbytes import HexBytes
 from w3ext import Account as LegacyAccount
 
 from ..security import ISecretRef
+from ..security.diagnostics import private_call
 from ..security.errors import InvalidStore
-from ..security.refs import safe_call
 
 
 def _key(value: Any) -> bytes | str:
@@ -50,10 +50,10 @@ def _message(data: bytes | str | Mapping) -> SignableMessage:
 
 
 class Account(LegacyAccount):
-    """Retain a ISecretRef instead of a LocalAccount for protected keys.
+    """Keep an ISecretRef instead of a LocalAccount for protected keys.
 
-    Ordinary string construction retains w3ext behavior. These are trusted local
-    objects, not agent proxies; Cryptopal must authorize final signing inputs.
+    Normal keys keep the w3ext behavior. These objects belong in trusted code. The host
+    must approve the inputs before signing.
     """
 
     def __init__(self):
@@ -62,29 +62,56 @@ class Account(LegacyAccount):
 
     @classmethod
     def from_key(cls, key: str | ISecretRef) -> Self:
+        """Create an account and read its key to calculate the address.
+
+        Args:
+            key: A normal key value or an ISecretRef. A reference is kept for later
+                signing.
+
+        Returns:
+            The new Account. Referenced keys are read again for each signature.
+        """
         if not isinstance(key, ISecretRef):
             return cast(Self, super().from_key(key))
+
         instance = cls()
         instance._reference = key
         del instance._acc
-        instance.address = safe_call(
+        instance.address = private_call(
             lambda: EthAccount.from_key(_key(key.ref(silent=True))).address
         )
         return instance
 
     @property
     def key(self) -> bytes | ISecretRef:
+        """Get the normal key bytes or the stored reference.
+
+        Returns:
+            Key bytes for a normal account, or the original ISecretRef without reading
+            it.
+        """
         return self._reference if self._reference is not None else self._acc.key
 
     def _local[T](self, function: Callable[[LocalAccount], T]) -> T:
         if self._reference is None:
             return function(self._acc)
+
+        # Reference-backed accounts do not cache the temporary local signer.
         reference = self._reference
-        return safe_call(
+
+        return private_call(
             lambda: function(EthAccount.from_key(_key(reference.ref(silent=True))))
         )
 
     def sign_message(self, message: SignableMessage) -> SignedMessage:
+        """Sign a prepared message with the current key.
+
+        Args:
+            message: A SignableMessage prepared for eth_account.
+
+        Returns:
+            The SignedMessage, including its signature.
+        """
         return self._local(lambda account: account.sign_message(message))
 
     def sign_transaction(
@@ -92,6 +119,15 @@ class Account(LegacyAccount):
         transaction_dict: Mapping[str, Any],
         blobs: Sequence[bytes | HexBytes] | None = None,
     ) -> SignedTransaction:
+        """Sign a transaction and optional blob data.
+
+        Args:
+            transaction_dict: Transaction fields accepted by eth_account.
+            blobs: Optional blob data for a blob transaction.
+
+        Returns:
+            The SignedTransaction, including its signed bytes.
+        """
         transaction = dict(transaction_dict)
         return self._local(
             lambda account: account.sign_transaction(
@@ -102,6 +138,15 @@ class Account(LegacyAccount):
     async def sign(
         self, data: bytes | str | Mapping, hex_only=True
     ) -> SignedMessage | HexBytes:
+        """Sign text, bytes or EIP-712 typed data.
+
+        Args:
+            data: Message bytes, text, hex text, a typed-data mapping or its JSON form.
+            hex_only: If True, return only the signature.
+
+        Returns:
+            The signature as HexBytes, or a SignedMessage when hex_only is False.
+        """
         if self._reference is None:
             return await super().sign(data, hex_only=hex_only)
         signed = self.sign_message(_message(data))
