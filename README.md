@@ -9,10 +9,9 @@ The included balance application reads public wallet addresses and displays
 native-token or ERC-20 balances. You can also write your own Python applications,
 use the interactive shell, and share configured chains, clients, and proxies.
 
-Version 0.1 moves file encryption to `w3plex.security` and removes `w3plex.secure`.
-Existing encrypted files and CLI commands remain supported. Scripts must update
-their imports and explicitly enable transparent reads; see
-[the migration guide](docs/security-migration.md).
+Use `w3plex.security` to encrypt files or keep sensitive values in a vault. See
+[file encryption](docs/file-encryption.md) and
+[secret references](docs/secret-references.md) for examples.
 
 ## Install
 
@@ -331,65 +330,23 @@ the display runs. The balance application uses the progress-bar plugin.
 Encryption commands work without an application config:
 
 ```sh
-# Prompt for a file password and create wallets.txt.enc:
-w3plex encrypt wallets.txt
-# Also remember the file key in the encrypted keystore:
+# Create wallets.txt.enc and enter its password privately:
+w3plex encrypt wallets.txt --password
+# Save the file key for later reads:
 w3plex encrypt wallets.txt --add
-# Decrypt to a chosen destination:
-w3plex decrypt wallets.txt.enc --output restored-wallets.txt
-# Try a key from the keystore:
+# Read a saved key and choose the decrypted output path:
 w3plex decrypt wallets.txt.enc --keystore --output restored-wallets.txt
 ```
 
-`--overwrite` replaces the source in place. Without an output path, encryption
-adds `.enc` and decryption replaces the final suffix with `.dec`. Glob patterns
-and multiple sources are supported; `--output` accepts exactly one source.
+Use `--overwrite` to replace the source. Without an output path, encryption adds
+`.enc` and decryption replaces the final suffix with `.dec`. `--output` accepts
+one source file; glob patterns and multiple sources work without that option.
 
-When the CLI reads an encrypted config or input file, it decrypts it in memory
-and prompts as needed. One file-key store serves both ENC1 and W3FILE1 files.
-Its default path is `~/.keystore.bin`, selected by `W3PLEX_KEYSTORE`.
-`W3PLEX_SECRET_STORE` is an optional alias for an explicitly selected path.
-If both variables are set, they must select the same path. Master passwords
-are separate from file passwords and are never written to disk.
-Transparent reads allow three password attempts and report the remaining
-count after each incorrect master or file password. Cancelling stops the read.
-
-Unlocking an old KS01 store automatically upgrades it in place. The usual
-private master-password prompt is the only interaction: the same password
-protects the new vault. No migration command or extra confirmation is needed.
-Before atomic replacement, an exact encrypted copy is saved at
-`<keystore>.legacy.bak`. A plaintext legacy store needs a new master password
-and confirmation because it had no password; its backup is encrypted W3FILE1.
-No plaintext key copies or passwords are written to temporary files.
-
-Existing encrypted external files stay unchanged. After migration one unlock
-serves both formats, and the current context stays unlocked. Merely creating a
-context or reading a plain file does not upgrade the store. Explicit legacy
-source contexts keep their original import/interoperability behavior. Old
-w3plex readers can use the KS01 backup because they cannot read the modern vault.
-Wrong passwords and cancelled input leave the source intact. An unrelated
-backup is never overwritten. Keep it safe and move it out of the backup path
-before retrying. Interrupted migration is retryable; unlocking a modern store
-does not migrate or rewrite it. Missing stores are created in modern format.
-
-New encryption writes W3FILE1 with Argon2id and AES-256-GCM. The reader still
-accepts ENC1 files and KS01 keystores. A LegacyContext writer can produce old
-files when an old reader needs them. Existing encrypted inputs are not rewritten.
-
-w3plex does not enforce filesystem owner, access modes or ACL policy. Existing
-accessible directories work without chmod; applications can enforce their own
-policy through the storage backend. Atomic writes, bounded reads, identity
-checks and rejection of unsafe links remain active. Newly created files use
-conservative access modes, and plaintext is never written to temporary files.
-The experimental CiphertextFile(private=...) parameter has been removed.
-
-Use password prompts instead of putting passwords in shell history. Keep
-plaintext outputs, secret stores and credentials out of version control.
+See [file encryption](docs/file-encryption.md) for Python examples, encrypted
+`open()` and key-store settings. For values stored behind references, see
+[secret references](docs/secret-references.md).
 
 ## Other modules
-
-The Odos provider has been removed. Remove `w3plex.modules.odos` and
-`w3plex.w3.Odos` imports and Odos configuration entries from existing scripts.
 
 `TokenLookup`, `ContractLookup`, and `ContractMethodLookup` in `w3plex.utils.filter`
 resolve `chain:token`, `chain:address`, and `chain:address:method` templates against

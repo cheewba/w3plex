@@ -1,129 +1,82 @@
-# Encrypted external-file format
+# W3FILE1 file format
 
-`W3FILE1` stores one authenticated text or binary payload. It differs from
-`W3VAULT1`, which stores records and metadata. The low-level codec is in
-`w3plex.security.file_format`. The explicit `EncryptedIOContext` recognizes
-ordinary files, ENC1 and W3FILE1. Default security helpers and CLI encryption
-produce this format; decrypt detects modern and legacy external files.
+W3FILE1 stores the encrypted content of one text or binary file. Most
+applications use `encrypt_file()` and `decrypt_file()` from `w3plex.security`.
+See [file encryption](file-encryption.md) for examples.
 
-For trusted embedded code, establish process protection before requesting a
-modern file password:
+Use `w3plex.security.file_format` when working directly with the container:
 
 ```python
-from w3plex.security import EncryptedIOContext
-from w3plex.security.io import request_password
-from w3plex.security.memory import ProcessProtection
+from w3plex.security import file_format
 
-protection = ProcessProtection()
-protection.activate()
-context = EncryptedIOContext(
-    protection=protection,
-    input_handler=lambda request: request_password("Encrypted file password: "),
-)
-try:
-    with context.activated():
-        with open("data.enc", "rb") as stream:
-            value = stream.read()
-finally:
-    context.close()
+envelope, key = file_format.seal(data, password)
+encoded = envelope.serialize()
+parsed = file_format.parse(encoded)
+file_key = file_format.unwrap(parsed, password)
+plain = file_format.open_payload(parsed, file_key)
 ```
 
-Activation intercepts `builtins.open`; `io.open` and `Path.open` remain ordinary
-readers. Conflicting contexts are refused, and disabling restores the previous
-opener. Plain files, descriptors, pipes and write modes keep their existing
-behavior. Vaults and recognized unsupported file versions are refused.
-Contexts reuse modern file keys in owned locked buffers, up to 1024 cached keys.
-Locking clears those buffers and invalidates a pending password response.
-Ordinary returned bytes and strings remain plaintext after locking.
+`data` and `password` are bytes. The caller sets up process protection before
+handling secrets. `parse()` checks the layout and work limits; `open_payload()`
+checks authentication before returning the file content.
 
-Supply an existing generic `Vault` through `keystore=` to reuse encrypted file
-keys across process restarts. `persist_keys=True` remembers successfully
-authenticated file keys; the default keeps newly discovered keys in memory
-only. A locked keystore requests its master password through the same private
-input callback. A missing store requires master-password confirmation before
-creation. The master password is never saved. Modern keys do not enter KS01.
+## File layout
 
-With persistent keys, reopening needs the master password rather than every
-individual file password. Without persistence, repeated reads still reuse
-temporary owned keys. Locking either the context or its supplied vault clears
-these keys; a lock/unlock during file-password input invalidates that operation.
-Lock notifications coexist with the vault's primary host owner. The caller
-owns a supplied vault and closes it separately after closing the context.
-
-Standalone contexts can use keystore_path instead of a supplied vault. They
-prepare the private store lazily and close its owned descriptors at teardown.
-Without a supplied ProcessProtection, explicit modern operations activate and
-verify owned protection before input or secret use. Import, activation and plain
-reads do not do so. Native Windows modern operations are refused until required
-memory and storage support is implemented and verified.
-
-New ciphertext writes use checked atomic replacement and contain no plaintext
-temporary file. Explicit decrypt_file output is a direct final write, not an
-atomic plaintext replacement; an interruption can leave partial final plaintext.
-Both modes reject unsafe aliases and preserve source/output on authentication
-failure. See the [migration guide](security-migration.md) for defaults and paths.
-
-Checked replacement compares device, inode, size, mtime, ctime and a SHA-256
-fingerprint of the actual file bytes. Timestamps alone can collide on filesystems
-with coarse clock resolution. The writer checks the original target before
-replacement and verifies its temporary ciphertext against the requested bytes.
-Fingerprint reads are bounded by the configured file limit and use small chunks.
-
-`security.storage.FileIdentity` is a local protected-storage token. It now has a
-sixth `fingerprint` field. Prefer its named fields or keep the returned token
-intact; code unpacking five fields must migrate. Its original fields retain their
-names. This token is not part of any encrypted file format, and the change does
-not rewrite existing data or alter standalone file-helper signatures.
-
-The on-disk layout is:
-
-| Field | Bytes |
+| Field | Size |
 | --- | --- |
-| Magic `W3FILE1\n` | 8 |
-| Header length, unsigned big-endian integer | 4 |
-| JSON header | 1 to 4096 |
-| Wrapped file key, including GCM tag | 48 |
-| Encrypted file bytes, including GCM tag | 16 to 64 MiB + 16 |
+| Magic `W3FILE1\n` | 8 bytes |
+| Header length, unsigned big-endian integer | 4 bytes |
+| JSON header | 1 to 4096 bytes |
+| Encrypted file key, including its tag | 48 bytes |
+| Encrypted file content, including its tag | 16 bytes to 64 MiB + 16 bytes |
 
-The header has exactly these fields: `version`, `cipher`, `context`, `file_id`,
-`kdf`, `salt`, `wrap_nonce`, and `data_nonce`. Version is the integer `1`, cipher
-is `AES-256-GCM`, and context is `w3plex.file`. The file ID is 32 lowercase hex
-characters. Salt is 16 bytes; each nonce is 12 bytes. Binary header values use
-standard Base64. Duplicate JSON fields and non-finite numbers are rejected.
+The header contains exactly these fields:
 
-The KDF object has exactly `name`, `memory_kib`, `iterations`, and `lanes`.
-Name is `argon2id`. Defaults are 65536 KiB, three iterations and four lanes.
-The reader accepts 65536–262144 KiB, 3–10 iterations and 1–8 lanes. The password
-is 1–4096 bytes. Size and KDF checks precede expensive work.
+| Field | Value |
+| --- | --- |
+| `version` | Integer `1` |
+| `cipher` | `AES-256-GCM` |
+| `context` | `w3plex.file` |
+| `file_id` | 32 lowercase hex characters |
+| `salt` | 16 bytes, stored as standard Base64 |
+| `wrap_nonce` | 12 bytes, stored as standard Base64 |
+| `data_nonce` | 12 different bytes, stored as standard Base64 |
+| `kdf` | The key derivation settings below |
 
-Encryption creates a fresh random 32-byte file key. Argon2id derives a 32-byte
-wrapping key from the password and fresh salt. AES-256-GCM encrypts both the
-file key and the payload, with separate fresh nonces and full 128-bit tags.
-The writer refuses an equal wrapping and payload nonce.
+Repeated JSON field names and non-finite numbers such as NaN are rejected.
 
-For authenticated metadata, canonical JSON uses sorted keys, ASCII escaping,
-compact separators and no non-finite numbers. Associated data is:
+## Key derivation
 
-- Key wrapping: magic, `\0key\0`, canonical header.
-- Payload: magic, `\0file\0`, canonical header, wrapped file key.
+Argon2id creates a 32-byte password key using the password and salt. This key
+encrypts a random 32-byte file key. The file key encrypts the content.
 
-The displayed `\0` denotes a zero byte. Both steps authenticate all header
-fields. The payload also authenticates the wrapped key, including when the
-reader already has a cached file key. Wrong passwords or modified data return
-`AuthenticationFailed` without plaintext or a dependency exception chain.
-Missing algorithms return `UnsupportedProtection`; there is no weaker retry.
+The `kdf` object contains exactly `name`, `memory_kib`, `iterations` and `lanes`:
 
-The whole payload is authenticated before it is returned. This format supports
-any byte contents up to 64 MiB, without streaming or unauthenticated seeks.
-The codec makes temporary immutable Python and cryptography copies; it does
-not provide memory isolation, authorization or revocation of returned bytes.
-The host must establish its required process controls before handling secrets.
+| Setting | Default | Accepted values |
+| --- | --- | --- |
+| `name` | `argon2id` | `argon2id` |
+| `memory_kib` | 65536 | 65536 to 262144 |
+| `iterations` | 3 | 3 to 10 |
+| `lanes` | 4 | 1 to 8 |
 
-Earlier w3plex readers cannot read this format. ENC1 and KS01 retain their own
-format and algorithms; upgrading does not strengthen or rewrite old files.
-The fixed sample under `tests/fixtures/file-v1` uses public synthetic values
-and was generated independently with direct cryptography 45.0.7 calls.
+Passwords contain 1 to 4096 bytes. Size and work limits are checked before key
+derivation. Each AES-256-GCM step uses its own 12-byte nonce and a 16-byte tag.
+Encryption creates fresh keys, salt and nonces.
 
-See [cryptography 45.0.7 AEAD](https://cryptography.io/en/45.0.7/hazmat/primitives/aead/)
-and [Argon2id](https://cryptography.io/en/45.0.7/hazmat/primitives/key-derivation-functions/#argon2id).
-These references describe the primitives, not an audit of the container.
+## Data checked during decryption
+
+Both encryption steps check the header as associated data: bytes that are
+checked for changes but are not encrypted. Header JSON has sorted keys, ASCII
+escapes and no extra spaces.
+
+| Step | Associated data, joined in order |
+| --- | --- |
+| Encrypt the file key | Magic, `\0key\0`, header JSON |
+| Encrypt the content | Magic, `\0file\0`, header JSON, encrypted file key |
+
+`\0` means a zero byte. The content check also covers the encrypted file key,
+even when the reader already has a cached file key.
+
+Wrong passwords or changed encrypted data fail without returning plaintext.
+The whole content is checked before any part is returned. This format supports
+up to 64 MiB of content and does not provide streaming decryption.

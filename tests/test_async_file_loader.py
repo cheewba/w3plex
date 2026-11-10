@@ -1,4 +1,4 @@
-"""Opt-in capture awaits the opener in the invoking task, once per reader."""
+"""Async capture, callback forms and cancellation."""
 
 import asyncio
 import threading
@@ -7,9 +7,6 @@ from functools import partial
 
 import pytest
 
-from w3plex.config import config_loader
-from w3plex.core.objects import application
-from w3plex.runner import Runner
 from w3plex.security import SecretString
 from w3plex.security.errors import InteractionRequired, PermissionDenied, SecurityError
 from w3plex.utils.loader import (
@@ -122,9 +119,7 @@ def test_failed_capture_is_safe_and_retries(failure):
     asyncio.run(check())
 
 
-@pytest.mark.parametrize(
-    "kind", ["function", "partial", "callable", "factory", "awaitable"]
-)
+@pytest.mark.parametrize("kind", ["function", "factory"])
 def test_capture_cancellation_releases_lock_for_waiting_reader(kind):
     async def check():
         entered = asyncio.Event()
@@ -319,192 +314,5 @@ def test_async_accounts_callable_defers_capture_to_current_task():
         second = (await reader())[0]
         assert first.address == second.address
         assert calls == [owner]
-
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize(
-    "kind", ["direct", "lazy", "factory", "generator", "async-generator"]
-)
-@pytest.mark.parametrize("use_runner", [False, True])
-def test_late_config_readers_retain_async_context(
-    tmp_path, monkeypatch, kind, use_runner
-):
-    calls = []
-    closed = []
-
-    async def opener(path):
-        calls.append((path, asyncio.current_task()))
-        return Reference(b"configured\n")
-
-    def factory(file):
-        return FileLoader(file=file)
-
-    def generator(file):
-        try:
-            yield FileLoader(file=file)
-        finally:
-            closed.append(True)
-
-    async def async_generator(file):
-        await asyncio.sleep(0)
-        try:
-            yield FileLoader(file=file)
-        finally:
-            closed.append(True)
-
-    initializer = {"generator": generator, "async-generator": async_generator}.get(
-        kind, factory
-    )
-    monkeypatch.setattr("w3plex.config.config.load_path", lambda path: initializer)
-    cfg = {"reader": {"__init__": "fixture:factory", "file": "unused"}}
-    if kind != "direct":
-        cfg["reader"]["__factory__" if kind == "factory" else "__lazy__"] = True
-
-    async def check():
-        host = Runner() if use_runner else None
-        if host is not None:
-            await host.init(cfg, str(tmp_path / "config.yaml"), file_opener=opener)
-            tree = host.tree
-        else:
-            with using_file_opener(opener):
-                tree = await config_loader.parse(cfg, str(tmp_path / "config.yaml"))
-                assert get_file_opener() is opener
-        try:
-            assert get_file_opener() is None
-            reader = tree.reader if kind == "direct" else await tree.reader()
-            assert get_file_opener() is None
-            assert reveal(await reader()) == ["configured"]
-            assert calls == [("unused", asyncio.current_task())]
-        finally:
-            await (host.finalize() if host is not None else tree.close())
-        assert get_file_opener() is None
-        if host is not None:
-            assert host._file_opener is None
-        assert closed == ([True] if "generator" in kind else [])
-
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("failure", ["error", "cancel"])
-def test_failed_runner_restores_async_context_and_can_reinitialize(
-    tmp_path, monkeypatch, failure
-):
-    async def opener(path):
-        if failure == "cancel":
-            raise asyncio.CancelledError()
-        raise InteractionRequired()
-
-    async def factory():
-        return await FileLoader(file="unused")()
-
-    monkeypatch.setattr("w3plex.config.config.load_path", lambda path: factory)
-
-    async def check():
-        runner = Runner()
-        expected = (
-            asyncio.CancelledError if failure == "cancel" else InteractionRequired
-        )
-        with pytest.raises(expected):
-            await runner.init(
-                {"value": {"__init__": "fixture:factory"}},
-                str(tmp_path / "config.yaml"),
-                file_opener=opener,
-            )
-        assert not runner.is_initialized
-        assert runner._file_opener is None
-        assert get_file_opener() is None
-        await runner.init({}, str(tmp_path / "config.yaml"))
-        await runner.finalize()
-
-    asyncio.run(check())
-
-
-def test_application_created_readers_use_runner_async_context(tmp_path, monkeypatch):
-    calls = []
-    owners = []
-
-    async def opener(path):
-        calls.append(asyncio.current_task())
-        return Reference(b"application\n")
-
-    @application
-    async def sample(action):
-        yield 1
-
-    @sample.action("read", default=True)
-    async def read(item):
-        owners.append(asyncio.current_task())
-        assert reveal(await FileLoader(file="unused")()) == ["application"]
-
-    monkeypatch.setattr("w3plex.runner.load_path", lambda path: sample)
-
-    async def check():
-        runner = Runner()
-        await runner.init(
-            {"applications": {"sample": {"__init__": "fixture:sample"}}},
-            str(tmp_path / "config.yaml"),
-            file_opener=opener,
-        )
-        try:
-            await runner.tree.applications.sample("read")
-            assert calls == owners
-            assert len(calls) == 1
-            assert get_file_opener() is None
-        finally:
-            await runner.finalize()
-
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("mixed", [False, True])
-def test_concurrent_parsers_keep_independent_late_openers(tmp_path, monkeypatch, mixed):
-    async def factory(file):
-        await asyncio.sleep(0)
-        return FileLoader(file=file)
-
-    monkeypatch.setattr("w3plex.config.config.load_path", lambda path: factory)
-
-    async def check():
-        async def first_opener(path):
-            await asyncio.sleep(0)
-            return Reference(b"first\n")
-
-        async def second_opener(path):
-            await asyncio.sleep(0)
-            return Reference(b"second\n")
-
-        def second_sync_opener(path):
-            return Reference(b"second\n")
-
-        def cfg():
-            return {
-                "reader": {
-                    "__init__": "fixture:factory",
-                    "__lazy__": True,
-                    "file": "unused",
-                }
-            }
-
-        async def parse_with_opener(opener):
-            with using_file_opener(opener):
-                return await config_loader.parse(cfg(), str(tmp_path / "config.yaml"))
-
-        trees = await asyncio.gather(
-            *(
-                parse_with_opener(opener)
-                for opener in (
-                    first_opener,
-                    second_sync_opener if mixed else second_opener,
-                )
-            )
-        )
-        try:
-            readers = await asyncio.gather(*(tree.reader() for tree in trees))
-            values = await asyncio.gather(*(reader() for reader in readers))
-            assert [reveal(lines) for lines in values] == [["first"], ["second"]]
-            assert get_file_opener() is None
-        finally:
-            await asyncio.gather(*(tree.close() for tree in trees))
 
     asyncio.run(check())

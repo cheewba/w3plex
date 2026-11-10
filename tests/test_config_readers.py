@@ -1,4 +1,4 @@
-"""Existing YAML factories and external-file reads before protected-mode edits."""
+"""YAML factories, relative data files and object references."""
 
 import asyncio
 import base64

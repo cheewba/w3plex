@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import w3ext
 
+from w3plex import w3
 from w3plex.security import ISecretRef, SecretString
 from w3plex.security.errors import PermissionDenied, SecurityError
 from w3plex.w3 import Debank
@@ -63,3 +65,8 @@ def test_independent_reference_failure_has_no_private_exception_chain(failure):
     assert VALUE not in str(caught.value) and VALUE not in repr(caught.value)
     assert caught.value.__context__ is None and caught.value.__cause__ is None
     client._api_request.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["Chain", "Token", "Currency", "CurrencyAmount"])
+def test_unadapted_exports_keep_identity(name):
+    assert getattr(w3, name) is getattr(w3ext, name)

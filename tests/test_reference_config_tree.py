@@ -5,11 +5,13 @@ import base64
 import hashlib
 from copy import deepcopy
 
+import pytest
 from cryptography.fernet import Fernet
 
 from w3plex.config import config_loader
 from w3plex.config.reading import load_reference_config
 from w3plex.security import ISecretRef
+from w3plex.security.errors import PermissionDenied
 from w3plex.security.legacy import LegacyContext
 from w3plex.utils.loader import using_file_opener
 
@@ -97,3 +99,11 @@ def test_enc1_yaml_capture_survives_original_removal(secret_store, tmp_path):
             await tree.close()
 
     asyncio.run(check())
+
+
+def test_config_include_cannot_read_unregistered_file(secret_store, tmp_path):
+    private = tmp_path / "private.yaml"
+    private.write_text("api_key: PUBLIC-TEST-other-value\n")
+    source = secret_store.capture(f"debank: !include {private}\n".encode())
+    with pytest.raises(PermissionDenied):
+        load_reference_config(source, environment={})

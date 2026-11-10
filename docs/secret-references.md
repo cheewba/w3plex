@@ -1,37 +1,17 @@
-# Protected data and reference-aware consumers
+# Secret references
 
-`w3plex.security` protects arbitrary data. It provides encrypted storage, native
-owned buffers, immutable snapshots and local references. Application permissions,
-agent sessions, private dialogs and RPC contracts belong to Cryptopal.
+Use `SecretStore` to save encrypted copies of values and read them later through
+references. A reference keeps a record ID or a path to part of a value. It does
+not keep the decrypted value between calls.
 
-## One reference protocol
+A reference backed by a `Vault` can be read only while that vault is unlocked.
+Your application handles passwords, user confirmation and permission checks.
 
-```python
-from typing import Protocol, runtime_checkable
+## Open a store
 
-@runtime_checkable
-class ISecretRef[T](Protocol):
-    def ref(self, *, silent: bool = False) -> T: ...
-```
-
-Consumers accept this protocol, including independent implementations. Runtime
-`isinstance(value, ISecretRef)` checks members, not signatures, return types or
-trusted provenance. An implementation is responsible for its own protection.
-There is no `use()` API or shared concrete reference base.
-
-Stored references return bytes. `SecretString` holds a parent, a byte offset,
-length and encoding. `SecretJson[T]` holds a parent and a JSON path. Both live in
-`w3plex.security.adapters` and are also exported by `w3plex.security`. They keep
-extraction metadata, never decoded values. Nested adapters forward the disclosure
-warning to the source once. The callback receives only the snapshot identifier.
-
-Wallet/credential ID DTOs
-are separate application types in `cryptopal.runtime.contracts`.
-
-## Capture once and resolve when needed
-
-The trusted host supplies a password and a confirmation handler. It explicitly
-activates process protection before creating or unlocking a store:
+In this example, `master_password` is bytes received through private input.
+`confirm_disclosure(request)` asks whether the value may be shown and returns
+`True` only after approval.
 
 ```python
 from pathlib import Path
@@ -44,147 +24,118 @@ protection = ProcessProtection()
 protection.activate()
 directory = Path.cwd() / ".secrets"
 directory.mkdir(mode=0o700, exist_ok=True)
-vault = Vault(CiphertextFile(directory / "vault"), protection=protection)
-# First setup only; create refuses to overwrite an existing store.
-vault.create(master_password)
+vault = Vault(CiphertextFile(directory / "data.vault"), protection=protection)
+if not vault.path.exists():
+    vault.create(master_password)
 vault.unlock(master_password)
 store = SecretStore(vault, confirm=confirm_disclosure)
+```
+
+Create process protection at application startup, before private input. On
+macOS, activating it while a debugger is attached can end the process. Keep the
+vault open while using the following examples, and close it when finished.
+
+## Save and read a value
+
+```python
 source = store.capture_file("credentials.json")
-key = SecretJson[str](source, ("debank", "api_key"))
+api_key = SecretJson[str](source, ("debank", "api_key"))
+value = api_key.ref()
 ```
 
-Capture encrypts and commits the input before returning a reference. It rejects
-unsafe source links and changes during capture. Replacing or deleting the source
-does not change an existing reference. A new capture has a new identifier.
+`capture_file()` saves a copy of the file. Later changes to the source do not
+change that copy. `capture(value)` saves bytes supplied by your application.
+Each saved value gets its own ID.
 
-`ref()` requests confirmation by default. Missing interaction, refusal or a
-lock/reunlock during confirmation returns a fixed error without the value.
-`ref(silent=True)` deliberately skips that warning; the store must still be
-unlocked. w3plex has no application permission callback. Cryptopal checks its
-own policy before calling a consumer and exposes neither local handles nor the
-silent option to a model.
+`ref()` asks for confirmation before returning ordinary Python data. Use
+`ref(silent=True)` when trusted application code needs the value without a
+prompt. This does not unlock the vault or grant permission to read it.
+
+| Reference | Value returned by ref() |
+| --- | --- |
+| `StoredSecret` | The saved bytes |
+| `SecretString(parent, offset, length)` | Text decoded from a byte range |
+| `SecretJson(parent, path)` | The JSON value at the given path |
+
+Offsets and lengths count bytes, not text characters. `SecretString` uses UTF-8
+by default. `SecretJson` accepts dictionary keys and list indexes.
+
+To use another storage backend, implement `ISecretRef[T]` with a
+`ref(*, silent=False) -> T` method. Each backend is responsible for its access
+checks.
+
+## Read encrypted sources
+
+Pass an `EncryptedIOContext` when the source file is encrypted. The application
+provides `read_private_password(request)`, returning the requested password.
 
 ```python
-value = key.ref()  # The caller receives ordinary plaintext after confirmation.
-vault.lock()
-vault.unlock(master_password)
-assert key.ref(silent=True) == value
-```
-
-To reopen a snapshot, save its identifier and call `store.reference(identifier)`
-after reopening/unlocking the same vault. Child adapters can be reconstructed
-with their parent and fixed offset/path. Reopening does not read the source file.
-Explicitly returned plaintext cannot be revoked by a later lock.
-
-## Keep the existing YAML workflow
-
-YAML still names constructors, parameters, paths and `$...` object references.
-Protected values come from external data files, not from wrapping every YAML
-string. For example, the existing account factory remains:
-
-```yaml
-accounts:
-  main:
-    __init__: w3plex.utils.loader:accounts_loader
-    file: keys.enc
-```
-
-Enable protection on the existing Runner or config-tree parser:
-
-```python
-from functools import partial
-from w3plex.config import load_config
-from w3plex.runner import Runner
 from w3plex.security import EncryptedIOContext
 
 context = EncryptedIOContext(
-    protection=protection, input_handler=read_private_password,
+    protection=protection,
+    input_handler=read_private_password,
     keystore=vault,
-    legacy_keystore_path="keystore.bin",
 )
-cfg = load_config("w3plex.yaml", opener=context.open, environment={})
-runner = Runner()
-await runner.init(
-    cfg, "w3plex.yaml",
-    file_opener=partial(store.capture_file, context=context),
-)
-accounts = await runner.tree.accounts.main()
+source = store.capture_file("credentials.enc", context=context)
 ```
 
-The host activates the supplied process protection before private input.
-The same context recognizes ENC1 and W3FILE1. capture_file uses the named
-context parameter; the earlier experimental legacy keyword is removed.
-A modern source requires EncryptedIOContext and cannot fall back to a legacy-only
-reader or plaintext capture. Captured plaintext values are limited to 1 MiB.
+The context reads ENC1 and W3FILE1 sources. Close it before closing the borrowed
+vault. For configured readers and lazy factories, see
+[file loaders](async-file-capture.md).
 
-The host approves sources and handles private input. Readers capture the opener
-when constructed; deferred factories and separate async runners keep their own
-opener. An external file is captured on first read, once even with concurrent
-reads. Locked/denied reads never fall back to ordinary plaintext. Plain readers
-still reopen their file on each call. Includes preserve relative source paths.
+If the YAML config itself is captured, use
+`w3plex.config.load_reference_config(source, environment={}, filename=path)`.
+Supply captured include files through `includes={path: reference}`. This reader
+does not open include paths from disk.
 
-`FileLoader(file=reference)` produces line references with the existing BOM,
-comment, whitespace and filter rules. Account factories produce adapted accounts
-for referenced keys and legacy accounts for plain strings. Address readers
-validate privately and return public checksummed addresses. Generic transforms
-must support references explicitly.
-
-Optional encrypted YAML uses `load_reference_config` with approved captured
-include sources. Constructor names, paths, `$...` references and include metadata
-remain ordinary config values. The standalone CLI delegates to the same config
-reader and supplies its legacy opener, environment and include encoding.
-File encryption now lives in security; `secure.py` is removed in 0.1.0.
-See [the migration guide](security-migration.md) for replacement imports and
-explicit transparent-read activation.
-
-## SDK objects retain references
+## Use references in SDK objects
 
 ```python
 from w3plex.w3 import Account, Debank
 
 account = Account.from_key(SecretString(store.capture_file("key.txt")))
-debank = Debank(access_key=key)
+client = Debank(access_key=api_key)
 ```
 
-Account keeps the reference and public address, without a retained plaintext key
-or signing account. It resolves the reference with `ref(silent=True)` during use.
-DeBank resolves its access key when constructing per-request headers.
-Their ordinary string arguments retain existing behavior. Unchanged w3ext
-classes remain re-exported by identity. Unsupported consumers require explicit
-retrieval through `ref()` before passing a plain value.
+Here, `key.txt` contains a hex private key. The account reads it to calculate
+the address, then reads it again for each signature. DeBank reads its API key
+when preparing a request. Close the DeBank client with `await client.close()`
+when finished. Other SDK consumers may need a normal value from `ref()`.
 
-These SDK objects have no agent permissions or destination policy. Cryptopal
-owns guarded signing/HTTP/RPC, one-use approvals, inactivity and private input.
-Its trusted registry classifies records and binds references to application ID
-DTOs; the generic vault treats record metadata as opaque data.
+## Lock, reopen and remove records
 
-## Compatibility and limits
+```python
+vault.lock()
+vault.unlock(master_password)
+value = api_key.ref(silent=True)
+```
 
-Existing CLI entry points, transparent plain/ENC1 reads and KS01 stores remain.
-New library imports do not enable encrypted `open()` or change process policy.
-Explicit process protection lowers core limits irreversibly. On macOS it also
-uses `PT_DENY_ATTACH` to reject debugger attachment. Activating it in an already
-traced process terminates that process under the native API. Debug ordinary
-standalone code without activating this mode; protected hosts must keep it
-enabled before private input. This does not block privileged full-memory snapshots.
-Legacy contexts require explicit activation. Original files are not rewritten;
-old vault records remain readable by the generic storage engine. Experimental
-policy modules moved to `cryptopal.runtime`; their old library aliases are gone.
+Locking blocks later reads. It cannot remove data already returned to a caller.
+To reopen a saved reference in another run, keep its `identifier`, open the same
+vault and call `store.reference(identifier)`. Build text or JSON references from
+that parent again; the source file is not read.
 
-Lock the vault and any legacy contexts on session end. The host controls idle
-locking. Legacy caches contain Python key copies; locking them clears their
-references but does not prove erasure of every dependency copy.
+`vault.reload()` loads changes written by another vault instance. It keeps
+unchanged references usable. If another instance changed the master password,
+unlock with the new password instead.
 
-A captured value can contain up to 1 MiB. A vault file can contain up to 8 MiB.
-Adapters use standard Python paths and encoding names. They do not set a custom
-limit on nesting. A byte range must fit the value read from the store. Before
-returning any part of a value, AEAD checks the complete encrypted payload.
-Selecting a range does not skip this check.
+`vault.delete_entries([identifier])` removes records and returns the removed
+IDs. Other open instances see the deletion after reload or unlock. It does not
+erase earlier copies of the encrypted file or data already returned to callers.
 
-Native owned buffers are cleared after use, but Python parsers, cryptography,
-signing and HTTP/TLS dependencies create temporary copies. A reference protocol
-or callback cannot prevent a trusted consumer from retaining plaintext. No
-immunity to privileged full-memory snapshots or expiry of captured keys is
-promised. Native Windows storage/memory controls and the full dump-collector
-matrix still require implementation and verification. Import/type/unit checks
-are not evidence of completed Cryptopal CLI, RPC or sandbox isolation.
+## Close resources and understand the limits
+
+Close SDK clients first, then `context.close()` and `vault.close()`. Use
+`try`/`finally` in application code so this also happens on failure. A context
+closes a vault opened from its own path; a vault passed through `keystore=` must
+be closed by its caller.
+
+A saved value can contain up to 1 MiB, and a vault file up to 8 MiB. The store
+checks the complete encrypted record data before returning any selected part.
+Python and crypto libraries still create temporary copies in normal memory.
+Locked buffers do not isolate secrets from other code in the same process or
+from a privileged memory snapshot.
+
+For file helpers, see [file encryption](file-encryption.md). For storage details,
+see the [W3VAULT1 format](security-vault-format.md).

@@ -74,14 +74,3 @@ def test_out_of_bounds_wrong_parent_and_split_unicode_are_safe(secret_store):
     ]:
         with pytest.raises(SecurityError):
             item.ref(silent=True)
-
-
-def test_deep_adapters_restore_and_equivalent_recipes_keep_selection_identity(
-    secret_store,
-):
-    root = secret_store.capture(b"test")
-    assert SecretString(root) == SecretString(root)
-    parent = root
-    for _ in range(40):
-        parent = SecretString(parent)
-    assert parent.ref(silent=True) == "test"

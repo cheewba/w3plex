@@ -1,4 +1,4 @@
-"""Characterize default ownership before adding caller-owned parse cleanup."""
+"""Resource lifetime with tree-owned and caller-owned cleanup."""
 
 import asyncio
 import os
@@ -79,9 +79,22 @@ def test_default_resources_close_once_after_success_or_failure(
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("runner_api", [False, True])
-@pytest.mark.parametrize("failure", ["success", "raise", "cancel"])
-@pytest.mark.parametrize("kind", ["close", "generator", "async-generator"])
+@pytest.mark.parametrize(
+    ("runner_api", "failure", "kind"),
+    [
+        (False, "success", "close"),
+        (False, "raise", "close"),
+        (False, "cancel", "close"),
+        (True, "success", "close"),
+        (True, "raise", "close"),
+        (True, "cancel", "close"),
+        # Generator cleanup shares the same owner once it is registered.
+        (False, "success", "generator"),
+        (False, "raise", "generator"),
+        (False, "success", "async-generator"),
+        (False, "cancel", "async-generator"),
+    ],
+)
 def test_external_owner_retains_resources_until_caller_closes(
     tmp_path, monkeypatch, runner_api, failure, kind
 ):

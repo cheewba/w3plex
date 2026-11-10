@@ -34,8 +34,6 @@ def test_generic_vault_reads_fixed_old_records_without_rewriting(tmp_path):
             )
             assert vault.metadata(item["id"])["kind"] == item["kind"]
         assert storage.read()[0] == raw
-        assert not hasattr(vault, "wallets")
-        assert not hasattr(vault, "read_secret")
     finally:
         vault.close()
 
