@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 import threading
-from copy import deepcopy
 from dataclasses import dataclass
 
 import pytest
@@ -20,8 +19,6 @@ from w3plex.utils.loader import (
     using_file_opener,
     wallets_loader,
 )
-
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
 
 
 @dataclass
@@ -139,6 +136,8 @@ def test_line_filters_offsets_and_transform_hook(tmp_path, protected):
     result = asyncio.run(reader.process(lambda value: value))
     assert result == seen
     assert (reveal(result) if protected else result) == ["éclair", "two"]
+    if not protected:
+        assert asyncio.run(reader.process(len)) == [6, 3]
     assert asyncio.run(reader.process(lambda _: None)) == []
 
 
@@ -159,13 +158,8 @@ def test_accounts_loader_stays_callable_and_captures_only_on_call():
     assert calls == ["unused"]
 
 
-def test_ordinary_reader_keeps_configuration_deepcopy():
-    reader = FileLoader(file="public.txt")
-    assert deepcopy(reader).config == reader.config
-
-
 def test_existing_reader_captures_once_across_concurrent_reads_and_lock(
-    secret_store, tmp_path
+    vault, vault_password, secret_store, tmp_path
 ):
     data = tmp_path / "data.txt"
     data.write_text("original\n")
@@ -187,11 +181,11 @@ def test_existing_reader_captures_once_across_concurrent_reads_and_lock(
     assert calls == [data]
     data.write_text("changed\n")
     assert asyncio.run(reader())[0].ref(silent=True) == "original"
-    secret_store._vault.lock()
+    vault.lock()
     with pytest.raises(PermissionDenied):
         asyncio.run(reader())
     data.unlink()
-    secret_store._vault.unlock(PASSWORD)
+    vault.unlock(vault_password)
     assert asyncio.run(reader())[0].ref(silent=True) == "original"
     assert values[0].ref(silent=True) == "original"
     assert calls == [data]
@@ -250,7 +244,9 @@ def test_accounts_and_wallets_loader_keep_legacy_types(tmp_path):
     assert asyncio.run(wallets_loader(file=str(source))) == [accounts[0].address]
 
 
-def test_enc1_is_captured_once_without_modifying_original(secret_store, tmp_path):
+def test_enc1_is_captured_once_without_modifying_original(
+    vault, vault_password, secret_store, tmp_path
+):
     password = "PUBLIC-TEST-legacy-password"
     key = base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
     encrypted = b"ENC1" + Fernet(key).encrypt(b"one\ntwo\n")
@@ -262,6 +258,6 @@ def test_enc1_is_captured_once_without_modifying_original(secret_store, tmp_path
     values = asyncio.run(FileLoader(file=captured).process())
     filename.unlink()
     legacy.lock()
-    secret_store._vault.lock()
-    secret_store._vault.unlock(PASSWORD)
+    vault.lock()
+    vault.unlock(vault_password)
     assert [value.ref(silent=True) for value in values] == ["one", "two"]

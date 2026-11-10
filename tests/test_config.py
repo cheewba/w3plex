@@ -3,12 +3,11 @@ import io
 from types import SimpleNamespace
 
 import pytest
-from lazyplex import ContextScope, create_context
+from lazyplex import create_context
 from lazyplex.core.context import branch
 from ruamel import yaml
 from w3ext import Chain, Currency
 
-from w3plex.config import config as config_module
 from w3plex.config.config import (
     ConfigTree,
     Lazy,
@@ -23,24 +22,17 @@ from w3plex.exceptions import ConfigError
 from w3plex.runner import Runner
 
 
-def test_resolver_reports_pending_names_and_resolves_callbacks():
-    resolver = config_module._Resolver()
-    results = []
-    assert not resolver.resolve_once_ready("item", results.append)
-    assert resolver.get_unresolved() == ["item"]
-    resolver.register("item", 42)
-    assert results == [42]
-    assert resolver.get_unresolved() == []
-
-
-def test_config_node_registration_accepts_non_mapping_values():
-    loader = config_module._ConfigLoader()
+def test_config_node_registration_accepts_non_mapping_values(tmp_path):
+    loader = config_loader.clone()
 
     @loader.add_node(r"^logging$")
     def loggers(config, path):
         return tuple(config)
 
-    assert asyncio.run(loader.get_node(["console"], "logging")) == ("console",)
+    tree = asyncio.run(
+        loader.parse({"logging": ["console"]}, str(tmp_path / "config.yaml"))
+    )
+    assert tree.logging == ("console",)
 
 
 @pytest.mark.parametrize("reference_first", [False, True])
@@ -97,11 +89,18 @@ def test_yaml_include_subset_retains_path_and_returns_mapping(tmp_path):
 
 
 def test_lazy_action_cache_keeps_falsy_values(monkeypatch):
-    monkeypatch.setattr("w3plex.config.config.get_scope", lambda: ContextScope.action)
-    lazy = Lazy[int]({}, "value")
+    calls = []
+
+    def value():
+        calls.append("created")
+        return 0
+
+    monkeypatch.setattr("w3plex.config.config.load_path", lambda path: value)
+    lazy = Lazy[int]({"__init__": "fixture:value"}, "value")
     with create_context({"application": "test"}), branch({"action": "test"}):
-        lazy._set_cached(0)
         assert asyncio.run(lazy()) == 0
+        assert asyncio.run(lazy()) == 0
+    assert calls == ["created"]
 
 
 def test_lazy_variable_reports_invalid_reference():
@@ -162,7 +161,7 @@ def test_config_reports_reference_cycles(tmp_path):
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_config_closes_generator_resources_on_exit_or_parse_failure(tmp_path, failure):
-    loader = config_module._ConfigLoader()
+    loader = config_loader.clone()
     events = []
 
     @loader.add_node(r"^resource$", "resources")
@@ -204,15 +203,14 @@ def test_nested_yaml_includes_use_each_files_directory(tmp_path):
 
 
 def test_lazy_resolves_attributes_and_sequence_indices():
-    lazy = Lazy({}, "value")
-    assert (
-        lazy._resolve_path(
-            "item.values.0.answer", {"item": SimpleNamespace(values=[{"answer": 42}])}
-        )
-        == 42
-    )
-    with pytest.raises(ConfigError, match="missing"):
-        lazy._resolve_path("item.missing", {"item": SimpleNamespace()})
+    variable = LazyVar("$.context.item.values.0.answer", "value")
+    with create_context({"item": SimpleNamespace(values=[{"answer": 42}])}):
+        assert asyncio.run(variable()) == 42
+    with (
+        create_context({"item": SimpleNamespace()}),
+        pytest.raises(ConfigError, match="missing"),
+    ):
+        asyncio.run(LazyVar("$.context.item.missing", "value")())
 
 
 def test_runners_isolate_factories_apply_aliases_and_keep_cli_overrides(
@@ -235,7 +233,6 @@ def test_runners_isolate_factories_apply_aliases_and_keep_cli_overrides(
             }
         }
     }
-    factory_count = len(config_loader._filters)
 
     async def check():
         first, second = Runner(), Runner()
@@ -248,7 +245,6 @@ def test_runners_isolate_factories_apply_aliases_and_keep_cli_overrides(
             ) == [[1, "with spaces"]]
             with pytest.raises(ValueError, match="Unknown action"):
                 first.tree.applications.sample("missing")
-            assert len(config_loader._filters) == factory_count
         finally:
             await first.finalize()
             await second.finalize()

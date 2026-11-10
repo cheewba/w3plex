@@ -12,29 +12,26 @@ from w3plex.core.objects import application
 from w3plex.runner import Runner
 from w3plex.security import ISecretRef, SecretStore
 from w3plex.security.errors import PermissionDenied
-from w3plex.security.memory import ProcessProtection
 from w3plex.security.storage import CiphertextFile
 from w3plex.security.vault import Vault
 from w3plex.utils.loader import FileLoader, get_file_opener, using_file_opener
 
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
-
 
 @pytest.fixture
-def other_store(tmp_path):
-    protection = ProcessProtection()
-    protection.activate()
+def other_store(vault_password, tmp_path, protection):
     directory = tmp_path / "other-secrets"
     directory.mkdir(mode=0o700)
     vault = Vault(CiphertextFile(directory / "vault"), protection=protection)
-    vault.create(PASSWORD)
-    vault.unlock(PASSWORD)
-    yield SecretStore(vault)
-    vault.close()
+    try:
+        vault.create(vault_password)
+        vault.unlock(vault_password)
+        yield SecretStore(vault)
+    finally:
+        vault.close()
 
 
 def test_plain_yaml_keeps_factories_references_and_include_paths(
-    secret_store, tmp_path
+    vault, secret_store, tmp_path
 ):
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -56,7 +53,9 @@ def test_plain_yaml_keeps_factories_references_and_include_paths(
             assert runner.tree.alias is runner.tree.readers.lines
             values = await runner.tree.alias()
             assert isinstance(values[0], ISecretRef)
-            assert values[0].parent._store is secret_store
+            assert (
+                vault.read(values[0].parent.identifier) == b"PUBLIC-TEST-private-line\n"
+            )
             assert values[0].ref(silent=True) == "PUBLIC-TEST-private-line"
             assert get_file_opener() is None
         finally:
@@ -65,7 +64,7 @@ def test_plain_yaml_keeps_factories_references_and_include_paths(
     asyncio.run(check())
 
 
-def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path):
+def test_lazy_reader_retains_opener_after_initialization(vault, secret_store, tmp_path):
     data = tmp_path / "data.txt"
     data.write_text("deferred\n")
     cfg = {
@@ -84,7 +83,7 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
             reader = await tree.reader()
             value = (await reader())[0]
             assert isinstance(value, ISecretRef)
-            assert value.parent._store is secret_store
+            assert vault.read(value.parent.identifier) == b"deferred\n"
             assert value.ref(silent=True) == "deferred"
         finally:
             await tree.close()
@@ -92,11 +91,17 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("as_factory", [False, True])
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("protected", [False, True])
+@pytest.mark.parametrize(
+    ("as_factory", "asynchronous", "protected"),
+    [
+        pytest.param(False, False, False, id="lazy-sync-plain"),
+        pytest.param(False, True, True, id="lazy-async-protected"),
+        pytest.param(True, False, True, id="factory-sync-protected"),
+        pytest.param(True, True, False, id="factory-async-plain"),
+    ],
+)
 def test_generator_reader_factory_keeps_configured_opener(
-    secret_store, tmp_path, monkeypatch, as_factory, asynchronous, protected
+    vault, secret_store, tmp_path, monkeypatch, as_factory, asynchronous, protected
 ):
     data = tmp_path / "data.txt"
     data.write_text("deferred generator\n")
@@ -136,20 +141,24 @@ def test_generator_reader_factory_keeps_configured_opener(
             values = await reader()
             if protected:
                 assert isinstance(values[0], ISecretRef)
-                assert values[0].parent._store is secret_store
+                assert (
+                    vault.read(values[0].parent.identifier) == b"deferred generator\n"
+                )
                 assert values[0].ref(silent=True) == "deferred generator"
             else:
                 assert values == ["deferred generator"]
+            again = await tree.reader()
+            assert (again is reader) == (not as_factory)
         finally:
             await tree.close()
-        assert closed == [True]
+        assert closed == [True] * (2 if as_factory else 1)
         assert get_file_opener() is None
 
     asyncio.run(check())
 
 
 def test_concurrent_factories_and_later_reads_keep_owner(
-    secret_store, other_store, tmp_path, monkeypatch
+    vault, secret_store, other_store, tmp_path, monkeypatch
 ):
     async def factory(file):
         await asyncio.sleep(0)
@@ -178,9 +187,11 @@ def test_concurrent_factories_and_later_reads_keep_owner(
             first, second = await asyncio.gather(
                 *(runner.tree.reader() for runner in runners)
             )
-            assert first[0].parent._store is secret_store
-            assert second[0].parent._store is other_store
             assert first[0].ref(silent=True) == "first"
+            assert second[0].ref(silent=True) == "second"
+            vault.lock()
+            with pytest.raises(PermissionDenied):
+                first[0].ref(silent=True)
             assert second[0].ref(silent=True) == "second"
             assert get_file_opener() is None
         finally:
@@ -244,7 +255,7 @@ def test_failed_protected_factory_restores_context_and_runner_state(
 
 
 def test_application_created_reader_uses_runner_opener(
-    secret_store, tmp_path, monkeypatch
+    vault, secret_store, tmp_path, monkeypatch
 ):
     data = tmp_path / "data.txt"
     data.write_text("application read\n")
@@ -271,7 +282,7 @@ def test_application_created_reader_uses_runner_opener(
         try:
             await runner.tree.applications.sample("read")
             assert isinstance(received[0], ISecretRef)
-            assert received[0].parent._store is secret_store
+            assert vault.read(received[0].parent.identifier) == b"application read\n"
             assert received[0].ref(silent=True) == "application read"
             assert get_file_opener() is None
         finally:

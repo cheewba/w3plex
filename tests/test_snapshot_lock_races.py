@@ -9,7 +9,6 @@ from cryptography.fernet import Fernet
 from w3plex.security.errors import PermissionDenied
 from w3plex.security.legacy import LegacyContext
 
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
 FILE_PASSWORD = "PUBLIC-TEST-file-password"
 
 
@@ -19,7 +18,7 @@ def encrypted_source(path):
 
 
 def test_locked_capture_does_not_read_a_source_or_request_password(
-    secret_store, tmp_path, monkeypatch
+    vault, secret_store, tmp_path, monkeypatch
 ):
     path = tmp_path / "data.enc"
     encrypted_source(path)
@@ -29,7 +28,7 @@ def test_locked_capture_does_not_read_a_source_or_request_password(
             "Locked capture requested a password"
         ),
     )
-    secret_store._vault.lock()
+    vault.lock()
     monkeypatch.setattr(
         "w3plex.security.refs.snapshot_file",
         lambda path: pytest.fail("Locked capture opened a private source"),
@@ -39,21 +38,23 @@ def test_locked_capture_does_not_read_a_source_or_request_password(
 
 
 @pytest.mark.parametrize("reopen", [False, True])
-def test_private_input_lock_invalidates_capture(secret_store, tmp_path, reopen):
+def test_private_input_lock_invalidates_capture(
+    vault, vault_password, secret_store, tmp_path, reopen
+):
     path = tmp_path / "data.enc"
     encrypted_source(path)
-    original = secret_store._vault._storage.read()
+    original = vault.path.read_bytes()
 
     def password(request):
-        secret_store._vault.lock()
+        vault.lock()
         if reopen:
-            secret_store._vault.unlock(PASSWORD)
+            vault.unlock(vault_password)
         return FILE_PASSWORD
 
     legacy = LegacyContext(None, input_handler=password)
     try:
         with pytest.raises(PermissionDenied):
             secret_store.capture_file(path, context=legacy)
-        assert secret_store._vault._storage.read() == original
+        assert vault.path.read_bytes() == original
     finally:
         legacy.lock()

@@ -128,8 +128,8 @@ def test_default_codec_roundtrip_fresh_salt_and_nonces():
     ],
 )
 def test_changed_format_fields_fail_authentication(field):
-    envelope, _ = codec.seal(VALUE, PASSWORD)
-    document = json.loads(envelope.serialize()[len(codec.MAGIC) :])
+    raw = (FIXTURES / "sample.vault").read_bytes()
+    document = json.loads(raw[len(codec.MAGIC) :])
     if field in {"wrapped_key", "payload"}:
         raw = bytearray(base64.b64decode(document[field]))
         raw[-1] ^= 1
@@ -148,7 +148,7 @@ def test_changed_format_fields_fail_authentication(field):
         document["header"][field] = "unsupported"
     with pytest.raises((InvalidStore, AuthenticationFailed)):
         changed = codec.parse(codec.MAGIC + codec.canonical(document))
-        codec.open_payload(changed, codec.unwrap(changed, PASSWORD))
+        codec.open_payload(changed, codec.unwrap(changed, b"PUBLIC-TEST-v1-password"))
 
 
 def test_work_bounds_before_kdf_and_no_missing_backend_fallback(monkeypatch):

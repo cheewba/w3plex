@@ -15,13 +15,6 @@ from w3plex.security.memory import LockedBuffer, ProcessProtection
 VALUE = b"PUBLIC-TEST-native-secret"
 
 
-@pytest.fixture
-def protection():
-    controls = ProcessProtection()
-    controls.activate()
-    return controls
-
-
 def test_missing_explicit_protection_blocks_secret_allocation():
     with pytest.raises(UnsupportedProtection):
         LockedBuffer(VALUE, protection=ProcessProtection())

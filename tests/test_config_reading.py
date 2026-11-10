@@ -94,7 +94,8 @@ def test_cli_config_expands_variables_in_nested_includes(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLIC_CONFIG_TEST", "expanded")
     nested = tmp_path / "nested"
     nested.mkdir()
-    (nested / "child.yaml").write_text("value: ${PUBLIC_CONFIG_TEST}\n")
+    (nested / "leaf.yaml").write_text("value: ${PUBLIC_CONFIG_TEST}\nkey: 0x1234\n")
+    (nested / "child.yaml").write_text("leaf: !include leaf.yaml\n")
     root = tmp_path / "w3plex.yaml"
     root.write_text(
         "value: $PUBLIC_CONFIG_TEST\n"
@@ -104,8 +105,9 @@ def test_cli_config_expands_variables_in_nested_includes(tmp_path, monkeypatch):
     result = load_cli_config(str(root))
     assert result["value"] == "expanded"
     assert result["missing"] == "${PUBLIC_CONFIG_UNSET}"
-    assert result["child"]["value"] == "expanded"
+    assert result["child"]["leaf"] == {"value": "expanded", "key": "0x1234"}
     assert result["child"].__include_path__ == str(nested / "child.yaml")
+    assert result["child"]["leaf"].__include_path__ == str(nested / "leaf.yaml")
 
 
 @pytest.mark.parametrize("content", ["", "- item\n", "value\n"])

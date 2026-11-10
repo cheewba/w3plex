@@ -22,14 +22,12 @@ from w3plex.security.errors import (
 from w3plex.security.storage import CiphertextFile, StoreChanged, WriterBusy
 from w3plex.security.vault import Vault
 
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
-
 
 @pytest.fixture
-def owners(secret_store):
-    first = secret_store._vault
+def owners(vault, vault_password):
+    first = vault
     other = Vault(CiphertextFile(first.path), protection=first.protection)
-    other.unlock(PASSWORD)
+    other.unlock(vault_password)
     try:
         yield first, other
     finally:
@@ -37,7 +35,7 @@ def owners(secret_store):
 
 
 def test_reload_uses_retained_key_and_preserves_surviving_extraction(
-    owners, tmp_path, monkeypatch
+    vault_password, owners, tmp_path, monkeypatch
 ):
     first, other = owners
     source = tmp_path / "captured.json"
@@ -78,12 +76,13 @@ def test_reload_uses_retained_key_and_preserves_surviving_extraction(
     with pytest.raises(PermissionDenied):
         other.reload()
     assert not other.is_unlocked
-    other.unlock(PASSWORD)
+    other.unlock(vault_password)
     assert child.ref(silent=True) == "PUBLIC-TEST-survivor"
 
 
-def test_delete_batch_is_atomic_idempotent_and_keeps_survivors(secret_store):
-    vault = secret_store._vault
+def test_delete_batch_is_atomic_idempotent_and_keeps_survivors(
+    vault, vault_password, secret_store
+):
     keep = vault.save(b"\x00PUBLIC-TEST-survivor\xff", metadata={"opaque": [1, None]})
     remove = vault.save(b"PUBLIC-TEST-removed")
     last = vault.save(b"PUBLIC-TEST-last")
@@ -118,13 +117,15 @@ def test_delete_batch_is_atomic_idempotent_and_keeps_survivors(secret_store):
     assert vault.delete_entries([]) == ()
     assert vault.path.read_bytes() == committed
     vault.lock()
-    vault.unlock(PASSWORD)
+    vault.unlock(vault_password)
     assert vault.identifiers() == (keep,)
     assert vault.read(keep) == b"\x00PUBLIC-TEST-survivor\xff"
 
 
 @pytest.mark.parametrize("selection", ["present", "absent", "empty"])
-def test_stale_delete_locks_without_losing_concurrent_append(owners, selection):
+def test_stale_delete_locks_without_losing_concurrent_append(
+    vault_password, owners, selection
+):
     first, other = owners
     remove = first.save(b"PUBLIC-TEST-remove")
     other.reload()
@@ -135,29 +136,30 @@ def test_stale_delete_locks_without_losing_concurrent_append(owners, selection):
         other.delete_entries(selected)
     assert not other.is_unlocked and first.is_unlocked
     assert first.path.read_bytes() == committed
-    other.unlock(PASSWORD)
+    other.unlock(vault_password)
     assert other.delete_entries([remove]) == (remove,)
     first.reload()
     assert first.identifiers() == (added,)
 
 
-def test_delete_contention_refuses_then_requires_authenticated_recovery(owners):
+def test_delete_contention_refuses_then_requires_authenticated_recovery(
+    vault_password, owners
+):
     first, other = owners
     remove = first.save(b"PUBLIC-TEST-remove")
     other.reload()
     with first._storage.writer_guard(), pytest.raises(WriterBusy):
         other.delete_entries([remove])
     assert not other.is_unlocked
-    other.unlock(PASSWORD)
+    other.unlock(vault_password)
     assert other.delete_entries([remove]) == (remove,)
     first.reload()
     assert first.identifiers() == ()
 
 
 def test_delete_directory_sync_uncertainty_locks_then_rereads(
-    secret_store, monkeypatch
+    vault, vault_password, monkeypatch
 ):
-    vault = secret_store._vault
     keep = vault.save(b"PUBLIC-TEST-survivor")
     remove = vault.save(b"PUBLIC-TEST-remove")
     sync = os.fsync
@@ -178,7 +180,7 @@ def test_delete_directory_sync_uncertainty_locks_then_rereads(
         vault.delete_entries([remove])
     # Publication happened, even though durability acknowledgement failed.
     published = vault.path.read_bytes()
-    vault.unlock(PASSWORD)
+    vault.unlock(vault_password)
     assert vault.identifiers() == (keep,)
     assert vault.delete_entries([remove]) == ()
     assert vault.path.read_bytes() == published
@@ -197,7 +199,9 @@ def test_delete_directory_sync_uncertainty_locks_then_rereads(
         "missing",
     ],
 )
-def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(owners, change):
+def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(
+    vault_password, owners, change
+):
     first, other = owners
     identifier = first.save(b"PUBLIC-TEST-original", metadata={"type": "synthetic"})
     other.reload()
@@ -224,7 +228,7 @@ def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(owners, ch
     other.add_lock_listener(observer.locked)
     before = first.path.read_bytes()
     envelope = vault_format.parse(before)
-    key = vault_format.unwrap(envelope, PASSWORD)
+    key = vault_format.unwrap(envelope, vault_password)
     if change == "corruption":
         replacement = vault_format.Envelope(
             envelope.header,
@@ -232,12 +236,12 @@ def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(owners, ch
             envelope.payload[:-1] + bytes([envelope.payload[-1] ^ 1]),
         )
     elif change == "replacement":
-        replacement, _ = vault_format.seal(b'{"records":[]}', PASSWORD)
+        replacement, _ = vault_format.seal(b'{"records":[]}', vault_password)
     elif change == "wrapper":
         # Even a valid same-data-key rewrap is a different unlock identity.
         replacement, _ = vault_format.seal(
             vault_format.open_payload(envelope, key),
-            PASSWORD,
+            vault_password,
             data_key=key,
             store_id=envelope.header["store_id"],
         )
@@ -252,7 +256,7 @@ def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(owners, ch
             ),
         )
     if change == "rotation":
-        first.change_password(PASSWORD, b"PUBLIC-TEST-rotated")
+        first.change_password(vault_password, b"PUBLIC-TEST-rotated")
     elif change == "missing":
         first.path.unlink()
     else:
@@ -275,7 +279,7 @@ def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(owners, ch
         else:
             expected = None
         first._storage.write(before, expected=expected)
-        other.unlock(PASSWORD)
+        other.unlock(vault_password)
         assert other.read(identifier) == b"PUBLIC-TEST-original"
     finally:
         other.bind_lock(None)
@@ -284,7 +288,7 @@ def test_reload_failure_revokes_borrowed_keys_and_notifies_all_owners(owners, ch
 
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_reload_interruption_locks_and_cannot_restore_after_lock(
-    owners, monkeypatch, interrupt
+    vault_password, owners, monkeypatch, interrupt
 ):
     first, other = owners
     first.save(b"PUBLIC-TEST-latest")
@@ -303,6 +307,6 @@ def test_reload_interruption_locks_and_cannot_restore_after_lock(
         with pytest.raises(KeyboardInterrupt if interrupt else PermissionDenied):
             other.reload()
     assert not other.is_unlocked and first.is_unlocked
-    other.unlock(PASSWORD)
+    other.unlock(vault_password)
     other.reload()
     assert other.identifiers() == first.identifiers()

@@ -10,26 +10,26 @@ from w3plex.plugins.dashboard import DashboardManager, DashboardPage
 
 
 def test_debank_creates_sessions_lazily_and_closes_them():
+    client = Debank()
+
     async def check():
-        client = Debank()
-        assert client._session is None
         async with client:
             session = await client.get_session()
             assert not session.closed
+            assert await client.get_session() is session
         assert session.closed
         await client.close()
 
     asyncio.run(check())
 
 
-def test_proxy_pool_initializes_once_and_returns_cancelled_leases(tmp_path):
+def test_proxy_pool_serializes_leases_and_returns_them_after_cancellation(tmp_path):
     filename = tmp_path / "proxies.txt"
     filename.write_text("# comment\n\nsocks5://localhost:1080\n")
     pool = ProxyPool(str(filename))
 
     async def check():
         await asyncio.gather(pool.init(), pool.init())
-        assert pool._proxies.qsize() == 1
         entered = asyncio.Event()
 
         async def lease():
@@ -38,14 +38,30 @@ def test_proxy_pool_initializes_once_and_returns_cancelled_leases(tmp_path):
                 entered.set()
                 await asyncio.Event().wait()
 
+        async def next_lease():
+            async with pool.get_proxy() as proxy:
+                return proxy
+
         task = asyncio.create_task(lease())
-        await entered.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        async with pool.get_proxy() as proxy:
-            assert proxy == "socks5://localhost:1080"
-        assert pool._proxies.qsize() == 1
+        waiter = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            waiter = asyncio.create_task(next_lease())
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await asyncio.wait_for(waiter, 5) == "socks5://localhost:1080"
+            assert await asyncio.wait_for(next_lease(), 5) == "socks5://localhost:1080"
+        finally:
+            for pending in (task, waiter):
+                if pending is not None:
+                    pending.cancel()
+            await asyncio.gather(
+                *(pending for pending in (task, waiter) if pending is not None),
+                return_exceptions=True,
+            )
 
     asyncio.run(check())
 

@@ -16,8 +16,6 @@ from w3plex.utils.loader import (
     using_file_opener,
 )
 
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
-
 
 @dataclass
 class Reference:
@@ -266,7 +264,7 @@ def test_nested_async_contexts_and_sync_fallback(tmp_path):
 
 
 def test_async_snapshot_keeps_offsets_transforms_and_survives_lock(
-    secret_store, tmp_path
+    vault, vault_password, secret_store, tmp_path
 ):
     path = tmp_path / "data.txt"
     raw = "\ufeff # comment\r\n éclair \r two\n".encode()
@@ -286,11 +284,11 @@ def test_async_snapshot_keeps_offsets_transforms_and_survives_lock(
         assert values == seen
         assert all(isinstance(line, SecretString) for line in values)
         assert reveal(values) == ["éclair", "two"]
-        secret_store._vault.lock()
+        vault.lock()
         path.unlink()
         with pytest.raises(PermissionDenied):
             await reader()
-        secret_store._vault.unlock(PASSWORD)
+        vault.unlock(vault_password)
         assert reveal(await reader()) == ["éclair", "two"]
         assert reveal(values) == ["éclair", "two"]
         assert calls == [path]

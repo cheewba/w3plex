@@ -4,36 +4,38 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from w3plex.security import SecretJson, SecretString
+from w3plex.security import SecretJson, SecretStore, SecretString
 from w3plex.security.errors import InvalidStore, SecurityError
 
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
 
-
-def test_unicode_ranges_use_bytes_and_survive_lock(secret_store):
+def test_unicode_ranges_use_bytes_and_survive_lock(vault, vault_password, secret_store):
     root = secret_store.capture("zero café end".encode())
     text = SecretString(root, 5, len("café".encode()))
     assert text.ref(silent=True) == "café"
-    secret_store._vault.lock()
-    secret_store._vault.unlock(PASSWORD)
+    vault.lock()
+    vault.unlock(vault_password)
     assert text.ref(silent=True) == "café"
     assert "café" not in repr(text)
     with pytest.raises(FrozenInstanceError):
         text.offset = 0
 
 
-def test_json_escapes_and_nested_text_restore_with_one_confirmation(secret_store):
+def test_json_escapes_and_nested_text_restore_with_one_confirmation(
+    vault, vault_password
+):
+    confirmations = []
+    secret_store = SecretStore(
+        vault, confirm=lambda access: confirmations.append(access) or True
+    )
     root = secret_store.capture(b'{"wallets":[{"key":"abc\\u0031xyz"}]}')
     document = SecretJson(root)
     key = document["wallets"][0]["key"]
     selected = SecretString(key, 3, 1)
-    confirmations = []
-    secret_store._confirm = lambda access: confirmations.append(access) or True
     assert selected.ref() == "1"
     assert len(confirmations) == 1
     assert confirmations[0].identifier == root.identifier
-    secret_store._vault.lock()
-    secret_store._vault.unlock(PASSWORD)
+    vault.lock()
+    vault.unlock(vault_password)
     assert key.ref(silent=True) == "abc1xyz"
     assert selected.ref(silent=True) == "1"
     assert all("abc1xyz" not in repr(item) for item in [root, document, key, selected])

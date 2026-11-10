@@ -3,7 +3,6 @@ import asyncio
 import pytest
 
 from w3plex.utils.dist import AttrDict, as_future, deprecated
-from w3plex.utils.loader import FileLoader
 
 
 def test_deprecated_function_preserves_custom_message_and_result():
@@ -54,16 +53,3 @@ def test_as_future_handles_values_coroutines_and_existing_futures():
         assert as_future(existing) is existing
 
     asyncio.run(check())
-
-
-def test_file_loader_reads_utf8_bom_and_applies_filter_and_transform(tmp_path):
-    filename = tmp_path / "values.txt"
-    filename.write_text("\ufeff1\nskip\n2\n", encoding="utf-8")
-    loader = FileLoader[int](file=str(filename), filter=r"\d")
-    assert asyncio.run(loader.process(int)) == [1, 2]
-
-
-def test_file_loader_without_transform_returns_lines(tmp_path):
-    filename = tmp_path / "values.txt"
-    filename.write_text("one\ntwo\n", encoding="utf-8")
-    assert asyncio.run(FileLoader(file=str(filename)).process()) == ["one", "two"]

@@ -15,7 +15,7 @@ from w3plex.w3 import Debank
 VALUE = "PUBLIC-TEST-sdk-credential"
 
 
-def test_debank_keeps_a_reference_and_builds_per_request_headers(secret_store):
+def test_debank_keeps_a_reference_and_builds_per_request_headers(vault, secret_store):
     source = SecretString(secret_store.capture(VALUE.encode()))
     client = Debank(access_key=source)
     headers = []
@@ -26,12 +26,12 @@ def test_debank_keeps_a_reference_and_builds_per_request_headers(secret_store):
         yield Mock(json=AsyncMock(return_value=[]))
 
     client._api_request = request
-    assert asyncio.run(client._official_request("chain/list")) == []
+    assert asyncio.run(client.get_nft("0x" + "12" * 20)) == []
     assert client.access_key is source
     assert headers == [{"AccessKey": VALUE}]
-    secret_store._vault.lock()
+    vault.lock()
     with pytest.raises(PermissionDenied):
-        asyncio.run(client._official_request("chain/list"))
+        asyncio.run(client.get_nft("0x" + "12" * 20))
     assert len(headers) == 1
 
 
@@ -56,7 +56,7 @@ def test_independent_reference_failure_has_no_private_exception_chain(failure):
     assert isinstance(source, ISecretRef)
     client = Debank(access_key=source)
     client._api_request = Mock(side_effect=AssertionError("Request was sent"))
-    operation = client._official_request("chain/list")
+    operation = client.get_nft("0x" + "12" * 20)
     with pytest.raises(SecurityError) as caught:
         asyncio.run(operation)
     assert type(caught.value) is (
@@ -67,6 +67,6 @@ def test_independent_reference_failure_has_no_private_exception_chain(failure):
     client._api_request.assert_not_called()
 
 
-@pytest.mark.parametrize("name", ["Chain", "Token", "Currency", "CurrencyAmount"])
-def test_unadapted_exports_keep_identity(name):
-    assert getattr(w3, name) is getattr(w3ext, name)
+def test_unadapted_exports_keep_identity():
+    for name in ("Chain", "Token", "Currency", "CurrencyAmount"):
+        assert getattr(w3, name) is getattr(w3ext, name)

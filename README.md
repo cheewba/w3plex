@@ -374,6 +374,14 @@ Tests use mocked blockchain/API responses and temporary files; they do not need
 RPC credentials or submit transactions. Live provider access and third-party
 API behavior need separate checks with your own configuration.
 
+Keep the smallest test suite that protects distinct regression risks. Extend
+existing behavioral tests before adding new ones; avoid private helpers and
+repetitive input matrices. Preserve checks for cryptographic formats, secret
+disclosure, migration, concurrency, atomic writes and failure recovery. Use the
+shared protection and vault fixtures, and pass confirmation callbacks through
+`SecretStore`'s public constructor. Internal inspection is justified when it is
+needed to verify memory erasure or inject a specific security failure.
+
 ## Troubleshooting
 
 | What you see | What to check |

@@ -38,7 +38,7 @@ TYPED = {
     ],
 )
 def test_reference_signatures_match_legacy_without_disclosure(
-    secret_store, data, encoded
+    vault, secret_store, data, encoded
 ):
     reference = SecretString(secret_store.capture(KEY.encode()))
     account = Account.from_key(reference)
@@ -55,7 +55,7 @@ def test_reference_signatures_match_legacy_without_disclosure(
     assert str(account) == account.address
     with pytest.raises(AttributeError):
         _ = account._acc
-    secret_store._vault.lock()
+    vault.lock()
     with pytest.raises(PermissionDenied):
         asyncio.run(account.sign(data))
 
@@ -90,10 +90,10 @@ def test_string_construction_and_legacy_key_api_stay_compatible():
     )
 
 
-def test_reference_account_works_after_reunlock(secret_store):
+def test_reference_account_works_after_reunlock(vault, vault_password, secret_store):
     reference = SecretString(secret_store.capture(KEY.encode()))
     account = Account.from_key(reference)
     before = asyncio.run(account.sign("hello"))
-    secret_store._vault.lock()
-    secret_store._vault.unlock(b"PUBLIC-TEST-snapshot-password")
+    vault.lock()
+    vault.unlock(vault_password)
     assert asyncio.run(account.sign("hello")) == before

@@ -8,19 +8,16 @@ import pytest
 
 from w3plex.security import SecretStore
 from w3plex.security.errors import InvalidStore, PermissionDenied
-from w3plex.security.memory import ProcessProtection
 from w3plex.security.storage import CiphertextFile, StoreChanged
 from w3plex.security.vault import Vault
 
 FIXTURES = Path(__file__).parent / "fixtures/security"
 
 
-def test_generic_vault_reads_fixed_old_records_without_rewriting(tmp_path):
+def test_generic_vault_reads_fixed_old_records_without_rewriting(tmp_path, protection):
     manifest = json.loads((FIXTURES / "vault-v1.json").read_text())
     raw = (FIXTURES / "vault-v1.bin").read_bytes()
     assert hashlib.sha256(raw).hexdigest() == manifest["sha256"]
-    protection = ProcessProtection()
-    protection.activate()
     storage = CiphertextFile(tmp_path / "vault")
     storage.write(raw, expected=None)
     vault = Vault(storage, protection=protection)
@@ -38,33 +35,32 @@ def test_generic_vault_reads_fixed_old_records_without_rewriting(tmp_path):
         vault.close()
 
 
-def test_generic_metadata_has_no_wallet_validation(secret_store):
-    vault = secret_store._vault
+def test_generic_metadata_has_no_wallet_validation(vault):
     identifier = vault.save(
         b"any data", metadata={"format": "custom", "kind": "anything"}
     )
     assert vault.read(identifier) == b"any data"
     assert vault.metadata(identifier) == {"format": "custom", "kind": "anything"}
-    raw = vault._storage.read()[0]
+    raw = vault.path.read_bytes()
     with pytest.raises(InvalidStore):
         vault.save(b"value", metadata={"id": "0" * 32})
-    assert vault._storage.read()[0] == raw
+    assert vault.path.read_bytes() == raw
 
 
-def test_invalid_generic_batch_commits_nothing(secret_store):
-    vault = secret_store._vault
-    original = vault._storage.read()[0]
+def test_invalid_generic_batch_commits_nothing(vault):
+    original = vault.path.read_bytes()
     with pytest.raises(InvalidStore):
         vault.import_entries([(b"valid", {}), ("invalid", {})])
-    assert vault._storage.read()[0] == original
+    assert vault.path.read_bytes() == original
 
 
-def test_independent_unlocked_owners_cache_reads_and_refuse_stale_append(secret_store):
-    vault = secret_store._vault
+def test_independent_unlocked_owners_cache_reads_and_refuse_stale_append(
+    vault, vault_password
+):
     first = vault.save(b"PUBLIC-TEST-first", metadata={"tag": [1, "synthetic"]})
     other = Vault(CiphertextFile(vault.path), protection=vault.protection)
     try:
-        other.unlock(b"PUBLIC-TEST-snapshot-password")
+        other.unlock(vault_password)
         checkpoint = other.checkpoint()
         second = vault.save(b"PUBLIC-TEST-second")
         assert other.identifiers() == (first,)
@@ -78,16 +74,17 @@ def test_independent_unlocked_owners_cache_reads_and_refuse_stale_append(secret_
             other.save(b"PUBLIC-TEST-stale")
         assert not other.is_unlocked and vault.is_unlocked
         assert vault.path.read_bytes() == committed
-        other.unlock(b"PUBLIC-TEST-snapshot-password")
+        other.unlock(vault_password)
         assert other.identifiers() == (first, second)
     finally:
         other.close()
 
 
-def test_password_rotation_preserves_records_and_changes_data_key(secret_store):
+def test_password_rotation_preserves_records_and_changes_data_key(
+    vault, vault_password
+):
     from w3plex.security import vault_format as codec
 
-    vault = secret_store._vault
     notifications = []
 
     class Observer:
@@ -98,9 +95,9 @@ def test_password_rotation_preserves_records_and_changes_data_key(secret_store):
     vault.add_lock_listener(observer.locked)
     identifier = vault.save(b"PUBLIC-TEST-value", metadata={"source": "synthetic"})
     before = codec.parse(vault.path.read_bytes())
-    old_key = codec.unwrap(before, b"PUBLIC-TEST-snapshot-password")
+    old_key = codec.unwrap(before, vault_password)
     plaintext = codec.open_payload(before, old_key)
-    vault.change_password(b"PUBLIC-TEST-snapshot-password", b"PUBLIC-TEST-replacement")
+    vault.change_password(vault_password, b"PUBLIC-TEST-replacement")
     assert notifications == [False]
     after = codec.parse(vault.path.read_bytes())
     new_key = codec.unwrap(after, b"PUBLIC-TEST-replacement")

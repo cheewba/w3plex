@@ -1,4 +1,4 @@
-"""Shared fixtures for the new local secret-reference API."""
+"""Shared native protection and caller-owned vault lifetime."""
 
 import pytest
 
@@ -7,17 +7,32 @@ from w3plex.security.refs import SecretStore
 from w3plex.security.storage import CiphertextFile
 from w3plex.security.vault import Vault
 
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
+
+@pytest.fixture
+def vault_password():
+    return b"PUBLIC-TEST-snapshot-password"
 
 
 @pytest.fixture
-def secret_store(tmp_path):
+def protection():
     protection = ProcessProtection()
     protection.activate()
+    return protection
+
+
+@pytest.fixture
+def vault(tmp_path, protection, vault_password):
     directory = tmp_path / "secrets"
     directory.mkdir(mode=0o700)
     vault = Vault(CiphertextFile(directory / "vault"), protection=protection)
-    vault.create(PASSWORD)
-    vault.unlock(PASSWORD)
-    yield SecretStore(vault)
-    vault.close()
+    try:
+        vault.create(vault_password)
+        vault.unlock(vault_password)
+        yield vault
+    finally:
+        vault.close()
+
+
+@pytest.fixture
+def secret_store(vault):
+    return SecretStore(vault)

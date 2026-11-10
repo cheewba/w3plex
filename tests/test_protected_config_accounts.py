@@ -13,14 +13,13 @@ from web3 import Web3
 
 from w3plex.config.reading import load_config
 from w3plex.runner import Runner
-from w3plex.security import ISecretRef
+from w3plex.security import ISecretRef, SecretStore
 from w3plex.security.errors import PermissionDenied, SecurityError
 from w3plex.security.legacy import LegacyContext
 from w3plex.utils.loader import accounts_loader
 from w3plex.w3 import Account
 
 KEY = "11" * 32
-PASSWORD = b"PUBLIC-TEST-snapshot-password"
 FILE_PASSWORD = "PUBLIC-TEST-reader-password"
 
 
@@ -33,7 +32,7 @@ def file_bytes(value, encrypted):
 
 @pytest.mark.parametrize("encrypted", [False, True])
 def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
-    secret_store, tmp_path, encrypted
+    vault, vault_password, secret_store, tmp_path, encrypted
 ):
     data = tmp_path / "keys.txt"
     original = file_bytes(("# comment\n " + KEY + " \n").encode(), encrypted)
@@ -65,7 +64,7 @@ def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
             assert KEY not in repr(vars(account))
             assert data.read_bytes() == original
             assert len(calls) == 1
-            secret_store._vault.lock()
+            vault.lock()
             legacy.lock()
             with pytest.raises(PermissionDenied):
                 await runner.tree.alias()
@@ -73,7 +72,7 @@ def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
                 await account.sign("public message")
             data.write_text("changed private data\n")
             data.unlink()
-            secret_store._vault.unlock(PASSWORD)
+            vault.unlock(vault_password)
             restored = (await runner.tree.alias())[0]
             assert restored.address == account.address
             assert restored.key.parent.identifier == account.key.parent.identifier
@@ -149,9 +148,9 @@ def test_invalid_protected_values_cannot_leak_through_reader_errors(
     asyncio.run(check())
 
 
-def test_existing_account_loader_accepts_a_reference_without_disclosure(secret_store):
-    secret_store._confirm = lambda access: pytest.fail(
-        "Unexpected plaintext disclosure"
+def test_existing_account_loader_accepts_a_reference_without_disclosure(vault):
+    secret_store = SecretStore(
+        vault, confirm=lambda access: pytest.fail("Unexpected plaintext disclosure")
     )
     source = secret_store.capture((KEY + "\n").encode())
     accounts = asyncio.run(accounts_loader(file=source)())
@@ -161,10 +160,10 @@ def test_existing_account_loader_accepts_a_reference_without_disclosure(secret_s
 
 
 def test_denied_source_use_never_constructs_a_signing_account(
-    secret_store, monkeypatch
+    vault, secret_store, monkeypatch
 ):
     source = secret_store.capture((KEY + "\n").encode())
-    secret_store._vault.lock()
+    vault.lock()
     monkeypatch.setattr(
         "w3plex.w3.account.EthAccount.from_key",
         lambda value: pytest.fail("Denied source reached the signing dependency"),

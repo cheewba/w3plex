@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+from copy import deepcopy
 
 from cryptography.fernet import Fernet
 from w3ext import Account
@@ -75,8 +76,10 @@ def test_existing_reader_reopens_plain_file_on_each_call(tmp_path):
         tree = await config_loader.parse(cfg, str(tmp_path / "w3plex.yaml"))
         try:
             assert await tree.reader() == ["first"]
+            copied = deepcopy(tree.reader)
             data.write_text("second\n")
             assert await tree.reader() == ["second"]
+            assert await copied() == ["second"]
         finally:
             await tree.close()
 

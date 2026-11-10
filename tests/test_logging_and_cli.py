@@ -1,6 +1,7 @@
 import subprocess
 import sys
 
+import pytest
 from loguru import logger as base_logger
 
 from w3plex.log import Logger
@@ -25,7 +26,14 @@ def test_exception_logging_captures_traceback():
     assert records[0]["exception"].traceback is not None
 
 
-def test_cli_reports_errors_to_stderr():
+@pytest.mark.parametrize(
+    ("error", "exit_code", "message"),
+    [
+        ("ValueError('application failed')", 1, "application failed"),
+        ("KeyboardInterrupt()", 130, "cancelled"),
+    ],
+)
+def test_cli_reports_failure_to_stderr_without_traceback(error, exit_code, message):
     result = subprocess.run(
         [
             sys.executable,
@@ -33,7 +41,7 @@ def test_cli_reports_errors_to_stderr():
             (
                 "import w3plex.main as cli\n"
                 "def fail():\n"
-                "    raise ValueError('application failed')\n"
+                f"    raise {error}\n"
                 "cli.process_args = fail\n"
                 "cli.main()\n"
             ),
@@ -43,8 +51,8 @@ def test_cli_reports_errors_to_stderr():
         timeout=15,
         check=False,
     )
-    assert result.returncode == 1
-    assert "application failed" in result.stderr
+    assert result.returncode == exit_code
+    assert message in result.stderr
     assert "Traceback" not in result.stderr
 
 
@@ -76,12 +84,19 @@ def run_cli(tmp_path, *args):
 
 def test_cli_init_creates_usable_config_and_preserves_existing_files(tmp_path):
     config = tmp_path / "project" / "my config.yaml"
+    config.parent.mkdir()
+    companions = {
+        "chains.yaml": "existing chains\n",
+        "wallets.txt": "existing wallets\n",
+    }
+    for name, value in companions.items():
+        (config.parent / name).write_text(value)
     result = run_cli(tmp_path, "init", "--config", str(config))
     assert result.returncode == 0, result.stderr
     assert "__init__: w3plex.apps.balance:balance" in config.read_text()
     assert "items:" in config.read_text()
-    assert (config.parent / "wallets.txt").exists()
-    assert "${ETH_RPC_URL}" in (config.parent / "chains.yaml").read_text()
+    for name, value in companions.items():
+        assert (config.parent / name).read_text() == value
     original = config.read_text()
     result = run_cli(tmp_path, "init", "--config", str(config))
     assert result.returncode == 1
@@ -174,6 +189,7 @@ Path(".env").write_text("ETH_RPC_URL=https://offline.example\\n")
 from w3plex.main import process_args
 process_args(["init"])
 assert "${ETH_RPC_URL}" in Path("chains.yaml").read_text()
+assert Path("wallets.txt").exists()
 Path("wallets.txt").write_text("# Test address\\n0x0000000000000000000000000000000000000001\\n")
 chain = Chain(1, Currency("Ether", "ETH", 18), name="ethereum")
 chain.get_balance = AsyncMock(return_value=chain.currency(2))
