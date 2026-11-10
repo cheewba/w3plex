@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import pytest
 from cryptography.fernet import Fernet
 from eth_account import Account as EthAccount
+from w3ext import Account
 
 from w3plex.security.errors import PermissionDenied, SecurityError
 from w3plex.security.legacy import LegacyContext
@@ -232,8 +233,6 @@ def test_transform_error_and_missing_file_are_not_hidden(tmp_path):
 
 
 def test_accounts_and_wallets_loader_keep_legacy_types(tmp_path):
-    from w3ext import Account
-
     source = tmp_path / "keys.txt"
     source.write_text("01" * 32 + "\n")
     accounts = asyncio.run(accounts_loader(file=str(source))())

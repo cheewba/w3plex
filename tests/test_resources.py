@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 import sys
 
@@ -121,8 +122,6 @@ with builtins.open(descriptor) as stream:
 assert Path(os.environ["W3PLEX_KEYSTORE"]).exists()
 assert not (Path.cwd() / "private" / "secrets.vault").exists()
 """
-    import os
-
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=tmp_path,

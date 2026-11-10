@@ -20,6 +20,7 @@ from w3plex.security import (
 from w3plex.security.errors import (
     AuthenticationFailed,
     PermissionDenied,
+    SecurityError,
 )
 from w3plex.security.storage import StoreChanged
 
@@ -406,8 +407,6 @@ def test_migration_rejects_path_aliases_without_touching_other_files(tmp_path, a
             os.link(target, backup)
     context, _ = owner(path)
     try:
-        from w3plex.security.errors import SecurityError
-
         with pytest.raises(SecurityError):
             context.unlock_keystore()
         assert path.read_bytes() == target.read_bytes() == original
@@ -546,8 +545,6 @@ def test_interrupted_replacement_can_be_retried_without_losing_originals(
     try:
         with monkeypatch.context() as patch:
             patch.setattr(os, "replace", interrupt)
-            from w3plex.security.errors import SecurityError
-
             with pytest.raises(SecurityError):
                 context.unlock_keystore()
         assert path.with_name(path.name + ".legacy.bak").read_bytes() == original

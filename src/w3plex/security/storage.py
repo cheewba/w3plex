@@ -236,6 +236,7 @@ class CiphertextFile:
         Returns:
             A context manager that holds the lock until exit.
         """
+        # fcntl is POSIX-only; CiphertextFile construction rejects other hosts.
         import fcntl
 
         self._check_directory()

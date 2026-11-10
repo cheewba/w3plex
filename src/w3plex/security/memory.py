@@ -52,6 +52,7 @@ class ProcessProtection:
         """
         if sys.platform not in {"darwin", "linux"}:
             raise UnsupportedProtection()
+        # resource is POSIX-only; unsupported hosts must still import this module.
         import resource
 
         ok = False
@@ -113,6 +114,7 @@ class ProcessProtection:
             or self._status.platform != sys.platform
         ):
             raise UnsupportedProtection()
+        # Import only after checking the platform-bound protection status.
         import resource
 
         if resource.getrlimit(resource.RLIMIT_CORE) != (0, 0):

@@ -14,6 +14,8 @@ from .constants import (
     ACTIONS_CFG_KEY,
     APPLICATIONS_CFG_KEY,
     CONTEXT_CHAINS_KEY,
+    CONTEXT_CONFIG_KEY,
+    CONTEXT_EXTRAS_KEY,
     CONTEXT_VARS_KEY,
     VARS_COLLECTION,
 )
@@ -293,10 +295,6 @@ class Runner:
 
     @contextmanager
     def _app_context(self, app: _Application):
-        # place w3plex import here to let main() function
-        # add appropriate package to the PATH
-        from w3plex.constants import CONTEXT_CONFIG_KEY, CONTEXT_EXTRAS_KEY
-
         if self.cfg is None:
             raise RuntimeError("Runner is not initialized")
         cfg = dict(self.cfg)

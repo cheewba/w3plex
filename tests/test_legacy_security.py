@@ -12,10 +12,15 @@ import sys
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 from w3plex import security
-from w3plex.security import io as encryption_io
-from w3plex.security.errors import AuthenticationFailed, InvalidStore
+from w3plex.security import io as encryption_io, legacy as legacy_format
+from w3plex.security.errors import (
+    AuthenticationFailed,
+    InteractionRequired,
+    InvalidStore,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 
@@ -187,7 +192,6 @@ def test_decrypt_without_password_or_store_does_not_request_input(legacy, monkey
 
 def test_valid_plaintext_store_and_rejection_of_damaged_or_empty_stores(legacy):
     key = b"a" * 32
-    from cryptography.fernet import Fernet
 
     cipher = base64.b64encode(
         b"ENC1" + Fernet(base64.urlsafe_b64encode(key)).encrypt(b"hello")
@@ -366,8 +370,6 @@ def test_noninteractive_standalone_password_never_falls_back_to_echo(
         raise AssertionError("getpass fallback must not run")
 
     monkeypatch.setattr(encryption_io.getpass, "getpass", forbidden)
-    from w3plex.security.errors import InteractionRequired
-
     with pytest.raises(InteractionRequired):
         legacy.unlock_keystore()
     assert not Path(os.environ["W3PLEX_KEYSTORE"]).exists()
@@ -377,9 +379,6 @@ def test_noninteractive_standalone_password_never_falls_back_to_echo(
 def test_encryption_limits_preserve_files_and_store(
     tmp_path, monkeypatch, persist_keys
 ):
-    from w3plex.security import legacy as legacy_format
-    from w3plex.security.errors import InvalidStore
-
     def forbidden(_):
         raise AssertionError("Over-limit writes must fail before requesting a password")
 

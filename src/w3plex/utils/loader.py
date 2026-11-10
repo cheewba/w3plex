@@ -16,6 +16,7 @@ from ..security import ISecretRef, SecretString
 from ..security.diagnostics import private_async, private_call
 from ..security.errors import PermissionDenied
 from ..security.file_opener import PlainFile
+from ..w3.account import Account as ReferenceAccount
 from .filter import TemplateFilter
 
 type FileOpener = Callable[
@@ -305,8 +306,6 @@ def accounts_loader(
 
     def account(line: str | SecretString) -> Account:
         if isinstance(line, ISecretRef):
-            from ..w3.account import Account as ReferenceAccount
-
             return ReferenceAccount.from_key(line)
         return Account.from_key(line)
 

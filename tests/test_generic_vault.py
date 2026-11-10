@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from w3plex.security import SecretStore
+from w3plex.security import SecretStore, vault_format as codec
 from w3plex.security.errors import InvalidStore, PermissionDenied
 from w3plex.security.storage import CiphertextFile, StoreChanged
 from w3plex.security.vault import Vault
@@ -83,8 +83,6 @@ def test_independent_unlocked_owners_cache_reads_and_refuse_stale_append(
 def test_password_rotation_preserves_records_and_changes_data_key(
     vault, vault_password
 ):
-    from w3plex.security import vault_format as codec
-
     notifications = []
 
     class Observer:
