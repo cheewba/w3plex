@@ -1,0 +1,371 @@
+"""Real POSIX persistence, owner access and ciphertext-only crash artifacts."""
+
+import asyncio
+import os
+import selectors
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from w3plex.security import vault_format as codec
+from w3plex.security.storage import (
+    CiphertextFile,
+    StoreChanged,
+    UnsafeStorage,
+    WriterBusy,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures/vault-v1"
+
+
+@pytest.fixture
+def store(tmp_path):
+    directory = tmp_path / "private"
+    directory.mkdir(mode=0o700)
+    with CiphertextFile(directory / "vault") as storage:
+        yield storage
+
+
+def ciphertexts():
+    old = (FIXTURES / "sample.vault").read_bytes()
+    envelope = codec.parse(old)
+    new = codec.update_payload(
+        envelope, bytes(range(32)), b'{"records":[]}'
+    ).serialize()
+    return old, new
+
+
+def test_mode_and_ciphertext_checked_before_first_write(store, monkeypatch):
+    old, _ = ciphertexts()
+    observed = []
+    fdopen = os.fdopen
+
+    def inspect(fd, mode, *args, **kwargs):
+        if mode == "wb":
+            info = os.fstat(fd)
+            observed.append((stat.S_IMODE(info.st_mode), info.st_size))
+        return fdopen(fd, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", inspect)
+    store.write(old, expected=None)
+    assert observed == [(0o600, 0)]
+    for path in store.path.parent.iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert b"PUBLIC-TEST-v1-password" not in path.read_bytes()
+    assert store.path.read_bytes() == old
+
+
+@pytest.mark.parametrize("point", ["file-sync", "replace", "directory-sync"])
+def test_write_failure_leaves_complete_old_or_new_store(store, monkeypatch, point):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    fsync = os.fsync
+    calls = 0
+
+    def sync(fd):
+        nonlocal calls
+        calls += 1
+        if (point == "file-sync" and calls == 1) or (
+            point == "directory-sync" and calls == 2
+        ):
+            raise OSError("PUBLIC-TEST-sync-failure")
+        return fsync(fd)
+
+    def replace(*args, **kwargs):
+        raise OSError("PUBLIC-TEST-replace-failure")
+
+    monkeypatch.setattr(os, "fsync", sync)
+    if point == "replace":
+        monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(OSError):
+        store.write(new, expected=expected)
+    remaining = store.read()[0]
+    assert remaining == (new if point == "directory-sync" else old)
+    codec.open_payload(codec.parse(remaining), bytes(range(32)))
+    assert not list(store.path.parent.glob("*.tmp"))
+
+
+def test_restore_mtime_cannot_hide_a_changed_target(store):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    before = store.path.stat()
+    # tmpfs ctime can advance on kernel ticks rather than every syscall.
+    time.sleep(0.02)
+    store.path.write_bytes(old)
+    os.utime(store.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.path.stat().st_ctime_ns != before.st_ctime_ns
+    with pytest.raises(StoreChanged):
+        store.write(new, expected=expected)
+    assert store.path.read_bytes() == old
+
+
+def test_changed_bytes_are_rejected_when_all_stat_fields_collide(store, monkeypatch):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    before = store.path.stat()
+    fstat, stat_path = os.fstat, os.stat
+
+    class CoarseStat:
+        def __init__(self, value):
+            self.value = value
+
+        def __getattr__(self, name):
+            if name in {"st_mtime_ns", "st_ctime_ns"}:
+                return getattr(before, name)
+            return getattr(self.value, name)
+
+    def coarse(value):
+        return CoarseStat(value) if value.st_ino == before.st_ino else value
+
+    monkeypatch.setattr(os, "fstat", lambda fd: coarse(fstat(fd)))
+    monkeypatch.setattr(
+        os, "stat", lambda *args, **kwargs: coarse(stat_path(*args, **kwargs))
+    )
+    changed = old[:-1] + bytes([old[-1] ^ 1])
+    store.path.write_bytes(changed)
+    os.utime(store.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with pytest.raises(StoreChanged):
+        store.write(new, expected=expected)
+    assert store.path.read_bytes() == changed
+
+
+def test_temporary_name_substitution_is_detected_before_replace(store, monkeypatch):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    fsync = os.fsync
+    changed = False
+
+    def substitute(fd):
+        nonlocal changed
+        if not changed:
+            changed = True
+            path = next(store.path.parent.glob("*.tmp"))
+            path.unlink()
+            path.write_bytes(b"PUBLIC-TEST-substitute")
+            path.chmod(0o600)
+        return fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", substitute)
+    with pytest.raises((StoreChanged, UnsafeStorage)):
+        store.write(new, expected=expected)
+    assert store.path.read_bytes() == old
+
+
+def test_target_and_parent_substitution_do_not_modify_new_location(store, monkeypatch):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    parent = store.path.parent
+    fsync = os.fsync
+    changed = False
+
+    def substitute(fd):
+        nonlocal changed
+        if not changed:
+            changed = True
+            parent.rename(parent.with_name("moved"))
+            parent.mkdir(mode=0o700)
+        return fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", substitute)
+    with pytest.raises(UnsafeStorage):
+        store.write(new, expected=expected)
+    assert not list(parent.iterdir())
+    assert (parent.with_name("moved") / "vault").read_bytes() == old
+
+
+def test_other_process_cannot_write_while_lock_is_held(store):
+    old, new = ciphertexts()
+    expected = store.write(old, expected=None)
+    script = """import sys
+from w3plex.security.storage import CiphertextFile, WriterBusy
+with CiphertextFile(sys.argv[1]) as storage:
+    before = storage.read()[1]
+    try:
+        storage.write(b"PUBLIC-TEST-other-writer", expected=before)
+    except WriterBusy:
+        pass
+    else:
+        raise AssertionError("Concurrent writer was admitted")
+"""
+    with store.writer_guard():
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", script, str(store.path)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        with pytest.raises(WriterBusy):
+            store.write(new, expected=expected)
+    assert store.path.read_bytes() == old
+
+
+def test_writer_cleanup_after_interruption_and_rejected_lock_links(store, tmp_path):
+    with pytest.raises(KeyboardInterrupt), store.writer_guard():
+        raise KeyboardInterrupt
+    with store.writer_guard():
+        pass
+    lock = store.path.with_name("." + store.path.name + ".lock")
+    linked = tmp_path / "lock-alias"
+    os.link(lock, linked)
+    with pytest.raises(UnsafeStorage), store.writer_guard():
+        pytest.fail("Hard-linked lock was admitted")
+    linked.unlink()
+    lock.unlink()
+    lock.symlink_to(linked)
+    with pytest.raises(OSError), store.writer_guard():
+        pytest.fail("Symbolic lock was admitted")
+    lock.unlink()
+    with store.writer_guard():
+        pass
+
+
+def test_public_guard_separate_anchor_releases_on_async_cancellation(tmp_path):
+    script = """import sys
+from w3plex.security.storage import CiphertextFile, WriterBusy
+with CiphertextFile(sys.argv[1]) as anchor:
+    try:
+        with anchor.writer_guard():
+            pass
+    except WriterBusy:
+        sys.exit(23)
+"""
+    with (
+        CiphertextFile(tmp_path / "coordination") as anchor,
+        CiphertextFile(tmp_path / "first") as first,
+        CiphertextFile(tmp_path / "second") as second,
+    ):
+
+        def contender():
+            return subprocess.run(
+                [sys.executable, "-I", "-c", script, str(anchor.path)],
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+
+        async def scenario():
+            ready = asyncio.Event()
+
+            async def owner():
+                with anchor.writer_guard():
+                    first.write(b"PUBLIC-TEST-first", expected=None)
+                    second.write(b"PUBLIC-TEST-second", expected=None)
+                    ready.set()
+                    await asyncio.Future()
+
+            task = asyncio.create_task(owner())
+            try:
+                await asyncio.wait_for(ready.wait(), 10)
+                result = contender()
+                assert result.returncode == 23, result.stderr
+                assert first.read()[0] == b"PUBLIC-TEST-first"
+                assert second.read()[0] == b"PUBLIC-TEST-second"
+                assert not anchor.path.exists()
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(scenario())
+        result = contender()
+        assert result.returncode == 0, result.stderr
+
+
+def test_public_guard_owner_process_death_releases_lock(tmp_path):
+    script = """import sys
+from w3plex.security.storage import CiphertextFile
+with CiphertextFile(sys.argv[1]) as anchor, anchor.writer_guard():
+    print("ready", flush=True)
+    sys.stdin.read()
+"""
+    with CiphertextFile(tmp_path / "coordination") as anchor:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", script, str(anchor.path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(20), "Guard owner did not become ready"
+            assert process.stdout.readline() == "ready\n"
+            with pytest.raises(WriterBusy), anchor.writer_guard():
+                pytest.fail("Concurrent guard owner was admitted")
+            process.kill()
+            process.wait(timeout=20)
+            with anchor.writer_guard():
+                pass
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=20)
+
+
+@pytest.mark.parametrize(
+    "point", ["partial-write", "before-replace", "after-replace", "directory-sync"]
+)
+def test_process_crash_leaves_ciphertext_only_and_complete_target(
+    store, tmp_path, point
+):
+    old, new = ciphertexts()
+    store.write(old, expected=None)
+    incoming = tmp_path / "incoming"
+    incoming.write_bytes(new)
+    incoming.chmod(0o600)
+    script = """import os,sys
+from pathlib import Path
+from w3plex.security.storage import CiphertextFile
+point = sys.argv[3]
+replace, sync, fdopen = os.replace, os.fsync, os.fdopen
+calls = 0
+def write_stream(fd, mode, *args, **kwargs):
+    if point == "partial-write" and mode == "wb":
+        os.write(fd, incoming[:len(incoming)//2])
+        os._exit(42)
+    return fdopen(fd, mode, *args, **kwargs)
+def replace_file(*args, **kwargs):
+    if point == "before-replace":
+        os._exit(42)
+    replace(*args, **kwargs)
+    if point == "after-replace":
+        os._exit(42)
+def sync_file(fd):
+    global calls
+    calls += 1
+    if calls == 2 and point == "directory-sync":
+        os._exit(42)
+    return sync(fd)
+incoming = Path(sys.argv[2]).read_bytes()
+os.fdopen, os.replace, os.fsync = write_stream, replace_file, sync_file
+with CiphertextFile(sys.argv[1]) as storage:
+    storage.write(incoming, expected=storage.read()[1])
+raise AssertionError("Crash point was not reached")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(store.path), str(incoming), point],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 42, result.stderr
+    remaining = store.read()[0]
+    assert remaining == (old if point in {"partial-write", "before-replace"} else new)
+    codec.open_payload(codec.parse(remaining), bytes(range(32)))
+    for path in store.path.parent.iterdir():
+        data = path.read_bytes()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        if path.name.endswith(".tmp"):
+            assert new.startswith(data)
+        assert b"PUBLIC-TEST-v1-password" not in data
+        assert bytes(range(32)) not in data
+    # Kernel process teardown must release its writer lock.
+    store.write(old, expected=store.read()[1])

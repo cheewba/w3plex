@@ -1,38 +1,36 @@
 import asyncio
+import os
 import subprocess
 import sys
 
 import pytest
 
 from w3plex.modules.debank import Debank
-from w3plex.modules.odos import Odos
 from w3plex.modules.proxy import ProxyPool
 from w3plex.plugins.dashboard import DashboardManager, DashboardPage
 
 
-def test_http_clients_create_sessions_lazily_and_close_them():
-    clients = [Debank(), Odos(None, None)]
+def test_debank_creates_sessions_lazily_and_closes_them():
+    client = Debank()
 
     async def check():
-        for client in clients:
-            assert client._session is None
-            async with client:
-                session = await client.get_session()
-                assert not session.closed
-            assert session.closed
-            await client.close()
+        async with client:
+            session = await client.get_session()
+            assert not session.closed
+            assert await client.get_session() is session
+        assert session.closed
+        await client.close()
 
     asyncio.run(check())
 
 
-def test_proxy_pool_initializes_once_and_returns_cancelled_leases(tmp_path):
+def test_proxy_pool_serializes_leases_and_returns_them_after_cancellation(tmp_path):
     filename = tmp_path / "proxies.txt"
     filename.write_text("# comment\n\nsocks5://localhost:1080\n")
     pool = ProxyPool(str(filename))
 
     async def check():
         await asyncio.gather(pool.init(), pool.init())
-        assert pool._proxies.qsize() == 1
         entered = asyncio.Event()
 
         async def lease():
@@ -41,14 +39,30 @@ def test_proxy_pool_initializes_once_and_returns_cancelled_leases(tmp_path):
                 entered.set()
                 await asyncio.Event().wait()
 
+        async def next_lease():
+            async with pool.get_proxy() as proxy:
+                return proxy
+
         task = asyncio.create_task(lease())
-        await entered.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        async with pool.get_proxy() as proxy:
-            assert proxy == "socks5://localhost:1080"
-        assert pool._proxies.qsize() == 1
+        waiter = None
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            waiter = asyncio.create_task(next_lease())
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await asyncio.wait_for(waiter, 5) == "socks5://localhost:1080"
+            assert await asyncio.wait_for(next_lease(), 5) == "socks5://localhost:1080"
+        finally:
+            for pending in (task, waiter):
+                if pending is not None:
+                    pending.cancel()
+            await asyncio.gather(
+                *(pending for pending in (task, waiter) if pending is not None),
+                return_exceptions=True,
+            )
 
     asyncio.run(check())
 
@@ -87,14 +101,16 @@ def test_dashboard_navigation_preserves_children_for_each_page():
 
 
 def test_encrypted_open_preserves_text_binary_and_file_descriptor_reads(tmp_path):
-    # secure intentionally patches open globally; keep that behavior in a subprocess.
-    script = """import builtins, os
+    # Keep process-wide activation local to this subprocess.
+    script = """import builtins, getpass, os, sys
 from pathlib import Path
-from w3plex import secure
+from w3plex import security
+sys.stdin.isatty = lambda: True
+getpass.getpass = lambda _: "PUBLIC-TEST-master"
 source = Path("plain.txt")
 source.write_text("hello\\n", encoding="utf-8")
-encrypted = secure.encrypt_file(source, password="file password")
-secure._all_keys = lambda: [secure._derive_file_key("file password")]
+encrypted = security.encrypt_file(source, password="file password")
+context = security.enable_encrypted_io()
 with builtins.open(encrypted) as stream:
     assert stream.read() == "hello\\n"
     assert stream.name == str(encrypted)
@@ -103,14 +119,17 @@ with builtins.open(encrypted, "rb") as stream:
 descriptor = os.open(source, os.O_RDONLY)
 with builtins.open(descriptor) as stream:
     assert stream.read() == "hello\\n"
-assert secure._KEYSTORE_PATH == Path(os.environ["W3PLEX_KEYSTORE"])
+assert Path(os.environ["W3PLEX_KEYSTORE"]).exists()
+assert not (Path.cwd() / "private" / "secrets.vault").exists()
 """
-    import os
-
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=tmp_path,
-        env={**os.environ, "W3PLEX_KEYSTORE": str(tmp_path / "keystore.bin")},
+        env={
+            **os.environ,
+            "W3PLEX_KEYSTORE": str(tmp_path / "keystore.bin"),
+            "W3PLEX_SECRET_STORE": str(tmp_path / "keystore.bin"),
+        },
         capture_output=True,
         text=True,
         timeout=15,

@@ -1,23 +1,31 @@
 import argparse
 import asyncio
-import getpass
 import glob
 import io
 import os
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from rich import print
-from ruamel.yaml import dump as yaml_dump
-from ruamel.yaml import load as yaml_load
+from ruamel.yaml import dump as yaml_dump, load as yaml_load
 
-from w3plex.config import Dumper, Include
-from w3plex.config import Loader as YamlLoader
+from w3plex.config import (
+    Dumper,
+    Include,
+    Loader as YamlLoader,
+    load_config as read_config,
+)
+from w3plex.config.reading import Opener
 from w3plex.constants import APPLICATIONS_CFG_KEY
 from w3plex.runner import Runner
+from w3plex.security import (
+    decrypt_file,
+    enable_encrypted_io,
+    encrypt_file,
+)
 from w3plex.shell import Shell
 
 load_dotenv(Path.cwd() / ".env")
@@ -28,6 +36,7 @@ EMPTY_PASSWORD = "<!empty>"
 
 
 def subdict(d, ks):
+    """Copy the selected keys and their values into a new dictionary."""
     return {key: d[key] for key in ks}
 
 
@@ -40,6 +49,8 @@ def _get_base_args_parse(*args, **kwargs) -> argparse.ArgumentParser:
 
 
 def process_args(argv=None):
+    """Read CLI arguments and run the selected command."""
+    enable_encrypted_io()
     argv = sys.argv[1:] if argv is None else argv
     cfg_args, remaining = _get_base_args_parse(add_help=False).parse_known_args(argv)
     cfg_path = os.path.abspath(cfg_args.config)
@@ -122,8 +133,7 @@ def process_args(argv=None):
 
 
 def crypt_cmd(args, *, encrypt):
-    from w3plex.secure import decrypt_file, encrypt_file
-
+    """Encrypt or decrypt files selected by the CLI arguments."""
     files = sorted(
         {
             Path(filename)
@@ -137,7 +147,7 @@ def crypt_cmd(args, *, encrypt):
     if args.dst and len(files) != 1:
         raise ValueError("--output requires exactly one source file")
     password = (
-        getpass.getpass("File password: ")
+        enable_encrypted_io().file_password(files[0])
         if args.password == EMPTY_PASSWORD
         else args.password
     )
@@ -152,6 +162,7 @@ def crypt_cmd(args, *, encrypt):
 
 
 def run_shell_cmd(args, *, cfg, cfg_path):
+    """Open the interactive shell with an existing configuration."""
     if cfg is None:
         raise FileNotFoundError(
             f"Config not found: {cfg_path}. Run 'w3plex init' first."
@@ -160,6 +171,7 @@ def run_shell_cmd(args, *, cfg, cfg_path):
 
 
 def run_app_cmd(args, *, name, cfg, cfg_path):
+    """Read action arguments, run the configured application and close its resources."""
     app_args, app_kwargs = [], {}
     for item in getattr(args, "args", []):
         key, separator, value = item.partition("=")
@@ -189,6 +201,7 @@ def run_app_cmd(args, *, name, cfg, cfg_path):
 
 
 def init_cmd(args):
+    """Create a starter configuration, chain definitions and public wallet file."""
     target = Path(args.config).absolute()
     if target.exists():
         raise FileExistsError(f"Config already exists: {target}")
@@ -215,19 +228,18 @@ def init_cmd(args):
 
 
 def load_config(filename: str) -> dict[str, Any]:
-    from w3plex.secure import _secure_open
-
-    with cast(TextIO, _secure_open(filename, encoding="utf-8")) as stream:
-        expanded = os.path.expandvars(stream.read())
-    named = io.StringIO(expanded)
-    named.name = os.path.abspath(filename)
-    cfg = yaml_load(named, YamlLoader)
-    if not isinstance(cfg, dict):
-        raise TypeError(f"Config must be a YAML mapping: {filename}")
-    return cfg
+    """Read CLI configuration using standalone encrypted I/O and environment expansion."""
+    context = enable_encrypted_io()
+    return read_config(
+        filename,
+        opener=cast(Opener, context.open),
+        environment=os.environ,
+        include_encoding=None,
+    )
 
 
 def main():
+    """Run the CLI and report failures with process exit codes."""
     sys.path.insert(0, os.getcwd())
     try:
         process_args()

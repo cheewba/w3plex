@@ -9,6 +9,10 @@ The included balance application reads public wallet addresses and displays
 native-token or ERC-20 balances. You can also write your own Python applications,
 use the interactive shell, and share configured chains, clients, and proxies.
 
+Use `w3plex.security` to encrypt files or keep sensitive values in a vault. See
+[file encryption](docs/file-encryption.md) and
+[secret references](docs/secret-references.md) for examples.
+
 ## Install
 
 You need Python **3.12 or newer** and Git. CI currently checks Python 3.12.
@@ -326,38 +330,23 @@ the display runs. The balance application uses the progress-bar plugin.
 Encryption commands work without an application config:
 
 ```sh
-# Prompt for a file password and create wallets.txt.enc:
-w3plex encrypt wallets.txt
-# Also remember the file key in the encrypted keystore:
+# Create wallets.txt.enc and enter its password privately:
+w3plex encrypt wallets.txt --password
+# Save the file key for later reads:
 w3plex encrypt wallets.txt --add
-# Decrypt to a chosen destination:
-w3plex decrypt wallets.txt.enc --output restored-wallets.txt
-# Try a key from the keystore:
+# Read a saved key and choose the decrypted output path:
 w3plex decrypt wallets.txt.enc --keystore --output restored-wallets.txt
 ```
 
-`--overwrite` replaces the source in place. Without an output path, encryption
-adds `.enc` and decryption replaces the final suffix with `.dec`. Glob patterns
-and multiple sources are supported; `--output` accepts exactly one source.
+Use `--overwrite` to replace the source. Without an output path, encryption adds
+`.enc` and decryption replaces the final suffix with `.dec`. `--output` accepts
+one source file; glob patterns and multiple sources work without that option.
 
-When the CLI reads an encrypted config or input file, it decrypts it in memory
-and prompts as needed. The default keystore is `~/.keystore.bin`; set
-`W3PLEX_KEYSTORE` to choose another location. Its master password is separate from
-file passwords and is cached for the process lifetime.
-
-The current file format uses Fernet with a SHA-256-derived file key, and the
-keystore uses scrypt for its master key. Choose a strong, unique file password;
-the file format does not provide a slow password KDF. Prefer password prompts
-over putting passwords in shell history. Keep plaintext outputs and custom
-keystore paths out of Git as well as the default ignored files.
+See [file encryption](docs/file-encryption.md) for Python examples, encrypted
+`open()` and key-store settings. For values stored behind references, see
+[secret references](docs/secret-references.md).
 
 ## Other modules
-
-`w3plex.modules.odos.Odos` provides quotes, transaction assembly, token approvals,
-and swaps using an account and a chain. Use it as an async context manager or
-call `await client.close()` to release its HTTP session. Calling `swap()` submits
-transactions; quote retrieval does not. It is a Python integration, with no
-built-in swap CLI application.
 
 `TokenLookup`, `ContractLookup`, and `ContractMethodLookup` in `w3plex.utils.filter`
 resolve `chain:token`, `chain:address`, and `chain:address:method` templates against
@@ -384,6 +373,14 @@ pytest -q
 Tests use mocked blockchain/API responses and temporary files; they do not need
 RPC credentials or submit transactions. Live provider access and third-party
 API behavior need separate checks with your own configuration.
+
+Keep the smallest test suite that protects distinct regression risks. Extend
+existing behavioral tests before adding new ones; avoid private helpers and
+repetitive input matrices. Preserve checks for cryptographic formats, secret
+disclosure, migration, concurrency, atomic writes and failure recovery. Use the
+shared protection and vault fixtures, and pass confirmation callbacks through
+`SecretStore`'s public constructor. Internal inspection is justified when it is
+needed to verify memory erasure or inject a specific security failure.
 
 ## Troubleshooting
 

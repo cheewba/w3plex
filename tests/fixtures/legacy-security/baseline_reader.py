@@ -374,10 +374,13 @@ def _decrypt_if_needed(
 # ----------------------------------------------------------------------
 # Patched built‑in open (intercepts read‑only modes)
 # ----------------------------------------------------------------------
+if getattr(getattr(builtins.open, "__self__", None), "_w3plex_security_context", False):
+    # The new API owns this opener. Capturing it here would mix keystores.
+    raise SecureError("An explicit encrypted I/O context is already active")
 _orig_open = builtins.open
 
 
-def _secure_open(
+def secure_open(
     file,  # positional name preserved for compatibility
     mode: str = "r",
     buffering: int = -1,
@@ -435,8 +438,10 @@ def _secure_open(
     return replacement
 
 
+_secure_open = secure_open  # Preserve the legacy compatibility entry point.
+
 # Patch builtins once
-builtins.open = _secure_open
+builtins.open = secure_open
 
 
 # ----------------------------------------------------------------------
