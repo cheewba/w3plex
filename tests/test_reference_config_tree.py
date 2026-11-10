@@ -11,6 +11,7 @@ from w3plex.config import config_loader
 from w3plex.config.reading import load_reference_config
 from w3plex.security import ISecretRef
 from w3plex.security.legacy import LegacyContext
+from w3plex.utils.loader import using_file_opener
 
 
 def test_captured_yaml_keeps_constructor_and_object_reference_strings(
@@ -30,9 +31,8 @@ def test_captured_yaml_keeps_constructor_and_object_reference_strings(
     assert cfg.alias == "$reader"
 
     async def check():
-        tree = await config_loader.parse(
-            cfg, str(tmp_path / "w3plex.yaml"), file_opener=secret_store.capture_file
-        )
+        with using_file_opener(secret_store.capture_file):
+            tree = await config_loader.parse(cfg, str(tmp_path / "w3plex.yaml"))
         try:
             assert tree.alias is tree.reader
             value = (await tree.reader())[0]
@@ -63,9 +63,8 @@ def test_captured_includes_keep_relative_paths_and_metadata(secret_store, tmp_pa
     assert deepcopy(cfg).readers.__include_path__ == cfg.readers.__include_path__
 
     async def check():
-        tree = await config_loader.parse(
-            cfg, str(tmp_path / "w3plex.yaml"), file_opener=secret_store.capture_file
-        )
+        with using_file_opener(secret_store.capture_file):
+            tree = await config_loader.parse(cfg, str(tmp_path / "w3plex.yaml"))
         try:
             value = (await tree.readers.lines())[0]
             assert value.ref(silent=True) == "included external data"

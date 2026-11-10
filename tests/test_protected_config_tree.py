@@ -15,7 +15,7 @@ from w3plex.security.errors import PermissionDenied
 from w3plex.security.memory import ProcessProtection
 from w3plex.security.storage import CiphertextFile
 from w3plex.security.vault import Vault
-from w3plex.utils.loader import FileLoader, get_file_opener
+from w3plex.utils.loader import FileLoader, get_file_opener, using_file_opener
 
 PASSWORD = b"PUBLIC-TEST-snapshot-password"
 
@@ -77,9 +77,8 @@ def test_lazy_reader_retains_opener_after_initialization(secret_store, tmp_path)
     }
 
     async def check():
-        tree = await config_loader.parse(
-            cfg, str(tmp_path / "w3plex.yaml"), file_opener=secret_store.capture_file
-        )
+        with using_file_opener(secret_store.capture_file):
+            tree = await config_loader.parse(cfg, str(tmp_path / "w3plex.yaml"))
         try:
             assert get_file_opener() is None
             reader = await tree.reader()
@@ -129,11 +128,8 @@ def test_generator_reader_factory_keeps_configured_opener(
     }
 
     async def check():
-        tree = await config_loader.parse(
-            cfg,
-            str(tmp_path / "w3plex.yaml"),
-            file_opener=secret_store.capture_file if protected else None,
-        )
+        with using_file_opener(secret_store.capture_file if protected else None):
+            tree = await config_loader.parse(cfg, str(tmp_path / "w3plex.yaml"))
         try:
             reader = await tree.reader()
             assert get_file_opener() is None

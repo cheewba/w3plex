@@ -1,7 +1,8 @@
 # File capture with sync or async callbacks
 
-Trusted hosts can pass `file_opener` to `Runner.init` or
-`config_loader.parse`. The callback accepts a file path and returns an
+Trusted hosts can pass `file_opener` to `Runner.init`. Direct callers of
+`config_loader.parse` supply the opener through `using_file_opener` instead
+of a parser argument. The callback accepts a file path and returns an
 `ISecretRef[bytes]` directly or through an awaitable. The parser constructs the
 same readers and retains this callback for later Lazy factories and Runner
 application calls.
@@ -26,6 +27,16 @@ with using_file_opener(capture):
 
 values = await reader()
 ```
+
+The same context supplies readers and lazy factories created by the parser:
+
+```python
+with using_file_opener(capture):
+    tree = await config_loader.parse(config, config_path)
+```
+
+Parsing preserves the caller's opener context, including on failure or
+cancellation. `Runner.init` establishes and restores this context itself.
 
 The reader retains the callback after leaving the context.
 `get_file_opener()` reads the current callback. These APIs live in

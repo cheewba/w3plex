@@ -180,12 +180,12 @@ class Runner:
         self.cfg_path = cfg_path
         self._file_opener = file_opener
         try:
-            self._tree = await loader.parse(
-                cfg,
-                cfg_path,
-                file_opener=file_opener,
-                resource_owner=resource_owner,
-            )
+            with using_file_opener(file_opener):
+                self._tree = await loader.parse(
+                    cfg,
+                    cfg_path,
+                    resource_owner=resource_owner,
+                )
         except BaseException:
             if resource_owner is None:
                 await self.finalize()

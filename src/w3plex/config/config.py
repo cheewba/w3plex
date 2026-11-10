@@ -24,7 +24,7 @@ from ..constants import (
 )
 from ..exceptions import ConfigError
 from ..utils import AttrDict, as_future, get_context, get_scope, load_path
-from ..utils.loader import FileOpener, get_file_opener, using_file_opener
+from ..utils.loader import get_file_opener, using_file_opener
 
 __all__ = ["ConfigTree", "Lazy", "config_loader"]
 
@@ -185,11 +185,11 @@ class _ConfigLoader:
         cfg: dict,
         cfg_path: str,
         *,
-        file_opener: FileOpener | None = None,
         resource_owner: AsyncExitStack | None = None,
     ) -> ConfigTree:
         """Resolve dependencies once, including forward references inside lists.
 
+        Readers and lazy factories inherit the caller's file opener context.
         With resource_owner, the caller closes constructed resources on both
         success and failure. Otherwise parse/tree retain their usual ownership.
         """
@@ -291,8 +291,7 @@ class _ConfigLoader:
                 active.remove(parts)
 
         try:
-            with using_file_opener(file_opener):
-                tree = await parse(cfg, (), root_dir)
+            tree = await parse(cfg, (), root_dir)
         except BaseException:
             if resource_owner is None:
                 await resources.aclose()

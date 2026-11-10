@@ -120,6 +120,39 @@ def test_cancelled_sync_wait_does_not_cancel_worker_capture():
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("runner", [False, True])
+@pytest.mark.parametrize("failure", [ValueError, asyncio.CancelledError])
+def test_failed_construction_preserves_caller_context(
+    tmp_path, monkeypatch, runner, failure
+):
+    def outer(path):
+        return Reference(b"outer\n")
+
+    def inner(path):
+        return Reference(b"inner\n")
+
+    async def factory():
+        assert get_file_opener() is (inner if runner else outer)
+        raise failure()
+
+    monkeypatch.setattr("w3plex.config.config.load_path", lambda path: factory)
+
+    async def check():
+        cfg = {"value": {"__init__": "fixture:factory"}}
+        with using_file_opener(outer):
+            with pytest.raises(failure):
+                if runner:
+                    await Runner().init(
+                        cfg, str(tmp_path / "config.yaml"), file_opener=inner
+                    )
+                else:
+                    await config_loader.parse(cfg, str(tmp_path / "config.yaml"))
+            assert get_file_opener() is outer
+        assert get_file_opener() is None
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize("protected", [False, True])
 def test_line_filters_offsets_and_transform_hook(tmp_path, protected):
     raw = b"\xef\xbb\xbf # comment\r\n \xc3\xa9clair \r\n skip\r two\n\n"
@@ -175,11 +208,15 @@ def test_cancelled_construction_restores_sync_context(tmp_path, monkeypatch, run
     async def check():
         cfg = {"value": {"__init__": "fixture:factory"}}
         host = Runner() if runner else config_loader
-        task = asyncio.create_task(
-            (host.init if runner else host.parse)(
-                cfg, str(tmp_path / "config.yaml"), file_opener=opener
-            )
-        )
+
+        async def construct():
+            if runner:
+                await host.init(cfg, str(tmp_path / "config.yaml"), file_opener=opener)
+            else:
+                with using_file_opener(opener):
+                    await host.parse(cfg, str(tmp_path / "config.yaml"))
+
+        task = asyncio.create_task(construct())
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):

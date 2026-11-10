@@ -367,9 +367,9 @@ def test_late_config_readers_retain_async_context(
             await host.init(cfg, str(tmp_path / "config.yaml"), file_opener=opener)
             tree = host.tree
         else:
-            tree = await config_loader.parse(
-                cfg, str(tmp_path / "config.yaml"), file_opener=opener
-            )
+            with using_file_opener(opener):
+                tree = await config_loader.parse(cfg, str(tmp_path / "config.yaml"))
+                assert get_file_opener() is opener
         try:
             assert get_file_opener() is None
             reader = tree.reader if kind == "direct" else await tree.reader()
@@ -486,11 +486,13 @@ def test_concurrent_parsers_keep_independent_late_openers(tmp_path, monkeypatch,
                 }
             }
 
+        async def parse_with_opener(opener):
+            with using_file_opener(opener):
+                return await config_loader.parse(cfg(), str(tmp_path / "config.yaml"))
+
         trees = await asyncio.gather(
             *(
-                config_loader.parse(
-                    cfg(), str(tmp_path / "config.yaml"), file_opener=opener
-                )
+                parse_with_opener(opener)
                 for opener in (
                     first_opener,
                     second_sync_opener if mixed else second_opener,
