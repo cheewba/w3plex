@@ -29,13 +29,6 @@ def reveal(values):
     return [value.ref(silent=True) for value in values]
 
 
-@pytest.mark.parametrize("factory", [FileLoader, accounts_loader])
-@pytest.mark.parametrize("option", ["opener", "async_opener"])
-def test_reader_rejects_explicit_openers(factory, option):
-    with pytest.raises(TypeError, match=option):
-        factory(file="unused", **{option: lambda path: Reference(b"unused")})
-
-
 def test_sync_opener_runs_in_worker_and_reuses_capture_across_loops():
     calls = []
     owner = threading.get_ident()

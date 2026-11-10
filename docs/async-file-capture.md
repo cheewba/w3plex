@@ -40,8 +40,8 @@ cancellation. `Runner.init` establishes and restores this context itself.
 
 The reader retains the callback after leaving the context.
 `get_file_opener()` reads the current callback. These APIs live in
-`w3plex.utils.loader`. Reader constructors no longer accept `opener` or
-`async_opener`; use `using_file_opener` instead. The separate `AsyncFileOpener`,
+`w3plex.utils.loader`. Reader configuration contains only `file` and `filter`;
+select the opener through `using_file_opener`. The separate `AsyncFileOpener`,
 async context accessors and `async_file_opener` host argument have been removed;
 use `FileOpener`, the shared context and `file_opener` for both callback kinds.
 

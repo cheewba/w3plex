@@ -45,12 +45,8 @@ class FileLoaderConfig(TypedDict):
 
 
 class FileLoader[T]:
-    def __init__(
-        self, *, file: str | Path | ISecretRef[bytes], filter: str | None = None
-    ):
-        self.config: FileLoaderConfig = {"file": file}
-        if filter is not None:
-            self.config["filter"] = filter
+    def __init__(self, **config: Unpack[FileLoaderConfig]):
+        self.config = config
         self._opener = get_file_opener()
         self._source: ISecretRef[bytes] | None = None
         self._source_lock = threading.Lock() if self._opener is not None else None
