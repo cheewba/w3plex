@@ -34,13 +34,35 @@ file reads inside that scope.
 
 ## Use loaders from config
 
-With a runner, pass the opener to `init()`:
+Set the opener context while initializing a runner:
 
 ```python
-await runner.init(config, config_path, file_opener=capture)
+with using_file_opener(capture):
+    await runner.init(config, config_path)
 ```
 
-With the parser directly, set the context around the call:
+The runner keeps this opener for application calls after the block ends. It
+borrows the opener; the application remains responsible for closing it. The
+`file_opener` argument to `Runner.init()` has been replaced by this context.
+
+Without an opener in the context, each runner creates its own default opener.
+That opener detects ordinary, ENC1 and W3FILE1 sources. Ordinary files still
+return strings and are read again on each call. Encrypted files return
+`SecretString` references backed by an immutable copy of the original ciphertext.
+Later reads do not reopen the source file or keep its decoded contents.
+
+The default opener uses standalone password input and the selected file-key
+store described in [file encryption](file-encryption.md). It creates its
+decryption context only for encrypted reads. Ordinary reads and runner
+initialization do not request a password or open a store. It leaves
+`builtins.open` unchanged. `await runner.finalize()` closes only its own default
+opener and invalidates its references. Those references require `silent=True`
+for trusted reads; they have no disclosure-confirmation handler.
+
+`using_file_opener(None)` disables capture for directly created readers. A runner
+initialized in that scope uses its default opener.
+
+With the parser directly, set the context around the call as before:
 
 ```python
 with using_file_opener(capture):
@@ -65,3 +87,9 @@ back to reading the source as plain text.
 An opener may run long after config loading. Check current access and request
 any required private input when it runs, rather than saving a password or session
 number when creating the config tree.
+
+Custom openers normally return `ISecretRef[bytes]`. An opener that also supports
+ordinary reads can return `w3plex.security.file_opener.PlainFile(raw_bytes)` for
+that case. These bytes are decoded as ordinary text and are not cached. Returning
+raw bytes directly is refused, and a failed encrypted read never falls back to
+ordinary reading.

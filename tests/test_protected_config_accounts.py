@@ -16,7 +16,7 @@ from w3plex.runner import Runner
 from w3plex.security import ISecretRef, SecretStore
 from w3plex.security.errors import PermissionDenied, SecurityError
 from w3plex.security.legacy import LegacyContext
-from w3plex.utils.loader import accounts_loader
+from w3plex.utils.loader import accounts_loader, using_file_opener
 from w3plex.w3 import Account
 
 KEY = "11" * 32
@@ -55,7 +55,8 @@ def test_yaml_account_loader_keeps_snapshot_and_signs_after_unlock(
 
     async def check():
         runner = Runner()
-        await runner.init(cfg, str(config), file_opener=opener)
+        with using_file_opener(opener):
+            await runner.init(cfg, str(config))
         try:
             account = (await runner.tree.accounts.main())[0]
             assert type(account) is Account
@@ -107,11 +108,8 @@ def test_existing_public_address_loader_returns_validated_strings(
 
     async def check():
         runner = Runner()
-        await runner.init(
-            cfg,
-            str(config),
-            file_opener=partial(secret_store.capture_file, context=legacy),
-        )
+        with using_file_opener(partial(secret_store.capture_file, context=legacy)):
+            await runner.init(cfg, str(config))
         try:
             assert runner.tree.wallets == [Web3.to_checksum_address(address)]
             assert type(runner.tree.wallets[0]) is str
@@ -134,11 +132,8 @@ def test_invalid_protected_values_cannot_leak_through_reader_errors(
     async def check():
         runner = Runner()
         with pytest.raises(SecurityError) as caught:
-            await runner.init(
-                cfg,
-                str(tmp_path / "w3plex.yaml"),
-                file_opener=secret_store.capture_file,
-            )
+            with using_file_opener(secret_store.capture_file):
+                await runner.init(cfg, str(tmp_path / "w3plex.yaml"))
             await runner.tree["values"]()
         assert secret not in str(caught.value)
         assert caught.value.__cause__ is None

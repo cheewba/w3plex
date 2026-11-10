@@ -208,10 +208,19 @@ class _ConfigLoader:
         Returns:
             A ConfigTree containing the created objects and named collections.
         """
+        tree = ConfigTree()
+        if resource_owner is None:
+            await populate_config_tree(tree, cfg, cfg_path, loader=self)
+        else:
+            await self._populate(tree, cfg, cfg_path, resource_owner)
+        return tree
+
+    async def _populate(
+        self, target: ConfigTree, cfg: dict, cfg_path: str, resources: AsyncExitStack
+    ) -> None:
         collections = defaultdict(AttrDict)
         memo: dict[tuple[str, ...], Any] = {}
         active: set[tuple[str, ...]] = set()
-        resources = resource_owner if resource_owner is not None else AsyncExitStack()
         owned: set[int] = set()
         root_dir = os.path.dirname(os.path.abspath(cfg_path))
 
@@ -305,15 +314,10 @@ class _ConfigLoader:
             finally:
                 active.remove(parts)
 
-        try:
-            tree = await parse(cfg, (), root_dir)
-        except BaseException:
-            if resource_owner is None:
-                await resources.aclose()
-            raise
-        return ConfigTree(
-            tree, collections, resources if resource_owner is None else None
-        )
+        tree = await parse(cfg, (), root_dir)
+        target.update(cast(dict[str, Any], tree))
+        target._collections = collections
+        target._loaded = True
 
 
 class ConfigTree(AttrDict):
@@ -321,13 +325,15 @@ class ConfigTree(AttrDict):
 
     def __init__(
         self,
-        tree,
+        tree=None,
         collections: dict[str, AttrDict] | None = None,
         resources: AsyncExitStack | None = None,
     ):
-        super().__init__(tree)
+        super().__init__(tree if tree is not None else {})
         self._collections = collections if collections is not None else {}
         self._resources = resources or AsyncExitStack()
+        self._loaded = tree is not None
+        self._cleanup: asyncio.Task[None] | None = None
 
     def get_collection(self, name: str):
         """Return a named collection, or None when it is absent."""
@@ -338,8 +344,34 @@ class ConfigTree(AttrDict):
         return dict(self._collections)
 
     async def close(self):
-        """Close the tree's resources in the reverse order they were created."""
-        await self._resources.aclose()
+        """Join one cleanup task, preserving its result across cancelled waiters."""
+        if self._cleanup is None:
+            self._cleanup = asyncio.create_task(self._resources.aclose())
+            self._cleanup.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+        await asyncio.shield(self._cleanup)
+
+
+async def populate_config_tree(
+    tree: ConfigTree,
+    cfg: dict,
+    cfg_path: str,
+    *,
+    loader: _ConfigLoader | None = None,
+) -> None:
+    """Build an existing tree that owns resources from the start of construction.
+
+    Failed construction starts the tree's own cleanup. Cancelled callers can
+    await tree.close() again to join that cleanup and observe its result.
+    """
+    if tree._loaded or tree._cleanup is not None:
+        raise RuntimeError("Config tree is already loaded or closed")
+    try:
+        await (loader or config_loader)._populate(tree, cfg, cfg_path, tree._resources)
+    except BaseException:
+        await tree.close()
+        raise
 
 
 def _resolve_segments(value, segments, path):

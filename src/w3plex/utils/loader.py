@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import io
 import re
 import threading
 from collections.abc import Awaitable, Callable, Iterator
@@ -14,10 +15,12 @@ from web3 import Web3
 from ..security import ISecretRef, SecretString
 from ..security.diagnostics import private_async, private_call
 from ..security.errors import PermissionDenied
+from ..security.file_opener import PlainFile
 from .filter import TemplateFilter
 
 type FileOpener = Callable[
-    [str | Path], ISecretRef[bytes] | Awaitable[ISecretRef[bytes]]
+    [str | Path],
+    ISecretRef[bytes] | PlainFile | Awaitable[ISecretRef[bytes] | PlainFile],
 ]
 
 _FILE_OPENER: ContextVar[FileOpener | None] = ContextVar(
@@ -39,8 +42,8 @@ def using_file_opener(opener: FileOpener | None) -> Iterator[None]:
     """Set the opener for readers created inside a with block.
 
     Args:
-        opener: A sync or async callback returning a byte reference. None disables
-            capture in this scope.
+        opener: A sync or async callback returning a byte reference, or PlainFile for
+            ordinary uncached reads. None disables capture in this scope.
 
     Returns:
         A context manager that restores the previous opener on exit.
@@ -92,8 +95,8 @@ class FileLoader[T]:
     ) -> list[T] | list[str] | list[SecretString]:
         """Read selected lines and optionally apply a function to each.
 
-        Plain files return strings. Captured files return SecretString references. A
-        successful file capture is reused on later calls.
+        Ordinary reads return strings. Protected captures return SecretString
+        references. A successful protected capture is reused on later calls.
 
         Args:
             fn: Optional function called with each str or SecretString value. Results
@@ -111,10 +114,19 @@ class FileLoader[T]:
         )
 
         file = self.config["file"]
+        source: ISecretRef[bytes] | None = None
+        lines: list[str] = []
         if isinstance(file, ISecretRef):
             source = file
         elif self._opener is not None:
-            source = await self._capture(file, self._opener)
+            captured = await self._capture(file, self._opener)
+            if isinstance(captured, PlainFile):
+                with io.TextIOWrapper(
+                    io.BytesIO(captured.data), encoding="utf-8-sig"
+                ) as stream:
+                    lines = list(stream)
+            else:
+                source = captured
         else:
 
             def read_lines():
@@ -122,6 +134,7 @@ class FileLoader[T]:
                     return list(fr)
 
             lines = await asyncio.to_thread(read_lines)
+        if source is None:
             return [
                 val
                 for line in lines
@@ -130,13 +143,13 @@ class FileLoader[T]:
                 and (val := self.process_line(line.strip(), transform)) is not None
             ]
 
-        lines = private_call(
+        references = private_call(
             lambda: self._reference_lines(source, source.ref(silent=True), flt)
         )
         return private_call(
             lambda: [
                 value
-                for line in lines
+                for line in references
                 if (value := self.process_line(line, transform)) is not None
             ]
         )
@@ -154,7 +167,9 @@ class FileLoader[T]:
         return fn(line)
 
     @private_async
-    async def _capture(self, file: str | Path, opener: FileOpener) -> ISecretRef[bytes]:
+    async def _capture(
+        self, file: str | Path, opener: FileOpener
+    ) -> ISecretRef[bytes] | PlainFile:
         """Capture a file once and reuse the saved reference.
 
         Args:
@@ -162,7 +177,8 @@ class FileLoader[T]:
             opener: Sync or async callback returning a byte reference.
 
         Returns:
-            The source reference. Async work runs in the task that called this method.
+            The source reference or uncached ordinary bytes. Async work runs in the
+            task that called this method.
         """
         async with self._async_source_lock:
             if self._source is None:
@@ -187,6 +203,8 @@ class FileLoader[T]:
                 if inspect.isawaitable(source):
                     source = await source
 
+                if isinstance(source, PlainFile):
+                    return source
                 if not isinstance(source, ISecretRef):
                     raise PermissionDenied()
 
@@ -214,7 +232,7 @@ class FileLoader[T]:
 
     def _capture_sync(
         self, file: str | Path, opener: FileOpener
-    ) -> ISecretRef[bytes] | Awaitable[ISecretRef[bytes]]:
+    ) -> ISecretRef[bytes] | PlainFile | Awaitable[ISecretRef[bytes] | PlainFile]:
         """Call a sync opener in a worker thread.
 
         Args:
@@ -233,7 +251,7 @@ class FileLoader[T]:
             if isinstance(source, ISecretRef):
                 # Keep the result even if the reader stops waiting for this worker.
                 self._source = source
-            elif not inspect.isawaitable(source):
+            elif not isinstance(source, PlainFile) and not inspect.isawaitable(source):
                 raise PermissionDenied()
 
             return source

@@ -48,7 +48,8 @@ def test_plain_yaml_keeps_factories_references_and_include_paths(
 
     async def check():
         runner = Runner()
-        await runner.init(cfg, str(path), file_opener=secret_store.capture_file)
+        with using_file_opener(secret_store.capture_file):
+            await runner.init(cfg, str(path))
         try:
             assert runner.tree.alias is runner.tree.readers.lines
             values = await runner.tree.alias()
@@ -171,14 +172,18 @@ def test_concurrent_factories_and_later_reads_keep_owner(
 
     async def check():
         runners = [Runner(), Runner()]
+
+        async def initialize(runner, path, store):
+            with using_file_opener(store.capture_file):
+                await runner.init(
+                    {"reader": {"__init__": "fixture:factory", "file": str(path)}},
+                    str(tmp_path / "w3plex.yaml"),
+                )
+
         try:
             await asyncio.gather(
                 *(
-                    runner.init(
-                        {"reader": {"__init__": "fixture:factory", "file": str(path)}},
-                        str(tmp_path / "w3plex.yaml"),
-                        file_opener=store.capture_file,
-                    )
+                    initialize(runner, path, store)
                     for runner, path, store in zip(
                         runners, paths, (secret_store, other_store), strict=True
                     )
@@ -241,11 +246,10 @@ def test_failed_protected_factory_restores_context_and_runner_state(
 
     async def check():
         runner = Runner()
-        with pytest.raises(PermissionDenied):
+        with pytest.raises(PermissionDenied), using_file_opener(denied):
             await runner.init(
                 {"reader": {"__init__": "fixture:factory", "file": str(data)}},
                 str(tmp_path / "w3plex.yaml"),
-                file_opener=denied,
             )
         assert not runner.is_initialized
         assert get_file_opener() is None
@@ -274,11 +278,11 @@ def test_application_created_reader_uses_runner_opener(
 
     async def check():
         runner = Runner()
-        await runner.init(
-            {"applications": {"sample": {"__init__": "fixture:sample"}}},
-            str(tmp_path / "w3plex.yaml"),
-            file_opener=secret_store.capture_file,
-        )
+        with using_file_opener(secret_store.capture_file):
+            await runner.init(
+                {"applications": {"sample": {"__init__": "fixture:sample"}}},
+                str(tmp_path / "w3plex.yaml"),
+            )
         try:
             await runner.tree.applications.sample("read")
             assert isinstance(received[0], ISecretRef)

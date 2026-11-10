@@ -36,7 +36,7 @@ def test_failed_construction_preserves_caller_context(
         return Reference(b"inner\n")
 
     async def factory():
-        assert get_file_opener() is (inner if runner else outer)
+        assert get_file_opener() is inner
         raise failure()
 
     monkeypatch.setattr("w3plex.config.config.load_path", lambda path: factory)
@@ -44,11 +44,9 @@ def test_failed_construction_preserves_caller_context(
     async def check():
         cfg = {"value": {"__init__": "fixture:factory"}}
         with using_file_opener(outer):
-            with pytest.raises(failure):
+            with pytest.raises(failure), using_file_opener(inner):
                 if runner:
-                    await Runner().init(
-                        cfg, str(tmp_path / "config.yaml"), file_opener=inner
-                    )
+                    await Runner().init(cfg, str(tmp_path / "config.yaml"))
                 else:
                     await config_loader.parse(cfg, str(tmp_path / "config.yaml"))
             assert get_file_opener() is outer
@@ -77,7 +75,8 @@ def test_cancelled_construction_restores_sync_context(tmp_path, monkeypatch, run
 
         async def construct():
             if runner:
-                await host.init(cfg, str(tmp_path / "config.yaml"), file_opener=opener)
+                with using_file_opener(opener):
+                    await host.init(cfg, str(tmp_path / "config.yaml"))
             else:
                 with using_file_opener(opener):
                     await host.parse(cfg, str(tmp_path / "config.yaml"))
@@ -142,7 +141,8 @@ def test_late_config_readers_retain_async_context(
     async def check():
         host = Runner() if use_runner else None
         if host is not None:
-            await host.init(cfg, str(tmp_path / "config.yaml"), file_opener=opener)
+            with using_file_opener(opener):
+                await host.init(cfg, str(tmp_path / "config.yaml"))
             tree = host.tree
         else:
             with using_file_opener(opener):
@@ -181,11 +181,10 @@ def test_failed_runner_restores_async_context_and_can_reinitialize(
         expected = (
             asyncio.CancelledError if failure == "cancel" else InteractionRequired
         )
-        with pytest.raises(expected):
+        with pytest.raises(expected), using_file_opener(opener):
             await runner.init(
                 {"value": {"__init__": "fixture:factory"}},
                 str(tmp_path / "config.yaml"),
-                file_opener=opener,
             )
         assert not runner.is_initialized
         assert get_file_opener() is None
@@ -216,11 +215,11 @@ def test_application_created_readers_use_runner_async_context(tmp_path, monkeypa
 
     async def check():
         runner = Runner()
-        await runner.init(
-            {"applications": {"sample": {"__init__": "fixture:sample"}}},
-            str(tmp_path / "config.yaml"),
-            file_opener=opener,
-        )
+        with using_file_opener(opener):
+            await runner.init(
+                {"applications": {"sample": {"__init__": "fixture:sample"}}},
+                str(tmp_path / "config.yaml"),
+            )
         try:
             await runner.tree.applications.sample("read")
             assert calls == owners

@@ -39,6 +39,40 @@ def _terminal_password(request: PasswordRequest) -> str:
     return request_password(prompts[request.kind])
 
 
+def create_context() -> EncryptedIOContext:
+    """Create an owned standalone context without activating global file reads.
+
+    Uses the selected standalone keystore and terminal password input. Construction
+    does not open the store or request a password. The caller must close the context.
+    """
+    # Never capture another context's decryptor as the raw file opener.
+    opener = builtins.open
+    if getattr(getattr(opener, "__self__", None), "_w3plex_security_context", False):
+        opener = io.open
+    legacy_path = os.environ.get("W3PLEX_KEYSTORE")
+    modern_path = os.environ.get("W3PLEX_SECRET_STORE")
+    if (
+        legacy_path
+        and modern_path
+        and (
+            Path(legacy_path).expanduser().absolute()
+            != Path(modern_path).expanduser().absolute()
+        )
+    ):
+        raise ValueError(
+            "Use one keystore path: W3PLEX_KEYSTORE and W3PLEX_SECRET_STORE differ"
+        )
+    path = Path(legacy_path or modern_path or "~/.keystore.bin").expanduser()
+    return EncryptedIOContext(
+        legacy_keystore_path=path,
+        keystore_path=path,
+        input_handler=_terminal_password,
+        opener=opener,
+        persist_keys=True,
+        persist_legacy_keys=True,
+    )
+
+
 def default_context() -> EncryptedIOContext:
     """Get or create the shared context used by standalone helpers.
 
@@ -48,34 +82,7 @@ def default_context() -> EncryptedIOContext:
     global _CONTEXT
     with _CONTEXT_LOCK:
         if _CONTEXT is None:
-            # Never capture another context's decryptor as the raw file opener.
-            opener = builtins.open
-            if getattr(
-                getattr(opener, "__self__", None), "_w3plex_security_context", False
-            ):
-                opener = io.open
-            legacy_path = os.environ.get("W3PLEX_KEYSTORE")
-            modern_path = os.environ.get("W3PLEX_SECRET_STORE")
-            if (
-                legacy_path
-                and modern_path
-                and (
-                    Path(legacy_path).expanduser().absolute()
-                    != Path(modern_path).expanduser().absolute()
-                )
-            ):
-                raise ValueError(
-                    "Use one keystore path: W3PLEX_KEYSTORE and W3PLEX_SECRET_STORE differ"
-                )
-            path = Path(legacy_path or modern_path or "~/.keystore.bin").expanduser()
-            _CONTEXT = EncryptedIOContext(
-                legacy_keystore_path=path,
-                keystore_path=path,
-                input_handler=_terminal_password,
-                opener=opener,
-                persist_keys=True,
-                persist_legacy_keys=True,
-            )
+            _CONTEXT = create_context()
             atexit.register(_CONTEXT.close)
         return _CONTEXT
 

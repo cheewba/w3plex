@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from contextlib import AsyncExitStack, contextmanager
+from contextlib import contextmanager
 from copy import deepcopy
 from inspect import iscoroutine, iscoroutinefunction, isfunction
 from typing import Any
@@ -9,6 +9,7 @@ from typing import Any
 from lazyplex import Application as _Application, create_context
 
 from .config import ConfigTree, Lazy, config_loader
+from .config.config import populate_config_tree
 from .constants import (
     ACTIONS_CFG_KEY,
     APPLICATIONS_CFG_KEY,
@@ -17,8 +18,9 @@ from .constants import (
     VARS_COLLECTION,
 )
 from .log import logger
+from .security.file_opener import DefaultFileOpener
 from .utils import load_path
-from .utils.loader import FileOpener, using_file_opener
+from .utils.loader import FileOpener, get_file_opener, using_file_opener
 
 LOGGING_DEFAULT_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS Z}</green> | "
@@ -88,6 +90,9 @@ class Runner:
         self.loop: asyncio.AbstractEventLoop = loop
         self._log_sinks: list[int] = []
         self._file_opener: FileOpener | None = None
+        self._owned_file_opener: DefaultFileOpener | None = None
+        self._initializing_tree: ConfigTree | None = None
+        self._cleanup: asyncio.Task[None] | None = None
 
     @property
     def is_initialized(self) -> bool:
@@ -169,30 +174,25 @@ class Runner:
         app.name = app_name
         return wrap_app(app)
 
-    async def init(
-        self,
-        cfg: dict,
-        cfg_path: str,
-        *,
-        file_opener: FileOpener | None = None,
-        resource_owner: AsyncExitStack | None = None,
-    ):
+    async def init(self, cfg: dict, cfg_path: str):
         """Build the config tree and prepare this runner.
 
-        Without resource_owner, the tree owns its resources and a failed initialization
-        is cleaned up automatically.
+        The tree owns its configured resources. Failed initialization is cleaned up
+        automatically, including resources created before the failure.
+
+        Readers inherit the current file opener. Without one, this runner creates a
+        standalone opener and closes it during finalize().
 
         Args:
             cfg: Config data containing applications and other configured objects.
             cfg_path: Config filename used to resolve relative paths.
-            file_opener: Optional sync or async callback that captures file bytes as a
-                reference.
-            resource_owner: Optional AsyncExitStack. If supplied, the caller must close
-                it and finalize the runner after success or failure.
 
         Returns:
             None.
         """
+        if self._cleanup is not None:
+            await asyncio.shield(self._cleanup)
+            self._cleanup = None
         assert self.cfg is None, "Already initialized. Finalize first."
 
         loader = config_loader.clone()
@@ -201,17 +201,36 @@ class Runner:
 
         self.cfg = deepcopy(cfg)
         self.cfg_path = cfg_path
-        self._file_opener = file_opener
+        tree = self._initializing_tree = ConfigTree()
+        construction_completed = False
         try:
-            with using_file_opener(file_opener):
-                self._tree = await loader.parse(
-                    cfg,
-                    cfg_path,
-                    resource_owner=resource_owner,
-                )
-        except BaseException:
-            if resource_owner is None:
-                await self.finalize()
+            self._file_opener = get_file_opener()
+            if self._file_opener is None:
+                self._owned_file_opener = DefaultFileOpener()
+                self._file_opener = self._owned_file_opener
+            with using_file_opener(self._file_opener):
+                await populate_config_tree(tree, cfg, cfg_path, loader=loader)
+            construction_completed = True
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError()
+            self._tree = tree
+            self._initializing_tree = None
+        except BaseException as error:
+            task = asyncio.current_task()
+            if (
+                isinstance(error, asyncio.CancelledError)
+                and task is not None
+                and task.cancelling()
+                and not construction_completed
+            ):
+                # The tree's cleanup may still be running after a cancelled wait.
+                # Retain it for finalize() or the next init(), without another wait
+                # in this already cancelled caller.
+                self.cfg = None
+                self._start_cleanup()
+                raise
+            await self.finalize()
             raise
 
     def _parse_log_handler(self, config) -> Any:
@@ -241,15 +260,33 @@ class Runner:
         return loggers
 
     async def finalize(self):
-        """Close owned resources, remove log outputs and reset the runner."""
+        """Join owned cleanup without cancelling it when a waiter is cancelled."""
+        await asyncio.shield(self._start_cleanup())
+
+    def _start_cleanup(self) -> asyncio.Task[None]:
+        if self._cleanup is None:
+            self._cleanup = asyncio.create_task(self._finalize())
+            self._cleanup.add_done_callback(
+                lambda task: None if task.cancelled() else task.exception()
+            )
+        return self._cleanup
+
+    async def _finalize(self) -> None:
+        tree = self._tree if self._tree is not None else self._initializing_tree
         try:
-            if self._tree is not None:
-                await self._tree.close()
+            try:
+                if tree is not None:
+                    await tree.close()
+            finally:
+                if self._owned_file_opener is not None:
+                    self._owned_file_opener.close()
         finally:
             self._tree = None
+            self._initializing_tree = None
             self.cfg = None
             self.cfg_path = None
             self._file_opener = None
+            self._owned_file_opener = None
             for sink in self._log_sinks:
                 logger.remove(sink)
             self._log_sinks.clear()

@@ -69,7 +69,8 @@ def test_yaml_account_factory_restores_original_key_after_deletion(
 
     async def check():
         runner = Runner()
-        await runner.init(cfg, str(config), file_opener=opener)
+        with using_file_opener(opener):
+            await runner.init(cfg, str(config))
         try:
             account = (await runner.tree.accounts.main())[0]
             assert type(account) is Account and isinstance(account.key, ISecretRef)
@@ -121,7 +122,8 @@ def test_relative_include_and_concurrent_reads_capture_once(
 
     async def check():
         runner = Runner()
-        await runner.init(cfg, str(config), file_opener=opener)
+        with using_file_opener(opener):
+            await runner.init(cfg, str(config))
         try:
             first, second = await asyncio.gather(
                 runner.tree.alias(), runner.tree.alias()
