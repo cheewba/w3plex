@@ -7,7 +7,7 @@ and default file opener.
 
 ## Let the tree manage cleanup
 
-By default:
+For both the config parser and Runner:
 
 - If parsing fails, the incomplete tree closes the objects already created.
 - If parsing succeeds, `await tree.close()` closes them.
@@ -16,8 +16,8 @@ By default:
 Resources close in reverse order. When several config entries refer to the same
 object, that object is registered for cleanup once.
 
-Runner does not accept `resource_owner`. The application calls finalize() rather
-than collecting the runner's resources in an external stack:
+The parser and Runner do not accept an external resource owner. The application
+closes its runner instead of collecting configured objects in an external stack:
 
 ```python
 from w3plex.runner import Runner
@@ -39,9 +39,15 @@ call does not report success after a closer failed.
 Factories must clean up resources allocated inside a constructor that fails
 before returning an object. The tree cannot own an object it never received.
 
-## Low-level parser compatibility
+Direct parser users close the returned tree:
 
-`config_loader.parse(..., resource_owner=resources)` remains available for direct
-parser users. With that explicit external owner, closing the tree does not close
-the supplied stack. The caller must close it after success, failure or
-cancellation. Runner always uses tree-owned resources.
+```python
+from w3plex.config import config_loader
+
+tree = await config_loader.parse(config, "w3plex.yaml")
+try:
+    # Use tree here.
+    ...
+finally:
+    await tree.close()
+```

@@ -187,40 +187,28 @@ class _ConfigLoader:
 
         return node
 
-    async def parse(
-        self,
-        cfg: dict,
-        cfg_path: str,
-        *,
-        resource_owner: AsyncExitStack | None = None,
-    ) -> ConfigTree:
+    async def parse(self, cfg: dict, cfg_path: str) -> ConfigTree:
         """Build the config tree and resolve its object references.
 
-        Readers use the current file opener context. Without resource_owner, the parser
-        closes resources on failure and the returned tree owns them on success.
+        Readers use the current file opener context. The tree owns resources from
+        the start of construction and closes them if construction fails.
 
         Args:
             cfg: Config data to turn into a tree.
             cfg_path: Config filename used to resolve relative file paths.
-            resource_owner: Optional AsyncExitStack for created resources. The caller
-                must close it even if parsing fails.
 
         Returns:
             A ConfigTree containing the created objects and named collections.
         """
         tree = ConfigTree()
-        if resource_owner is None:
-            await populate_config_tree(tree, cfg, cfg_path, loader=self)
-        else:
-            await self._populate(tree, cfg, cfg_path, resource_owner)
+        await populate_config_tree(tree, cfg, cfg_path, loader=self)
         return tree
 
-    async def _populate(
-        self, target: ConfigTree, cfg: dict, cfg_path: str, resources: AsyncExitStack
-    ) -> None:
+    async def _populate(self, target: ConfigTree, cfg: dict, cfg_path: str) -> None:
         collections = defaultdict(AttrDict)
         memo: dict[tuple[str, ...], Any] = {}
         active: set[tuple[str, ...]] = set()
+        resources = target._resources
         owned: set[int] = set()
         root_dir = os.path.dirname(os.path.abspath(cfg_path))
 
@@ -327,11 +315,10 @@ class ConfigTree(AttrDict):
         self,
         tree=None,
         collections: dict[str, AttrDict] | None = None,
-        resources: AsyncExitStack | None = None,
     ):
         super().__init__(tree if tree is not None else {})
         self._collections = collections if collections is not None else {}
-        self._resources = resources or AsyncExitStack()
+        self._resources = AsyncExitStack()
         self._loaded = tree is not None
         self._cleanup: asyncio.Task[None] | None = None
 
@@ -368,7 +355,7 @@ async def populate_config_tree(
     if tree._loaded or tree._cleanup is not None:
         raise RuntimeError("Config tree is already loaded or closed")
     try:
-        await (loader or config_loader)._populate(tree, cfg, cfg_path, tree._resources)
+        await (loader or config_loader)._populate(tree, cfg, cfg_path)
     except BaseException:
         await tree.close()
         raise

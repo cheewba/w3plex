@@ -1,8 +1,7 @@
-"""Resource lifetime with tree-owned and caller-owned cleanup."""
+"""Config trees own construction resources and complete their own cleanup."""
 
 import asyncio
 import os
-from contextlib import AsyncExitStack
 
 import pytest
 
@@ -220,7 +219,7 @@ def test_concurrent_close_waiters_keep_one_cleanup_after_cancellation(
         ("cancel", "async-generator"),
     ],
 )
-def test_external_parser_owner_retains_resources_until_caller_closes(
+def test_tree_owns_resources_from_factories_and_generators(
     tmp_path, monkeypatch, failure, kind
 ):
     async def check():
@@ -263,17 +262,16 @@ def test_external_parser_owner_retains_resources_until_caller_closes(
         cfg = {"resource": {"__init__": "fixture:resource"}, "alias": "$resource"}
         if failure != "success":
             cfg["later"] = {"__init__": "fixture:later"}
-        owner = AsyncExitStack()
         try:
 
             async def parse():
-                return await config_loader.parse(
-                    cfg, str(tmp_path / "config.yaml"), resource_owner=owner
-                )
+                return await config_loader.parse(cfg, str(tmp_path / "config.yaml"))
 
             if failure == "success":
                 tree = await parse()
                 assert tree.resource is tree.alias
+                os.fstat(descriptor)
+                assert calls == []
                 await tree.close()
                 await tree.close()
             else:
@@ -281,15 +279,10 @@ def test_external_parser_owner_retains_resources_until_caller_closes(
                     asyncio.CancelledError if failure == "cancel" else ValueError
                 ):
                     await parse()
-            os.fstat(descriptor)
-            assert calls == []
-            await owner.aclose()
-            await owner.aclose()
             assert calls == ["close"]
             with pytest.raises(OSError):
                 os.fstat(descriptor)
         finally:
-            await owner.aclose()
             try:
                 os.fstat(descriptor)
             except OSError:
