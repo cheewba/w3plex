@@ -8,7 +8,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
+from .constants import PRIVATE_FILE_MODE
 from .errors import SecurityError, UnsupportedProtection
+
+# Default bound for atomic storage reads and writes (8 MiB).
+_DEFAULT_MAXIMUM_BYTES = 8 * 1024 * 1024
+# Read descriptors in bounded chunks without allocating the entire size limit.
+_READ_BLOCK_BYTES = 64 * 1024
+# Random bytes used in hexadecimal temporary-file suffixes to avoid collisions.
+_TEMPORARY_NAME_BYTES = 16
 
 
 class UnsafeStorage(SecurityError):
@@ -56,7 +64,7 @@ class CiphertextFile:
         self,
         path: str | Path,
         *,
-        maximum_size: int = 8 * 1024 * 1024,
+        maximum_size: int = _DEFAULT_MAXIMUM_BYTES,
     ):
         """Open the parent directory for later file operations.
 
@@ -163,7 +171,9 @@ class CiphertextFile:
         digest = hashlib.sha256()
         size = 0
         while size <= self.maximum_size:
-            block = os.pread(fd, min(65536, self.maximum_size + 1 - size), size)
+            block = os.pread(
+                fd, min(_READ_BLOCK_BYTES, self.maximum_size + 1 - size), size
+            )
             if not block:
                 break
             digest.update(block)
@@ -244,7 +254,7 @@ class CiphertextFile:
         fd = os.open(
             lock_name,
             os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
+            PRIVATE_FILE_MODE,
             dir_fd=self._fd,
         )
         acquired = False
@@ -303,13 +313,13 @@ class CiphertextFile:
             flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
             if expected is None:
                 flags |= os.O_CREAT | os.O_EXCL
-            fd = os.open(self.path.name, flags, 0o600, dir_fd=self._fd)
+            fd = os.open(self.path.name, flags, PRIVATE_FILE_MODE, dir_fd=self._fd)
             try:
                 self.check_file(fd)
                 if expected is not None and self._file_identity(fd) != expected:
                     raise StoreChanged()
                 self._check_directory()
-                os.fchmod(fd, 0o600)
+                os.fchmod(fd, PRIVATE_FILE_MODE)
                 self.check_file(fd)
                 if self._target_identity() != self._file_identity(fd):
                     raise StoreChanged()
@@ -353,11 +363,17 @@ class CiphertextFile:
             if self._target_identity() != expected:
                 raise StoreChanged()
             # Create and move the temporary file through the same open directory.
-            temporary = "." + self.path.name + "." + secrets.token_hex(16) + ".tmp"
+            temporary = (
+                "."
+                + self.path.name
+                + "."
+                + secrets.token_hex(_TEMPORARY_NAME_BYTES)
+                + ".tmp"
+            )
             descriptor = os.open(
                 temporary,
                 os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
+                PRIVATE_FILE_MODE,
                 dir_fd=self._fd,
             )
             try:

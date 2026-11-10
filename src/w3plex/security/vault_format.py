@@ -17,10 +17,27 @@ from ._crypto import (
     reject_json_constant as reject_json_constant,  # noqa: PLC0414 -- public re-export
     unique_fields as unique_fields,  # noqa: PLC0414 -- public re-export
 )
+from .constants import (
+    AES256_KEY_BYTES,
+    GCM_NONCE_BYTES,
+    GCM_TAG_BYTES,
+    IDENTIFIER_BYTES,
+    IDENTIFIER_HEX_LENGTH,
+    KDF_SALT_BYTES,
+    WRAPPED_KEY_BYTES,
+)
 from .errors import InvalidStore, UnsupportedProtection
 
+# Prefix identifying a version 1 encrypted record vault.
 MAGIC = b"W3VAULT1\n"
+# Maximum serialized vault size, including JSON and base64 overhead (8 MiB).
 MAXIMUM_SIZE = 8 * 1024 * 1024
+# Maximum canonical JSON header size, in bytes (4 KiB).
+MAXIMUM_HEADER = 4096
+# The numeric header version authenticated by the W3VAULT1 envelope.
+_FORMAT_VERSION = 1
+# Reserve half the container budget for base64 expansion and envelope fields.
+_PLAINTEXT_BUDGET_DIVISOR = 2
 
 
 @dataclass(frozen=True, repr=False)
@@ -105,12 +122,12 @@ def parse(data: bytes) -> Envelope:
     if (
         not isinstance(header, dict)
         or set(header) != fields
-        or len(canonical(header)) > 4096
+        or len(canonical(header)) > MAXIMUM_HEADER
     ):
         raise InvalidStore()
     if (
         type(header["version"]) is not int
-        or header["version"] != 1
+        or header["version"] != _FORMAT_VERSION
         or header["cipher"] != "AES-256-GCM"
         or header["context"] != "w3plex.vault"
     ):
@@ -118,7 +135,7 @@ def parse(data: bytes) -> Envelope:
     identifier = header["store_id"]
     if (
         not isinstance(identifier, str)
-        or len(identifier) != 32
+        or len(identifier) != IDENTIFIER_HEX_LENGTH
         or any(c not in "0123456789abcdef" for c in identifier)
     ):
         raise InvalidStore()
@@ -130,14 +147,14 @@ def parse(data: bytes) -> Envelope:
     ):
         raise InvalidStore()
     KdfSettings(kdf["memory_kib"], kdf["iterations"], kdf["lanes"]).validate()
-    decode_bytes(header["salt"], size=16)
-    wrapping_nonce = decode_bytes(header["wrap_nonce"], size=12)
-    data_nonce = decode_bytes(header["data_nonce"], size=12)
+    decode_bytes(header["salt"], size=KDF_SALT_BYTES)
+    wrapping_nonce = decode_bytes(header["wrap_nonce"], size=GCM_NONCE_BYTES)
+    data_nonce = decode_bytes(header["data_nonce"], size=GCM_NONCE_BYTES)
     if wrapping_nonce == data_nonce:
         raise InvalidStore()
-    wrapped_key = decode_bytes(document["wrapped_key"], size=48)
+    wrapped_key = decode_bytes(document["wrapped_key"], size=WRAPPED_KEY_BYTES)
     payload = decode_bytes(document["payload"])
-    if len(payload) < 16:
+    if len(payload) < GCM_TAG_BYTES:
         raise InvalidStore()
     return Envelope(header, wrapped_key, payload)
 
@@ -155,7 +172,7 @@ def unwrap(envelope: Envelope, password: bytes) -> bytes:
     key = derive_key(password, envelope.header)
     return decrypt(
         key,
-        decode_bytes(envelope.header["wrap_nonce"], size=12),
+        decode_bytes(envelope.header["wrap_nonce"], size=GCM_NONCE_BYTES),
         envelope.wrapped_key,
         _wrapping_aad(envelope.header),
     )
@@ -179,7 +196,7 @@ def open_payload(envelope: Envelope, data_key: bytes) -> bytes:
     """
     return decrypt(
         data_key,
-        decode_bytes(envelope.header["data_nonce"], size=12),
+        decode_bytes(envelope.header["data_nonce"], size=GCM_NONCE_BYTES),
         envelope.payload,
         canonical(envelope.header) + b"\0records\0" + envelope.wrapped_key,
     )
@@ -207,23 +224,30 @@ def seal(
         A pair containing the Envelope and its 32-byte data key.
     """
     settings.validate()
-    key = secrets.token_bytes(32) if data_key is None else data_key
-    if len(key) != 32 or len(plaintext) > MAXIMUM_SIZE // 2:
-        raise InvalidStore()
-    if store_id and (
-        len(store_id) != 32 or any(char not in "0123456789abcdef" for char in store_id)
+    key = secrets.token_bytes(AES256_KEY_BYTES) if data_key is None else data_key
+    if (
+        len(key) != AES256_KEY_BYTES
+        or len(plaintext) > MAXIMUM_SIZE // _PLAINTEXT_BUDGET_DIVISOR
     ):
         raise InvalidStore()
-    wrapping_nonce, data_nonce = secrets.token_bytes(12), secrets.token_bytes(12)
+    if store_id and (
+        len(store_id) != IDENTIFIER_HEX_LENGTH
+        or any(char not in "0123456789abcdef" for char in store_id)
+    ):
+        raise InvalidStore()
+    wrapping_nonce, data_nonce = (
+        secrets.token_bytes(GCM_NONCE_BYTES),
+        secrets.token_bytes(GCM_NONCE_BYTES),
+    )
     if wrapping_nonce == data_nonce:
         # Refuse a broken RNG rather than reuse the pair.
         raise UnsupportedProtection()
     header = {
-        "version": 1,
+        "version": _FORMAT_VERSION,
         "cipher": "AES-256-GCM",
         "context": "w3plex.vault",
-        "store_id": store_id or secrets.token_hex(16),
-        "salt": encode_bytes(secrets.token_bytes(16)),
+        "store_id": store_id or secrets.token_hex(IDENTIFIER_BYTES),
+        "salt": encode_bytes(secrets.token_bytes(KDF_SALT_BYTES)),
         "wrap_nonce": encode_bytes(wrapping_nonce),
         "data_nonce": encode_bytes(data_nonce),
         "kdf": {
@@ -252,13 +276,16 @@ def update_payload(envelope: Envelope, data_key: bytes, plaintext: bytes) -> Env
     Returns:
         A new Envelope with the same password wrapper and a new payload nonce.
     """
-    if len(data_key) != 32 or len(plaintext) > MAXIMUM_SIZE // 2:
+    if (
+        len(data_key) != AES256_KEY_BYTES
+        or len(plaintext) > MAXIMUM_SIZE // _PLAINTEXT_BUDGET_DIVISOR
+    ):
         raise InvalidStore()
     header = dict(envelope.header)
-    nonce = secrets.token_bytes(12)
+    nonce = secrets.token_bytes(GCM_NONCE_BYTES)
     if nonce in {
-        decode_bytes(header["data_nonce"], size=12),
-        decode_bytes(header["wrap_nonce"], size=12),
+        decode_bytes(header["data_nonce"], size=GCM_NONCE_BYTES),
+        decode_bytes(header["wrap_nonce"], size=GCM_NONCE_BYTES),
     }:
         raise UnsupportedProtection()
     header["data_nonce"] = encode_bytes(nonce)

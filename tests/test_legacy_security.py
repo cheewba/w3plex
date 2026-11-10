@@ -393,7 +393,7 @@ def test_encryption_limits_preserve_files_and_store(
     source, destination = tmp_path / "input", tmp_path / "output"
     source.write_text("PUBLIC-TEST-input")
     destination.write_text("PUBLIC-TEST-previous-output")
-    monkeypatch.setattr(legacy_format, "_MAX_FILE", 8)
+    monkeypatch.setattr(legacy_format, "_MAX_FILE_BYTES", 8)
     with pytest.raises(InvalidStore):
         context.encrypt_file(source, password="file", dst=destination)
     assert source.read_text() == "PUBLIC-TEST-input"

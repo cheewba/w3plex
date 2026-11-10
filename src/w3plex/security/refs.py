@@ -13,6 +13,7 @@ from typing import (
 )
 
 from . import file_format
+from .constants import GCM_TAG_BYTES, IDENTIFIER_HEX_LENGTH, MAX_RECORD_BYTES
 from .diagnostics import private_call
 from .encrypted_io import EncryptedIOContext, detect_format
 from .errors import InteractionRequired, InvalidStore, PermissionDenied
@@ -20,7 +21,8 @@ from .legacy import LegacyContext
 from .snapshots import snapshot_file
 from .vault import Vault
 
-MAX_SNAPSHOT_SIZE = 1024 * 1024
+# Captured input must fit in one immutable vault record.
+MAX_SNAPSHOT_SIZE = MAX_RECORD_BYTES
 
 
 @runtime_checkable
@@ -159,7 +161,8 @@ class SecretStore:
             kind = detect_format(raw)
             if (
                 kind == "modern"
-                and len(file_format.parse(raw).payload) > MAX_SNAPSHOT_SIZE + 16
+                and len(file_format.parse(raw).payload)
+                > MAX_SNAPSHOT_SIZE + GCM_TAG_BYTES
             ):
                 raise InvalidStore()
             if kind != "plain":
@@ -188,7 +191,7 @@ class SecretStore:
         """
         if (
             type(identifier) is not str
-            or len(identifier) != 32
+            or len(identifier) != IDENTIFIER_HEX_LENGTH
             or any(c not in "0123456789abcdef" for c in identifier)
         ):
             raise PermissionDenied()

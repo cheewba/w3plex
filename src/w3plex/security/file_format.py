@@ -17,12 +17,36 @@ from ._crypto import (
     reject_json_constant,
     unique_fields,
 )
+from .constants import (
+    AES256_KEY_BYTES,
+    GCM_NONCE_BYTES,
+    GCM_TAG_BYTES,
+    IDENTIFIER_BYTES,
+    IDENTIFIER_HEX_LENGTH,
+    KDF_SALT_BYTES,
+    WRAPPED_KEY_BYTES,
+)
 from .errors import InvalidStore, UnsupportedProtection
 
+# Prefix identifying a version 1 encrypted external file.
 MAGIC = b"W3FILE1\n"
+# Maximum decoded external-file content, in bytes (64 MiB).
 MAXIMUM_PLAINTEXT = 64 * 1024 * 1024
+# Maximum canonical JSON header size, in bytes (4 KiB).
 MAXIMUM_HEADER = 4096
-MAXIMUM_SIZE = len(MAGIC) + 4 + MAXIMUM_HEADER + 48 + MAXIMUM_PLAINTEXT + 16
+# A big-endian uint32 stores the byte length of the following JSON header.
+_HEADER_LENGTH_BYTES = 4
+# The numeric header version authenticated by the W3FILE1 envelope.
+_FORMAT_VERSION = 1
+# Bound the complete file, including the header, wrapped key and payload tag.
+MAXIMUM_SIZE = (
+    len(MAGIC)
+    + _HEADER_LENGTH_BYTES
+    + MAXIMUM_HEADER
+    + WRAPPED_KEY_BYTES
+    + MAXIMUM_PLAINTEXT
+    + GCM_TAG_BYTES
+)
 
 
 @dataclass(frozen=True, repr=False)
@@ -53,7 +77,7 @@ class FileEnvelope:
             raise InvalidStore()
         raw = (
             MAGIC
-            + len(header).to_bytes(4, "big")
+            + len(header).to_bytes(_HEADER_LENGTH_BYTES, "big")
             + header
             + self.wrapped_key
             + self.payload
@@ -78,13 +102,16 @@ def parse(raw: bytes) -> FileEnvelope:
     if (
         type(raw) is not bytes
         or len(raw) > MAXIMUM_SIZE
-        or len(raw) < len(MAGIC) + 4
+        or len(raw) < len(MAGIC) + _HEADER_LENGTH_BYTES
         or not raw.startswith(MAGIC)
     ):
         raise InvalidStore()
-    start = len(MAGIC) + 4
+    start = len(MAGIC) + _HEADER_LENGTH_BYTES
     size = int.from_bytes(raw[len(MAGIC) : start], "big")
-    if not 1 <= size <= MAXIMUM_HEADER or len(raw) < start + size + 48 + 16:
+    if (
+        not 1 <= size <= MAXIMUM_HEADER
+        or len(raw) < start + size + WRAPPED_KEY_BYTES + GCM_TAG_BYTES
+    ):
         raise InvalidStore()
     header = None
     try:
@@ -108,7 +135,7 @@ def parse(raw: bytes) -> FileEnvelope:
         raise InvalidStore()
     if (
         type(header["version"]) is not int
-        or header["version"] != 1
+        or header["version"] != _FORMAT_VERSION
         or header["cipher"] != "AES-256-GCM"
         or header["context"] != "w3plex.file"
     ):
@@ -116,7 +143,7 @@ def parse(raw: bytes) -> FileEnvelope:
     identifier = header["file_id"]
     if (
         type(identifier) is not str
-        or len(identifier) != 32
+        or len(identifier) != IDENTIFIER_HEX_LENGTH
         or any(char not in "0123456789abcdef" for char in identifier)
     ):
         raise InvalidStore()
@@ -128,14 +155,17 @@ def parse(raw: bytes) -> FileEnvelope:
     ):
         raise InvalidStore()
     KdfSettings(kdf["memory_kib"], kdf["iterations"], kdf["lanes"]).validate()
-    decode_bytes(header["salt"], size=16)
-    wrap_nonce = decode_bytes(header["wrap_nonce"], size=12)
-    data_nonce = decode_bytes(header["data_nonce"], size=12)
+    decode_bytes(header["salt"], size=KDF_SALT_BYTES)
+    wrap_nonce = decode_bytes(header["wrap_nonce"], size=GCM_NONCE_BYTES)
+    data_nonce = decode_bytes(header["data_nonce"], size=GCM_NONCE_BYTES)
     if wrap_nonce == data_nonce:
         raise InvalidStore()
     end = start + size
-    wrapped_key, payload = raw[end : end + 48], raw[end + 48 :]
-    if len(payload) > MAXIMUM_PLAINTEXT + 16:
+    wrapped_key, payload = (
+        raw[end : end + WRAPPED_KEY_BYTES],
+        raw[end + WRAPPED_KEY_BYTES :],
+    )
+    if len(payload) > MAXIMUM_PLAINTEXT + GCM_TAG_BYTES:
         raise InvalidStore()
     return FileEnvelope(header, wrapped_key, payload)
 
@@ -152,7 +182,7 @@ def unwrap(envelope: FileEnvelope, password: bytes) -> bytes:
     """
     return decrypt(
         derive_key(password, envelope.header),
-        decode_bytes(envelope.header["wrap_nonce"], size=12),
+        decode_bytes(envelope.header["wrap_nonce"], size=GCM_NONCE_BYTES),
         envelope.wrapped_key,
         MAGIC + b"\0key\0" + canonical(envelope.header),
     )
@@ -170,7 +200,7 @@ def open_payload(envelope: FileEnvelope, key: bytes) -> bytes:
     """
     return decrypt(
         key,
-        decode_bytes(envelope.header["data_nonce"], size=12),
+        decode_bytes(envelope.header["data_nonce"], size=GCM_NONCE_BYTES),
         envelope.payload,
         MAGIC + b"\0file\0" + canonical(envelope.header) + envelope.wrapped_key,
     )
@@ -196,22 +226,25 @@ def seal(
     settings.validate()
     if type(plaintext) is not bytes or len(plaintext) > MAXIMUM_PLAINTEXT:
         raise InvalidStore()
-    key = secrets.token_bytes(32)
-    wrapping_nonce, data_nonce = secrets.token_bytes(12), secrets.token_bytes(12)
+    key = secrets.token_bytes(AES256_KEY_BYTES)
+    wrapping_nonce, data_nonce = (
+        secrets.token_bytes(GCM_NONCE_BYTES),
+        secrets.token_bytes(GCM_NONCE_BYTES),
+    )
     if wrapping_nonce == data_nonce:
         raise UnsupportedProtection()
     header = {
-        "version": 1,
+        "version": _FORMAT_VERSION,
         "cipher": "AES-256-GCM",
         "context": "w3plex.file",
-        "file_id": secrets.token_hex(16),
+        "file_id": secrets.token_hex(IDENTIFIER_BYTES),
         "kdf": {
             "name": "argon2id",
             "memory_kib": settings.memory_kib,
             "iterations": settings.iterations,
             "lanes": settings.lanes,
         },
-        "salt": encode_bytes(secrets.token_bytes(16)),
+        "salt": encode_bytes(secrets.token_bytes(KDF_SALT_BYTES)),
         "wrap_nonce": encode_bytes(wrapping_nonce),
         "data_nonce": encode_bytes(data_nonce),
     }

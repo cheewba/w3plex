@@ -24,6 +24,14 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from ._io_activation import activate, deactivate, is_active
 from ._streams import decrypted_stream
+from .constants import (
+    LEGACY_FILE_MAGIC,
+    LEGACY_KEY_BYTES,
+    LEGACY_SALT_BYTES,
+    LEGACY_STORE_MAGIC,
+    MAX_LEGACY_STORE_BYTES,
+    PASSWORD_ENTROPY_BYTES,
+)
 from .errors import (
     AuthenticationFailed,
     InteractionRequired,
@@ -31,9 +39,18 @@ from .errors import (
     PermissionDenied,
 )
 
-_HISTORICAL_N = (32768, 16384, 8192, 4096)
-_MAX_STORE = 1024 * 1024
-_MAX_FILE = 64 * 1024 * 1024
+# KS01 omitted its scrypt cost; readers try these historical N values in order.
+_HISTORICAL_SCRYPT_N = (32768, 16384, 8192, 4096)
+# Historical scrypt block-size parameter r, retained for KS01 compatibility.
+_SCRYPT_BLOCK_SIZE = 8
+# Historical scrypt parallelism parameter p, retained for KS01 compatibility.
+_SCRYPT_PARALLELISM = 1
+# Bound memory used while trying historical scrypt settings (128 MiB).
+_SCRYPT_MAX_MEMORY_BYTES = 128 * 1024 * 1024
+# Legacy key documents contain at most this many file keys.
+_MAX_KEY_COUNT = 4096
+# Maximum input or ciphertext accepted by the legacy file helpers (64 MiB).
+_MAX_FILE_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True, repr=False)
@@ -173,7 +190,7 @@ class LegacyContext:
         Returns:
             None.
         """
-        if any(type(key) is not bytes or len(key) != 32 for key in keys):
+        if any(type(key) is not bytes or len(key) != LEGACY_KEY_BYTES for key in keys):
             raise InvalidStore()
         with self._operations, self._lock:
             self._keys = list(keys)
@@ -216,13 +233,13 @@ class LegacyContext:
                 isinstance(data, dict)
                 and set(data) == {"keys"}
                 and isinstance(data.get("keys"), list)
-                and len(data["keys"]) <= 4096
+                and len(data["keys"]) <= _MAX_KEY_COUNT
             ):
                 for value in data["keys"]:
                     if not isinstance(value, str):
                         break
                     key = base64.b64decode(value, altchars=b"-_", validate=True)
-                    if len(key) != 32:
+                    if len(key) != LEGACY_KEY_BYTES:
                         break
                     keys.append(key)
                 else:
@@ -238,12 +255,12 @@ class LegacyContext:
             return None
         try:
             with self._opener(self.path, "rb") as stream:
-                raw = stream.read(_MAX_STORE + 1)
+                raw = stream.read(MAX_LEGACY_STORE_BYTES + 1)
         except FileNotFoundError:
             return None
-        if len(raw) < 16:
+        if len(raw) < LEGACY_SALT_BYTES:
             raise InvalidStore()
-        if len(raw) > _MAX_STORE:
+        if len(raw) > MAX_LEGACY_STORE_BYTES:
             raise InvalidStore()
         return raw
 
@@ -257,9 +274,9 @@ class LegacyContext:
             self._check(generation)
         if raw is None:
             return []
-        salt, payload = raw[:16], raw[16:]
+        salt, payload = raw[:LEGACY_SALT_BYTES], raw[LEGACY_SALT_BYTES:]
         derived = None
-        if not payload.startswith(b"KS01"):
+        if not payload.startswith(LEGACY_STORE_MAGIC):
             keys = self.parse_keys(payload)
         else:
             assert self.path is not None
@@ -298,8 +315,8 @@ class LegacyContext:
         raw = self._raw_store()
         with self._lock:
             self._check(generation)
-            salt = raw[:16] if raw is not None else self._salt
-        if raw is not None and raw[16:].startswith(b"KS01"):
+            salt = raw[:LEGACY_SALT_BYTES] if raw is not None else self._salt
+        if raw is not None and raw[LEGACY_SALT_BYTES:].startswith(LEGACY_STORE_MAGIC):
             self._read_keys(generation, keep_master=True)
             return
         password = self._password("master", self.path, generation=generation)
@@ -308,12 +325,17 @@ class LegacyContext:
         ):
             raise AuthenticationFailed()
         if salt is None:
-            salt = os.urandom(16)
+            salt = os.urandom(LEGACY_SALT_BYTES)
         # KS01 omitted work settings. Retain its historical adaptive writer.
-        for n in _HISTORICAL_N:
+        for n in _HISTORICAL_SCRYPT_N:
             try:
                 derived = hashlib.scrypt(
-                    password.encode(), salt=salt, n=n, r=8, p=1, dklen=32
+                    password.encode(),
+                    salt=salt,
+                    n=n,
+                    r=_SCRYPT_BLOCK_SIZE,
+                    p=_SCRYPT_PARALLELISM,
+                    dklen=LEGACY_KEY_BYTES,
                 )
                 with self._lock:
                     self._check(generation)
@@ -328,7 +350,7 @@ class LegacyContext:
         raise MemoryError("Unable to derive master key: scrypt N fell below 2**12")
 
     def _save_keys(self, keys: list[bytes], *, generation: int) -> None:
-        if len(keys) > 4096:
+        if len(keys) > _MAX_KEY_COUNT:
             raise InvalidStore()
         self._unlock_keystore(generation)
         with self._lock:
@@ -339,7 +361,9 @@ class LegacyContext:
             {"keys": [base64.urlsafe_b64encode(key).decode() for key in keys]}
         ).encode()
         ciphertext = (
-            salt + b"KS01" + Fernet(base64.urlsafe_b64encode(master_key)).encrypt(data)
+            salt
+            + LEGACY_STORE_MAGIC
+            + Fernet(base64.urlsafe_b64encode(master_key)).encrypt(data)
         )
         with self._lock:
             self._check(generation)
@@ -382,15 +406,17 @@ class LegacyContext:
     def _encrypt_bytes(
         self, data: bytes, password: str, *, add_to_keystore: bool
     ) -> bytes:
-        if len(data) > _MAX_FILE:
+        if len(data) > _MAX_FILE_BYTES:
             raise InvalidStore()
         generation = self.generation
         with self._operations:
             with self._lock:
                 self._check(generation)
             key = hashlib.sha256(password.encode()).digest()
-            ciphertext = b"ENC1" + Fernet(base64.urlsafe_b64encode(key)).encrypt(data)
-            if len(ciphertext) > _MAX_FILE:
+            ciphertext = LEGACY_FILE_MAGIC + Fernet(
+                base64.urlsafe_b64encode(key)
+            ).encrypt(data)
+            if len(ciphertext) > _MAX_FILE_BYTES:
                 raise InvalidStore()
             if add_to_keystore:
                 self._add_key(key, persist=True, generation=generation)
@@ -407,15 +433,15 @@ class LegacyContext:
         use_keystore: bool = True,
         ask_password: bool = True,
     ) -> bytes:
-        if not raw.startswith(b"ENC1"):
+        if not raw.startswith(LEGACY_FILE_MAGIC):
             raise ValueError(f"{source} is not encrypted")
-        if len(raw) > _MAX_FILE:
+        if len(raw) > _MAX_FILE_BYTES:
             raise InvalidStore()
         generation = self.generation
         with self._operations:
             with self._lock:
                 self._check(generation)
-            token = raw[4:]
+            token = raw[len(LEGACY_FILE_MAGIC) :]
 
             # Try cached file keys before requesting a password.
             if use_keystore and not password:
@@ -483,13 +509,13 @@ class LegacyContext:
                 use_keystore=use_keystore,
                 ask_password=ask_password,
             )
-            if raw.startswith(b"ENC1")
+            if raw.startswith(LEGACY_FILE_MAGIC)
             else raw
         )
 
     def _read_file(self, source: Path) -> bytes:
         with source.open("rb") as stream:
-            return stream.read(_MAX_FILE + 1)
+            return stream.read(_MAX_FILE_BYTES + 1)
 
     def encrypt_file(
         self,
@@ -515,7 +541,7 @@ class LegacyContext:
         """
         source = Path(src)
         data = self._read_file(source)
-        if data.startswith(b"ENC1"):
+        if data.startswith(LEGACY_FILE_MAGIC):
             raise ValueError(f"{source} is already encrypted")
         password = password or self._password("file", source)
         ciphertext = self._encrypt_bytes(
@@ -588,7 +614,7 @@ class LegacyContext:
         if isinstance(data, str):
             data = data.encode("utf-8")
         if password is None:
-            password = secrets.token_urlsafe(32)
+            password = secrets.token_urlsafe(PASSWORD_ENTROPY_BYTES)
         ciphertext = self._encrypt_bytes(
             data, password, add_to_keystore=add_to_keystore
         )
@@ -612,7 +638,7 @@ class LegacyContext:
             raw = base64.b64decode(encrypted.encode("ascii"))
         except (ValueError, UnicodeEncodeError):
             raise ValueError("Invalid base64-encoded data") from None
-        if not raw.startswith(b"ENC1"):
+        if not raw.startswith(LEGACY_FILE_MAGIC):
             return encrypted
         return self._decrypt_bytes(
             raw,
@@ -667,8 +693,10 @@ class LegacyContext:
             encoding=encoding,
             errors=errors,
             newline=newline,
-            maximum_size=_MAX_FILE,
-            detect=lambda prefix: "legacy" if prefix.startswith(b"ENC1") else "plain",
+            maximum_size=_MAX_FILE_BYTES,
+            detect=lambda prefix: (
+                "legacy" if prefix.startswith(LEGACY_FILE_MAGIC) else "plain"
+            ),
             decrypt=self.decrypt_bytes,
             on_failure=on_failure,
             name=str(file),
@@ -708,25 +736,30 @@ class LegacyContext:
 def _decode_keystore(
     raw: bytes, password: str | None
 ) -> tuple[list[bytes], bytes | None]:
-    if type(raw) is not bytes or not 16 <= len(raw) <= _MAX_STORE:
+    if (
+        type(raw) is not bytes
+        or not LEGACY_SALT_BYTES <= len(raw) <= MAX_LEGACY_STORE_BYTES
+    ):
         raise InvalidStore()
-    salt, payload = raw[:16], raw[16:]
-    if not payload.startswith(b"KS01"):
+    salt, payload = raw[:LEGACY_SALT_BYTES], raw[LEGACY_SALT_BYTES:]
+    if not payload.startswith(LEGACY_STORE_MAGIC):
         return LegacyContext.parse_keys(payload), None
     if password is None:
         raise InteractionRequired()
-    for n in _HISTORICAL_N:
+    for n in _HISTORICAL_SCRYPT_N:
         derived = hashlib.scrypt(
             password.encode(),
             salt=salt,
             n=n,
-            r=8,
-            p=1,
-            dklen=32,
-            maxmem=128 * 1024 * 1024,
+            r=_SCRYPT_BLOCK_SIZE,
+            p=_SCRYPT_PARALLELISM,
+            dklen=LEGACY_KEY_BYTES,
+            maxmem=_SCRYPT_MAX_MEMORY_BYTES,
         )
         try:
-            plain = Fernet(base64.urlsafe_b64encode(derived)).decrypt(payload[4:])
+            plain = Fernet(base64.urlsafe_b64encode(derived)).decrypt(
+                payload[len(LEGACY_STORE_MAGIC) :]
+            )
         except InvalidToken:
             continue
         return LegacyContext.parse_keys(plain), derived

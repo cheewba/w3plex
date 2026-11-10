@@ -13,7 +13,24 @@ from dataclasses import dataclass
 
 from .errors import UnsupportedProtection
 
+# Darwin ptrace request that prevents future debugger attachment.
 _PT_DENY_ATTACH = 31
+# Linux prctl request that sets the process dumpable attribute.
+_PR_SET_DUMPABLE = 4
+# Linux prctl request that reads the process dumpable attribute.
+_PR_GET_DUMPABLE = 3
+# Disable Linux core dumps and unprivileged process inspection.
+_DUMPABLE_DISABLED = 0
+# Set both the soft and hard POSIX core-file size limits to zero.
+_DISABLED_CORE_LIMIT = (0, 0)
+# Linux madvise flag excluding owned mappings from core dumps.
+_MADV_DONTDUMP = 16
+# Small allocation used to verify locked-memory support after activation.
+_PROBE_BUFFER_BYTES = 32
+# Default per-buffer locked-memory allowance (64 KiB).
+_DEFAULT_BUFFER_BYTES = 64 * 1024
+# Upper bound for one locked allocation (1 MiB).
+_MAX_BUFFER_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -59,8 +76,8 @@ class ProcessProtection:
         inspection = False
         self._status = None
         try:
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-            ok = resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)
+            resource.setrlimit(resource.RLIMIT_CORE, _DISABLED_CORE_LIMIT)
+            ok = resource.getrlimit(resource.RLIMIT_CORE) == _DISABLED_CORE_LIMIT
             if sys.platform == "linux":
                 lib = ctypes.CDLL(None, use_errno=True)
                 lib.prctl.argtypes = [
@@ -72,7 +89,8 @@ class ProcessProtection:
                 ]
                 lib.prctl.restype = ctypes.c_int
                 inspection = (
-                    lib.prctl(4, 0, 0, 0, 0) == 0 and lib.prctl(3, 0, 0, 0, 0) == 0
+                    lib.prctl(_PR_SET_DUMPABLE, _DUMPABLE_DISABLED, 0, 0, 0) == 0
+                    and lib.prctl(_PR_GET_DUMPABLE, 0, 0, 0, 0) == _DUMPABLE_DISABLED
                 )
                 ok = ok and inspection
             else:
@@ -93,7 +111,7 @@ class ProcessProtection:
         self._status = ProtectionStatus(sys.platform, True, inspection, os.getpid())
         ready = False
         try:
-            with LockedBuffer(bytes(32), protection=self):
+            with LockedBuffer(bytes(_PROBE_BUFFER_BYTES), protection=self):
                 ready = True
         except (OSError, ValueError, AttributeError, UnsupportedProtection):
             pass
@@ -117,7 +135,7 @@ class ProcessProtection:
         # Import only after checking the platform-bound protection status.
         import resource
 
-        if resource.getrlimit(resource.RLIMIT_CORE) != (0, 0):
+        if resource.getrlimit(resource.RLIMIT_CORE) != _DISABLED_CORE_LIMIT:
             raise UnsupportedProtection()
         if sys.platform == "linux":
             lib = ctypes.CDLL(None)
@@ -129,7 +147,7 @@ class ProcessProtection:
                 ctypes.c_ulong,
             ]
             lib.prctl.restype = ctypes.c_int
-            if lib.prctl(3, 0, 0, 0, 0) != 0:
+            if lib.prctl(_PR_GET_DUMPABLE, 0, 0, 0, 0) != _DUMPABLE_DISABLED:
                 raise UnsupportedProtection()
 
 
@@ -147,7 +165,7 @@ class LockedBuffer:
         value: bytes,
         *,
         protection: ProcessProtection,
-        max_size: int = 65536,
+        max_size: int = _DEFAULT_BUFFER_BYTES,
     ):
         """Lock memory pages before copying a value into them.
 
@@ -161,7 +179,7 @@ class LockedBuffer:
             None.
         """
         protection.check()
-        if type(max_size) is not int or not 1 <= max_size <= 1024 * 1024:
+        if type(max_size) is not int or not 1 <= max_size <= _MAX_BUFFER_BYTES:
             raise ValueError("Invalid secret buffer limit")
         if not value or len(value) > max_size:
             raise ValueError("Invalid secret buffer size")
@@ -197,7 +215,7 @@ class LockedBuffer:
             lib.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
             lib.madvise.restype = ctypes.c_int
             # Linux MADV_DONTDUMP. Refuse kernels that cannot apply it.
-            if lib.madvise(address, self._capacity, 16) != 0:
+            if lib.madvise(address, self._capacity, _MADV_DONTDUMP) != 0:
                 lib.munlock(address, self._capacity)
                 area.close()
                 raise UnsupportedProtection()

@@ -3,6 +3,7 @@ import inspect
 import io
 import re
 import threading
+from codecs import BOM_UTF8
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -272,7 +273,7 @@ class FileLoader[T]:
             SecretString references for the selected lines.
         """
         result = []
-        start = 3 if raw.startswith(b"\xef\xbb\xbf") else 0
+        start = len(BOM_UTF8) if raw.startswith(BOM_UTF8) else 0
         for match in re.finditer(rb"[^\r\n]*(?:\r\n|\r|\n|$)", raw[start:]):
             line = match[0].decode("utf-8")
             value = line.strip()

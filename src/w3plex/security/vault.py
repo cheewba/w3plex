@@ -12,6 +12,12 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from .constants import (
+    AES256_KEY_BYTES,
+    IDENTIFIER_BYTES,
+    IDENTIFIER_HEX_LENGTH,
+    MAX_RECORD_BYTES,
+)
 from .diagnostics import (
     private_call as private_call,  # noqa: PLC0414 -- retain the existing host import
     safe_error_type,
@@ -32,6 +38,9 @@ from .vault_format import (
     unwrap,
     update_payload,
 )
+
+# Bound the number of records and the work performed by batch operations.
+_MAX_RECORD_COUNT = 4096
 
 
 class Vault:
@@ -160,7 +169,9 @@ class Vault:
         def operation():
             with self._mutex:
                 self.check()
-                with LockedBuffer(bytes(32), protection=self._protection) as buffer:
+                with LockedBuffer(
+                    bytes(AES256_KEY_BYTES), protection=self._protection
+                ) as buffer:
                     envelope, key = seal(
                         canonical({"records": []}), password, settings=settings
                     )
@@ -191,7 +202,9 @@ class Vault:
                 data, identity = self._storage.read()
                 envelope = parse(data)
 
-                buffer = LockedBuffer(bytes(32), protection=self._protection)
+                buffer = LockedBuffer(
+                    bytes(AES256_KEY_BYTES), protection=self._protection
+                )
                 try:
                     buffer.replace(unwrap(envelope, password))
                     self.validate_records(open_payload(envelope, buffer.copy_bytes()))
@@ -350,7 +363,7 @@ class Vault:
             not isinstance(document, dict)
             or set(document) != {"records"}
             or not isinstance(document["records"], list)
-            or len(document["records"]) > 4096
+            or len(document["records"]) > _MAX_RECORD_COUNT
         ):
             raise InvalidStore()
         seen = set()
@@ -360,7 +373,7 @@ class Vault:
             identifier = record["id"]
             if (
                 type(identifier) is not str
-                or len(identifier) != 32
+                or len(identifier) != IDENTIFIER_HEX_LENGTH
                 or any(c not in "0123456789abcdef" for c in identifier)
                 or identifier in seen
             ):
@@ -368,7 +381,7 @@ class Vault:
             if type(record["value"]) is not str:
                 raise InvalidStore()
             value = base64.b64decode(record["value"], validate=True)
-            if len(value) > 1024 * 1024:
+            if len(value) > MAX_RECORD_BYTES:
                 raise InvalidStore()
             seen.add(identifier)
         return document["records"]
@@ -477,7 +490,7 @@ class Vault:
                 for value, metadata in selected:
                     if (
                         type(value) is not bytes
-                        or len(value) > 1024 * 1024
+                        or len(value) > MAX_RECORD_BYTES
                         or type(metadata) is not dict
                         or {"id", "value"} & metadata.keys()
                     ):
@@ -485,11 +498,11 @@ class Vault:
                     additions.append(
                         {
                             **metadata,
-                            "id": secrets.token_hex(16),
+                            "id": secrets.token_hex(IDENTIFIER_BYTES),
                             "value": base64.b64encode(value).decode("ascii"),
                         }
                     )
-                if not additions or len(records) + len(additions) > 4096:
+                if not additions or len(records) + len(additions) > _MAX_RECORD_COUNT:
                     raise InvalidStore()
                 plaintext = canonical({"records": records + additions})
                 self.validate_records(plaintext)
@@ -526,9 +539,9 @@ class Vault:
             identifiers = set()
             for index, identifier in enumerate(selected):
                 if (
-                    index >= 4096
+                    index >= _MAX_RECORD_COUNT
                     or type(identifier) is not str
-                    or len(identifier) != 32
+                    or len(identifier) != IDENTIFIER_HEX_LENGTH
                     or any(c not in "0123456789abcdef" for c in identifier)
                 ):
                     raise InvalidStore()
@@ -607,9 +620,11 @@ class Vault:
             data, identity = self._storage.read()
             existing = parse(data)
             with (
-                LockedBuffer(bytes(32), protection=self._protection) as buffer,
                 LockedBuffer(
-                    bytes(32), protection=self._protection
+                    bytes(AES256_KEY_BYTES), protection=self._protection
+                ) as buffer,
+                LockedBuffer(
+                    bytes(AES256_KEY_BYTES), protection=self._protection
                 ) as replacement_buffer,
             ):
                 buffer.replace(unwrap(existing, current_password))

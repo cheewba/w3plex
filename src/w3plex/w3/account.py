@@ -15,9 +15,12 @@ from ..security import ISecretRef
 from ..security.diagnostics import private_call
 from ..security.errors import InvalidStore
 
+# Raw secp256k1 private keys contain 256 bits before hexadecimal encoding.
+_PRIVATE_KEY_BYTES = 32
+
 
 def _key(value: Any) -> bytes | str:
-    if isinstance(value, bytes) and len(value) == 32:
+    if isinstance(value, bytes) and len(value) == _PRIVATE_KEY_BYTES:
         return value
     if isinstance(value, bytes):
         value = value.decode("ascii")

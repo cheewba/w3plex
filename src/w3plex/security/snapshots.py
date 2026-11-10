@@ -8,6 +8,11 @@ from pathlib import Path
 from .errors import PermissionDenied
 from .storage import CiphertextFile
 
+# Default maximum size of a checked source snapshot (64 MiB).
+_DEFAULT_SNAPSHOT_BYTES = 64 * 1024 * 1024
+# Largest caller-selected snapshot limit accepted by the reader (128 MiB).
+_MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024
+
 
 @dataclass(frozen=True, repr=False)
 class FileSnapshot:
@@ -23,7 +28,9 @@ class FileSnapshot:
     raw: bytes
 
 
-def snapshot_file(path: Path, *, maximum_size: int = 64 * 1024 * 1024) -> FileSnapshot:
+def snapshot_file(
+    path: Path, *, maximum_size: int = _DEFAULT_SNAPSHOT_BYTES
+) -> FileSnapshot:
     """Read a file and check that it does not change during the read.
 
     Args:
@@ -33,7 +40,7 @@ def snapshot_file(path: Path, *, maximum_size: int = 64 * 1024 * 1024) -> FileSn
     Returns:
         A FileSnapshot containing the bytes and checked file identity.
     """
-    if type(maximum_size) is not int or not 1 <= maximum_size <= 128 * 1024 * 1024:
+    if type(maximum_size) is not int or not 1 <= maximum_size <= _MAX_SNAPSHOT_BYTES:
         raise PermissionDenied()
     parent = CiphertextFile.open_directory(path.parent)
     directory = os.fstat(parent)

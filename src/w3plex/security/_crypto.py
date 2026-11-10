@@ -9,7 +9,25 @@ from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 
+from .constants import AES256_KEY_BYTES, GCM_NONCE_BYTES, KDF_SALT_BYTES
 from .errors import AuthenticationFailed, InvalidStore, UnsupportedProtection
+
+# Minimum Argon2id memory cost, in KiB; also the default writer cost (64 MiB).
+ARGON2_MIN_MEMORY_KIB = 64 * 1024
+# Maximum accepted Argon2id memory-cost parameter (256 MiB).
+ARGON2_MAX_MEMORY_KIB = 256 * 1024
+# Minimum Argon2id pass count; also the default writer pass count.
+ARGON2_MIN_ITERATIONS = 3
+# Maximum accepted Argon2id pass count, bounding work on untrusted headers.
+ARGON2_MAX_ITERATIONS = 10
+# Argon2id requires at least one parallel lane.
+ARGON2_MIN_LANES = 1
+# Limit the parallelism requested by an untrusted envelope header.
+ARGON2_MAX_LANES = 8
+# Newly written envelopes use four Argon2id lanes.
+ARGON2_DEFAULT_LANES = 4
+# Bound password input before passing it to the key-derivation implementation.
+MAX_PASSWORD_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -22,9 +40,9 @@ class KdfSettings:
         lanes: Number of parallel lanes, from 1 to 8.
     """
 
-    memory_kib: int = 65536
-    iterations: int = 3
-    lanes: int = 4
+    memory_kib: int = ARGON2_MIN_MEMORY_KIB
+    iterations: int = ARGON2_MIN_ITERATIONS
+    lanes: int = ARGON2_DEFAULT_LANES
 
     def validate(self):
         """Check that Argon2id settings are within the supported limits.
@@ -36,13 +54,14 @@ class KdfSettings:
             type(value) is int
             for value in (self.memory_kib, self.iterations, self.lanes)
         ) or not (
-            65536 <= self.memory_kib <= 262144
-            and 3 <= self.iterations <= 10
-            and 1 <= self.lanes <= 8
+            ARGON2_MIN_MEMORY_KIB <= self.memory_kib <= ARGON2_MAX_MEMORY_KIB
+            and ARGON2_MIN_ITERATIONS <= self.iterations <= ARGON2_MAX_ITERATIONS
+            and ARGON2_MIN_LANES <= self.lanes <= ARGON2_MAX_LANES
         ):
             raise InvalidStore()
 
 
+# Default Argon2id profile for newly written file and vault envelopes.
 DEFAULT_KDF = KdfSettings()
 
 
@@ -134,7 +153,7 @@ def derive_key(password: bytes, header: dict[str, Any]) -> bytes:
     Returns:
         A 32-byte key used to protect the data key.
     """
-    if not isinstance(password, bytes) or not 1 <= len(password) <= 4096:
+    if not isinstance(password, bytes) or not 1 <= len(password) <= MAX_PASSWORD_BYTES:
         raise AuthenticationFailed()
     settings = header["kdf"]
     KdfSettings(
@@ -143,8 +162,8 @@ def derive_key(password: bytes, header: dict[str, Any]) -> bytes:
     derived = None
     try:
         derived = Argon2id(
-            salt=decode_bytes(header["salt"], size=16),
-            length=32,
+            salt=decode_bytes(header["salt"], size=KDF_SALT_BYTES),
+            length=AES256_KEY_BYTES,
             iterations=settings["iterations"],
             lanes=settings["lanes"],
             memory_cost=settings["memory_kib"],
@@ -168,7 +187,11 @@ def decrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
     Returns:
         The decrypted bytes. Invalid data raises an error.
     """
-    if type(key) is not bytes or len(key) != 32 or len(nonce) != 12:
+    if (
+        type(key) is not bytes
+        or len(key) != AES256_KEY_BYTES
+        or len(nonce) != GCM_NONCE_BYTES
+    ):
         raise InvalidStore()
     plaintext = None
     unsupported = False
@@ -197,7 +220,11 @@ def encrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
     Returns:
         Encrypted bytes followed by their authentication tag.
     """
-    if type(key) is not bytes or len(key) != 32 or len(nonce) != 12:
+    if (
+        type(key) is not bytes
+        or len(key) != AES256_KEY_BYTES
+        or len(nonce) != GCM_NONCE_BYTES
+    ):
         raise InvalidStore()
     ciphertext = None
     try:

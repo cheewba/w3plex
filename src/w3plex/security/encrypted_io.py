@@ -15,6 +15,13 @@ from . import file_format
 from ._io_activation import activate, deactivate, is_active
 from ._migration import migrate_keystore
 from ._streams import decrypted_stream
+from .constants import (
+    AES256_KEY_BYTES,
+    LEGACY_FILE_MAGIC,
+    LEGACY_STORE_MAGIC,
+    PASSWORD_ENTROPY_BYTES,
+    PRIVATE_DIRECTORY_MODE,
+)
 from .diagnostics import private_call, safe_error_type
 from .errors import (
     AuthenticationFailed,
@@ -29,6 +36,7 @@ from .snapshots import snapshot_file
 from .storage import CiphertextFile, FileIdentity, StoreChanged
 from .vault import Vault
 
+# Bound the number of modern file keys cached by one active context.
 _MAXIMUM_KEYS = 1024
 
 
@@ -57,11 +65,11 @@ def detect_format(prefix: bytes) -> str:
     Returns:
         plain, legacy or modern. Known but unsupported formats raise InvalidStore.
     """
-    if prefix.startswith(b"ENC1"):
+    if prefix.startswith(LEGACY_FILE_MAGIC):
         return "legacy"
     if prefix.startswith(file_format.MAGIC):
         return "modern"
-    if prefix.startswith((b"W3FILE", b"W3VAULT", b"KS01")):
+    if prefix.startswith((b"W3FILE", b"W3VAULT", LEGACY_STORE_MAGIC)):
         raise InvalidStore()
     return "plain"
 
@@ -248,7 +256,7 @@ class EncryptedIOContext:
                 path = self._keystore_path
             if not create and not path.exists():
                 return
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.parent.mkdir(mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True)
             storage = CiphertextFile(path)
             vault = None
 
@@ -353,7 +361,7 @@ class EncryptedIOContext:
         if len(identifiers) != 1:
             raise InvalidStore()
         key = self._keystore.read(identifiers[0])
-        if len(key) != 32:
+        if len(key) != AES256_KEY_BYTES:
             raise InvalidStore()
         return key
 
@@ -553,7 +561,11 @@ class EncryptedIOContext:
             )
         if isinstance(data, str):
             data = data.encode("utf-8")
-        password = secrets.token_urlsafe(32) if password is None else password
+        password = (
+            secrets.token_urlsafe(PASSWORD_ENTROPY_BYTES)
+            if password is None
+            else password
+        )
         raw, _ = self._encrypted(data, password, add_to_keystore=add_to_keystore)
         return base64.b64encode(raw).decode("ascii"), password
 

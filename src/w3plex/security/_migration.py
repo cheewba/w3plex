@@ -6,6 +6,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import file_format, vault_format
+from .constants import (
+    IDENTIFIER_BYTES,
+    LEGACY_SALT_BYTES,
+    LEGACY_STORE_MAGIC,
+    MAX_LEGACY_STORE_BYTES,
+)
 from .errors import AuthenticationFailed, InvalidStore
 from .legacy import decode_keystore
 from .memory import LockedBuffer, ProcessProtection
@@ -53,9 +59,9 @@ def migrate_keystore(
         except BaseException:
             vault.close()
             raise
-    if len(raw) > 1024 * 1024 or len(raw) < 16:
+    if len(raw) > MAX_LEGACY_STORE_BYTES or len(raw) < LEGACY_SALT_BYTES:
         raise InvalidStore()
-    encrypted = raw[16:20] == b"KS01"
+    encrypted = raw.startswith(LEGACY_STORE_MAGIC, LEGACY_SALT_BYTES)
     if not encrypted:
         decode_keystore(raw)
     if backup == storage.path:
@@ -71,7 +77,7 @@ def migrate_keystore(
     # Build the replacement before creating or verifying the recovery backup.
     records = [
         {
-            "id": secrets.token_hex(16),
+            "id": secrets.token_hex(IDENTIFIER_BYTES),
             "value": base64.b64encode(key).decode("ascii"),
             "context": "w3plex.legacy-file",
         }

@@ -6,6 +6,11 @@ from collections.abc import Callable
 
 from .errors import AuthenticationFailed, InvalidStore
 
+# Sample enough header bytes to identify current and known encrypted formats.
+_FORMAT_PROBE_BYTES = 16
+# Password failures are bounded to three attempts for a captured source.
+_PASSWORD_ATTEMPTS = 3
+
 
 def decrypted_stream(
     handle,
@@ -55,7 +60,7 @@ def decrypted_stream(
     try:
         # Inspect bytes so locale decoding never sees encrypted content.
         stream = handle if binary else handle.buffer
-        kind = detect(stream.read(16))
+        kind = detect(stream.read(_FORMAT_PROBE_BYTES))
         handle.seek(0)
         if kind == "plain":
             return handle
@@ -72,7 +77,7 @@ def decrypted_stream(
 
     source = os.fsdecode(file)
     plain = b""
-    for remaining in (2, 1, 0):
+    for remaining in reversed(range(_PASSWORD_ATTEMPTS)):
         try:
             plain = decrypt(raw, source=source)
             break

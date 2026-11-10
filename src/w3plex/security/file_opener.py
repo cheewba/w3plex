@@ -72,7 +72,7 @@ class DefaultFileOpener:
                     raise PermissionDenied()
             path = Path(file).absolute()
             with io.open(path, "rb") as stream:  # noqa: UP020 -- inspect ciphertext without global decryption
-                prefix = stream.read(8)
+                prefix = stream.read(len(file_format.MAGIC))
                 if detect_format(prefix) == "plain":
                     result = PlainFile(prefix + stream.read())
                     with self._mutex:
