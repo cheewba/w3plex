@@ -11,7 +11,8 @@ use the interactive shell, and share configured chains, clients, and proxies.
 
 Use `w3plex.security` to encrypt files or keep sensitive values in a vault. See
 [file encryption](docs/file-encryption.md) and
-[secret references](docs/secret-references.md) for examples.
+[secret references](docs/secret-references.md) for examples. Use the
+[byte encryption API](docs/crypto.md) to compose a custom storage format.
 
 ## Install
 

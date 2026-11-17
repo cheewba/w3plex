@@ -6,14 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._crypto import (
-    DEFAULT_KDF as DEFAULT_KDF,  # noqa: PLC0414 -- public re-export for type checkers
-    KdfSettings as KdfSettings,  # noqa: PLC0414 -- public re-export for type checkers
     canonical as canonical,  # noqa: PLC0414 -- public re-export for type checkers
     decode_bytes,
-    decrypt,
-    derive_key,
     encode_bytes,
-    encrypt,
     reject_json_constant as reject_json_constant,  # noqa: PLC0414 -- public re-export
     unique_fields as unique_fields,  # noqa: PLC0414 -- public re-export
 )
@@ -25,6 +20,15 @@ from .constants import (
     IDENTIFIER_HEX_LENGTH,
     KDF_SALT_BYTES,
     WRAPPED_KEY_BYTES,
+)
+from .crypto import (
+    DEFAULT_KDF as DEFAULT_KDF,  # noqa: PLC0414 -- existing public import
+    KdfSettings as KdfSettings,  # noqa: PLC0414 -- existing public import
+    decrypt_aead as decrypt,
+    derive_password_key,
+    encrypt_aead as encrypt,
+    generate_key,
+    generate_salt,
 )
 from .errors import InvalidStore, UnsupportedProtection
 
@@ -139,14 +143,7 @@ def parse(data: bytes) -> Envelope:
         or any(c not in "0123456789abcdef" for c in identifier)
     ):
         raise InvalidStore()
-    kdf = header["kdf"]
-    if (
-        not isinstance(kdf, dict)
-        or set(kdf) != {"name", "memory_kib", "iterations", "lanes"}
-        or kdf["name"] != "argon2id"
-    ):
-        raise InvalidStore()
-    KdfSettings(kdf["memory_kib"], kdf["iterations"], kdf["lanes"]).validate()
+    KdfSettings.from_data(header["kdf"])
     decode_bytes(header["salt"], size=KDF_SALT_BYTES)
     wrapping_nonce = decode_bytes(header["wrap_nonce"], size=GCM_NONCE_BYTES)
     data_nonce = decode_bytes(header["data_nonce"], size=GCM_NONCE_BYTES)
@@ -169,7 +166,11 @@ def unwrap(envelope: Envelope, password: bytes) -> bytes:
     Returns:
         The 32-byte data key.
     """
-    key = derive_key(password, envelope.header)
+    key = derive_password_key(
+        password,
+        salt=decode_bytes(envelope.header["salt"], size=KDF_SALT_BYTES),
+        settings=KdfSettings.from_data(envelope.header["kdf"]),
+    )
     return decrypt(
         key,
         decode_bytes(envelope.header["wrap_nonce"], size=GCM_NONCE_BYTES),
@@ -224,7 +225,7 @@ def seal(
         A pair containing the Envelope and its 32-byte data key.
     """
     settings.validate()
-    key = secrets.token_bytes(AES256_KEY_BYTES) if data_key is None else data_key
+    key = generate_key() if data_key is None else data_key
     if (
         len(key) != AES256_KEY_BYTES
         or len(plaintext) > MAXIMUM_SIZE // _PLAINTEXT_BUDGET_DIVISOR
@@ -247,18 +248,17 @@ def seal(
         "cipher": "AES-256-GCM",
         "context": "w3plex.vault",
         "store_id": store_id or secrets.token_hex(IDENTIFIER_BYTES),
-        "salt": encode_bytes(secrets.token_bytes(KDF_SALT_BYTES)),
+        "salt": encode_bytes(generate_salt()),
         "wrap_nonce": encode_bytes(wrapping_nonce),
         "data_nonce": encode_bytes(data_nonce),
-        "kdf": {
-            "name": "argon2id",
-            "memory_kib": settings.memory_kib,
-            "iterations": settings.iterations,
-            "lanes": settings.lanes,
-        },
+        "kdf": settings.to_data(),
     }
     aad = canonical(header)
-    wrapping_key = derive_key(password, header)
+    wrapping_key = derive_password_key(
+        password,
+        salt=decode_bytes(header["salt"], size=KDF_SALT_BYTES),
+        settings=settings,
+    )
     wrapped = encrypt(wrapping_key, wrapping_nonce, key, _wrapping_aad(header))
     payload = encrypt(key, data_nonce, plaintext, aad + b"\0records\0" + wrapped)
     envelope = Envelope(header, wrapped, payload)

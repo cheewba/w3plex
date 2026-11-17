@@ -6,25 +6,28 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._crypto import (
-    DEFAULT_KDF,
-    KdfSettings,
     canonical,
     decode_bytes,
-    decrypt,
-    derive_key,
     encode_bytes,
-    encrypt,
     reject_json_constant,
     unique_fields,
 )
 from .constants import (
-    AES256_KEY_BYTES,
     GCM_NONCE_BYTES,
     GCM_TAG_BYTES,
     IDENTIFIER_BYTES,
     IDENTIFIER_HEX_LENGTH,
     KDF_SALT_BYTES,
     WRAPPED_KEY_BYTES,
+)
+from .crypto import (
+    DEFAULT_KDF,
+    KdfSettings,
+    decrypt_aead as decrypt,
+    derive_password_key,
+    encrypt_aead as encrypt,
+    generate_key,
+    generate_salt,
 )
 from .errors import InvalidStore, UnsupportedProtection
 
@@ -147,14 +150,7 @@ def parse(raw: bytes) -> FileEnvelope:
         or any(char not in "0123456789abcdef" for char in identifier)
     ):
         raise InvalidStore()
-    kdf = header["kdf"]
-    if (
-        not isinstance(kdf, dict)
-        or set(kdf) != {"name", "memory_kib", "iterations", "lanes"}
-        or kdf["name"] != "argon2id"
-    ):
-        raise InvalidStore()
-    KdfSettings(kdf["memory_kib"], kdf["iterations"], kdf["lanes"]).validate()
+    KdfSettings.from_data(header["kdf"])
     decode_bytes(header["salt"], size=KDF_SALT_BYTES)
     wrap_nonce = decode_bytes(header["wrap_nonce"], size=GCM_NONCE_BYTES)
     data_nonce = decode_bytes(header["data_nonce"], size=GCM_NONCE_BYTES)
@@ -181,7 +177,11 @@ def unwrap(envelope: FileEnvelope, password: bytes) -> bytes:
         The 32-byte data key.
     """
     return decrypt(
-        derive_key(password, envelope.header),
+        derive_password_key(
+            password,
+            salt=decode_bytes(envelope.header["salt"], size=KDF_SALT_BYTES),
+            settings=KdfSettings.from_data(envelope.header["kdf"]),
+        ),
         decode_bytes(envelope.header["wrap_nonce"], size=GCM_NONCE_BYTES),
         envelope.wrapped_key,
         MAGIC + b"\0key\0" + canonical(envelope.header),
@@ -226,7 +226,7 @@ def seal(
     settings.validate()
     if type(plaintext) is not bytes or len(plaintext) > MAXIMUM_PLAINTEXT:
         raise InvalidStore()
-    key = secrets.token_bytes(AES256_KEY_BYTES)
+    key = generate_key()
     wrapping_nonce, data_nonce = (
         secrets.token_bytes(GCM_NONCE_BYTES),
         secrets.token_bytes(GCM_NONCE_BYTES),
@@ -238,19 +238,21 @@ def seal(
         "cipher": "AES-256-GCM",
         "context": "w3plex.file",
         "file_id": secrets.token_hex(IDENTIFIER_BYTES),
-        "kdf": {
-            "name": "argon2id",
-            "memory_kib": settings.memory_kib,
-            "iterations": settings.iterations,
-            "lanes": settings.lanes,
-        },
-        "salt": encode_bytes(secrets.token_bytes(KDF_SALT_BYTES)),
+        "kdf": settings.to_data(),
+        "salt": encode_bytes(generate_salt()),
         "wrap_nonce": encode_bytes(wrapping_nonce),
         "data_nonce": encode_bytes(data_nonce),
     }
     encoded = canonical(header)
     wrapped = encrypt(
-        derive_key(password, header), wrapping_nonce, key, MAGIC + b"\0key\0" + encoded
+        derive_password_key(
+            password,
+            salt=decode_bytes(header["salt"], size=KDF_SALT_BYTES),
+            settings=settings,
+        ),
+        wrapping_nonce,
+        key,
+        MAGIC + b"\0key\0" + encoded,
     )
     payload = encrypt(
         key, data_nonce, plaintext, MAGIC + b"\0file\0" + encoded + wrapped

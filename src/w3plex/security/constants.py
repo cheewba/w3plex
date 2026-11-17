@@ -2,13 +2,13 @@
 
 # AES-256 data keys and password-derived wrapping keys contain 256 bits.
 AES256_KEY_BYTES = 32
-# Version 1 envelopes use the standard 96-bit AES-GCM nonce size.
+# AES-GCM blocks and version 1 envelopes use standard 96-bit nonces.
 GCM_NONCE_BYTES = 12
 # AES-GCM appends a 128-bit authentication tag to each encrypted value.
 GCM_TAG_BYTES = 16
 # A wrapped data key contains the key ciphertext followed by its GCM tag.
 WRAPPED_KEY_BYTES = AES256_KEY_BYTES + GCM_TAG_BYTES
-# Modern password derivation uses a fresh 128-bit salt for each envelope.
+# Password keys and subkeys use public, random 128-bit salts.
 KDF_SALT_BYTES = 16
 # File, store and record identifiers contain 128 random bits before hex encoding.
 IDENTIFIER_BYTES = 16

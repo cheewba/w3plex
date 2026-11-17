@@ -9,6 +9,7 @@ import secrets
 import threading
 import weakref
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -344,6 +345,26 @@ class Vault:
             if not self.is_unlocked:
                 raise PermissionDenied()
             return self._generation
+
+    @contextmanager
+    def guard(self, checkpoint: object):
+        """Keep record operations in one live session, including reentrant callbacks."""
+        with self._mutex:
+            if self.checkpoint() != checkpoint:
+                raise PermissionDenied()
+            yield
+            if self.checkpoint() != checkpoint:
+                raise PermissionDenied()
+
+    @staticmethod
+    def validate_identifier(identifier: str) -> None:
+        """Validate a W3VAULT1 record ID without decrypting its contents."""
+        if (
+            type(identifier) is not str
+            or len(identifier) != IDENTIFIER_HEX_LENGTH
+            or any(char not in "0123456789abcdef" for char in identifier)
+        ):
+            raise PermissionDenied()
 
     def validate_records(self, plaintext: bytes) -> list[dict[str, Any]]:
         """Check a decrypted record document before using it.

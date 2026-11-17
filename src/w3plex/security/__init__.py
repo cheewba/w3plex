@@ -1,5 +1,6 @@
 """Generic data protection and structural references; imports have no effects."""
 
+from . import crypto as crypto
 from .adapters import SecretJson as SecretJson, SecretString as SecretString
 from .encrypted_io import (
     EncryptedIOContext as EncryptedIOContext,
@@ -20,5 +21,6 @@ from .legacy import (
 )
 from .refs import (
     ISecretRef as ISecretRef,
+    SecretBackend as SecretBackend,
     SecretStore as SecretStore,
 )

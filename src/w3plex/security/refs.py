@@ -1,6 +1,7 @@
 """References to encrypted values that cannot change after saving."""
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -13,13 +14,12 @@ from typing import (
 )
 
 from . import file_format
-from .constants import GCM_TAG_BYTES, IDENTIFIER_HEX_LENGTH, MAX_RECORD_BYTES
+from .constants import GCM_TAG_BYTES, MAX_RECORD_BYTES
 from .diagnostics import private_call
 from .encrypted_io import EncryptedIOContext, detect_format
 from .errors import InteractionRequired, InvalidStore, PermissionDenied
 from .legacy import LegacyContext
 from .snapshots import snapshot_file
-from .vault import Vault
 
 # Captured input must fit in one immutable vault record.
 MAX_SNAPSHOT_SIZE = MAX_RECORD_BYTES
@@ -40,6 +40,25 @@ class ISecretRef[T](Protocol):
             The referenced value.
         """
         ...
+
+
+class SecretBackend(Protocol):
+    """Immutable byte records with backend-owned IDs and session synchronization.
+
+    checkpoint() must reject locked access. guard() validates that checkpoint on
+    entry and exit, serializing work against lock/unlock without holding a lock
+    during user input. The caller owns the backend's keys and lifetime.
+    """
+
+    def checkpoint(self) -> object: ...
+
+    def guard(self, checkpoint: object) -> AbstractContextManager[None]: ...
+
+    def validate_identifier(self, identifier: str) -> None: ...
+
+    def save(self, value: bytes) -> str: ...
+
+    def read(self, identifier: str) -> bytes: ...
 
 
 @dataclass(frozen=True)
@@ -93,14 +112,15 @@ class SecretStore:
 
     def __init__(
         self,
-        vault: Vault,
+        vault: SecretBackend,
         *,
         confirm: Callable[[DisclosureRequest], bool] | None = None,
     ):
-        """Use a vault to save values and confirm requests to show them.
+        """Use an immutable record backend and confirm requests to show values.
 
         Args:
-            vault: The vault that stores values. The caller manages its lifetime.
+            vault: Record backend; the keyword retains compatibility with Vault.
+                The caller manages its lifetime.
             confirm: Optional callback taking a DisclosureRequest. It must return True
                 to show a value.
 
@@ -129,7 +149,8 @@ class SecretStore:
         def operation():
             if type(value) is not bytes or len(value) > MAX_SNAPSHOT_SIZE:
                 raise InvalidStore()
-            return StoredSecret(self, self._vault.save(value))
+            with self._vault.guard(self._vault.checkpoint()):
+                return StoredSecret(self, self._vault.save(value))
 
         return private_call(operation)
 
@@ -173,9 +194,7 @@ class SecretStore:
                 raw = context.decrypt_bytes(raw, source=path)
 
             # The vault may have been locked and reopened while asking for a password.
-            with self._vault.mutex:
-                if self._vault.checkpoint() != checkpoint:
-                    raise PermissionDenied()
+            with self._vault.guard(checkpoint):
                 return self.capture(raw)
 
         return private_call(operation)
@@ -184,18 +203,17 @@ class SecretStore:
         """Create a local reference without reading its value.
 
         Args:
-            identifier: The 32-character record ID.
+            identifier: An opaque ID validated by the selected backend.
 
         Returns:
             A StoredSecret handle. The record is checked when the handle is read.
         """
-        if (
-            type(identifier) is not str
-            or len(identifier) != IDENTIFIER_HEX_LENGTH
-            or any(c not in "0123456789abcdef" for c in identifier)
-        ):
-            raise PermissionDenied()
-        return StoredSecret(self, identifier)
+
+        def operation():
+            self._vault.validate_identifier(identifier)
+            return StoredSecret(self, identifier)
+
+        return private_call(operation)
 
     def reveal(self, identifier: str, *, silent: bool = False) -> bytes:
         """Read a saved value, asking for confirmation when needed.
@@ -221,12 +239,7 @@ class SecretStore:
                     raise PermissionDenied()
 
             # Confirmation applies only to the session in which it was requested.
-            with self._vault.mutex:
-                if self._vault.checkpoint() != checkpoint:
-                    raise PermissionDenied()
-                value = self._vault.read(identifier)
-                if self._vault.checkpoint() != checkpoint:
-                    raise PermissionDenied()
-                return value
+            with self._vault.guard(checkpoint):
+                return self._vault.read(identifier)
 
         return private_call(operation)

@@ -111,3 +111,8 @@ def test_failed_capture_keeps_previous_encrypted_snapshot(
     assert vault.path.read_bytes() == original
     vault.unlock(vault_password)
     assert ref.ref(silent=True) == VALUE
+
+
+def test_vault_reference_rejects_an_invalid_identifier_before_reading(secret_store):
+    with pytest.raises(PermissionDenied):
+        secret_store.reference("api-key")

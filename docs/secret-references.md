@@ -64,6 +64,11 @@ To use another storage backend, implement `ISecretRef[T]` with a
 `ref(*, silent=False) -> T` method. Each backend is responsible for its access
 checks.
 
+To reuse `SecretStore` itself, implement the small `SecretBackend` protocol and
+pass that backend in place of a vault. IDs and storage layout belong to the
+backend. See [byte encryption and custom storage](crypto.md) for the contract
+and reusable encryption operations.
+
 ## Read encrypted sources
 
 Pass an `EncryptedIOContext` when the source file is encrypted. The application

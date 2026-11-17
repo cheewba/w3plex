@@ -1,13 +1,16 @@
-"""Common header encoding and Argon2id/AES-256-GCM helpers."""
+"""Shared Argon2id, HKDF, AES-GCM and strict envelope encoding."""
 
 import base64
 import json
+import secrets
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
 from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .constants import AES256_KEY_BYTES, GCM_NONCE_BYTES, KDF_SALT_BYTES
 from .errors import AuthenticationFailed, InvalidStore, UnsupportedProtection
@@ -32,24 +35,14 @@ MAX_PASSWORD_BYTES = 4096
 
 @dataclass(frozen=True)
 class KdfSettings:
-    """Argon2id settings checked before creating an encryption key.
-
-    Args:
-        memory_kib: Memory requested in KiB, from 65536 to 262144.
-        iterations: Number of passes over memory, from 3 to 10.
-        lanes: Number of parallel lanes, from 1 to 8.
-    """
+    """Bound the memory and CPU work accepted for Argon2id."""
 
     memory_kib: int = ARGON2_MIN_MEMORY_KIB
     iterations: int = ARGON2_MIN_ITERATIONS
     lanes: int = ARGON2_DEFAULT_LANES
 
     def validate(self):
-        """Check that Argon2id settings are within the supported limits.
-
-        Returns:
-            None.
-        """
+        """Reject unsupported or excessive derivation costs."""
         if not all(
             type(value) is int
             for value in (self.memory_kib, self.iterations, self.lanes)
@@ -60,34 +53,43 @@ class KdfSettings:
         ):
             raise InvalidStore()
 
+    def to_data(self) -> dict[str, str | int]:
+        """Return public settings suitable for JSON or YAML."""
+        self.validate()
+        return {
+            "name": "argon2id",
+            "memory_kib": self.memory_kib,
+            "iterations": self.iterations,
+            "lanes": self.lanes,
+        }
+
+    @classmethod
+    def from_data(cls, data: Any) -> Self:
+        """Validate stored settings before performing expensive derivation."""
+        if (
+            not isinstance(data, dict)
+            or set(data) != {"name", "memory_kib", "iterations", "lanes"}
+            or data["name"] != "argon2id"
+        ):
+            raise InvalidStore()
+        settings = cls(data["memory_kib"], data["iterations"], data["lanes"])
+        settings.validate()
+        return settings
+
 
 # Default Argon2id profile for newly written file and vault envelopes.
 DEFAULT_KDF = KdfSettings()
 
 
 def canonical(value: Any) -> bytes:
-    """Write JSON in a stable byte format.
-
-    Args:
-        value: A JSON value to encode. Objects use sorted keys and no extra spaces.
-
-    Returns:
-        JSON bytes encoded as ASCII.
-    """
+    """Encode finite JSON with stable keys, ASCII escapes and no whitespace."""
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
     ).encode("ascii")
 
 
 def unique_fields(pairs):
-    """Build a JSON object and reject repeated field names.
-
-    Args:
-        pairs: Field names and values supplied by the JSON reader.
-
-    Returns:
-        A dictionary containing the fields.
-    """
+    """Decode a JSON object while rejecting duplicate field names."""
     result = {}
     for key, value in pairs:
         if key in result:
@@ -97,39 +99,17 @@ def unique_fields(pairs):
 
 
 def reject_json_constant(value: str):
-    """Reject JSON constants such as NaN and Infinity.
-
-    Args:
-        value: The constant found by the JSON reader.
-
-    Returns:
-        No value. This function always raises ValueError.
-    """
+    """Reject JSON constants such as NaN and Infinity."""
     raise ValueError("Invalid JSON constant")
 
 
 def encode_bytes(value: bytes) -> str:
-    """Encode bytes as base64 text.
-
-    Args:
-        value: Bytes to encode for storage in a header.
-
-    Returns:
-        Standard base64 text.
-    """
+    """Encode bytes as standard base64 text."""
     return base64.b64encode(value).decode("ascii")
 
 
 def decode_bytes(value: Any, *, size: int | None = None) -> bytes:
-    """Decode base64 text and check its length when requested.
-
-    Args:
-        value: Base64 text to decode.
-        size: Required number of decoded bytes. None allows any length.
-
-    Returns:
-        The decoded bytes.
-    """
+    """Decode strict base64 and optionally require an exact byte length."""
     success = False
     decoded = b""
     try:
@@ -143,30 +123,33 @@ def decode_bytes(value: Any, *, size: int | None = None) -> bytes:
     return decoded
 
 
-def derive_key(password: bytes, header: dict[str, Any]) -> bytes:
-    """Create a key from a password using the header settings.
+def generate_key() -> bytes:
+    """Generate an AES-256 key. The caller owns and protects the returned bytes."""
+    return secrets.token_bytes(AES256_KEY_BYTES)
 
-    Args:
-        password: Password bytes used by Argon2id.
-        header: Header containing the salt and validated KDF settings.
 
-    Returns:
-        A 32-byte key used to protect the data key.
-    """
+def generate_salt() -> bytes:
+    """Generate a public, random salt for a password key or subkey."""
+    return secrets.token_bytes(KDF_SALT_BYTES)
+
+
+def derive_password_key(
+    password: bytes, *, salt: bytes, settings: KdfSettings = DEFAULT_KDF
+) -> bytes:
+    """Derive an AES-256 key from a password and explicit Argon2id parameters."""
     if not isinstance(password, bytes) or not 1 <= len(password) <= MAX_PASSWORD_BYTES:
         raise AuthenticationFailed()
-    settings = header["kdf"]
-    KdfSettings(
-        settings["memory_kib"], settings["iterations"], settings["lanes"]
-    ).validate()
+    if type(salt) is not bytes or len(salt) < KDF_SALT_BYTES:
+        raise InvalidStore()
+    settings.validate()
     derived = None
     try:
         derived = Argon2id(
-            salt=decode_bytes(header["salt"], size=KDF_SALT_BYTES),
+            salt=salt,
             length=AES256_KEY_BYTES,
-            iterations=settings["iterations"],
-            lanes=settings["lanes"],
-            memory_cost=settings["memory_kib"],
+            iterations=settings.iterations,
+            lanes=settings.lanes,
+            memory_cost=settings.memory_kib,
         ).derive(password)
     except UnsupportedAlgorithm:
         pass
@@ -175,22 +158,37 @@ def derive_key(password: bytes, header: dict[str, Any]) -> bytes:
     return derived
 
 
-def decrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
-    """Check and decrypt AES-256-GCM data.
-
-    Args:
-        key: The 32-byte encryption key.
-        nonce: The 12-byte nonce used when the data was encrypted.
-        data: Encrypted bytes, including the authentication tag.
-        aad: Extra data that must match the value used during encryption.
-
-    Returns:
-        The decrypted bytes. Invalid data raises an error.
-    """
+def derive_subkey(key: bytes, *, salt: bytes, context: bytes) -> bytes:
+    """Derive a purpose-specific AES-256 key from a strong key, never a password."""
     if (
         type(key) is not bytes
         or len(key) != AES256_KEY_BYTES
+        or type(salt) is not bytes
+        or len(salt) < KDF_SALT_BYTES
+        or type(context) is not bytes
+    ):
+        raise InvalidStore()
+    derived = None
+    try:
+        derived = HKDF(
+            algorithm=hashes.SHA256(), length=AES256_KEY_BYTES, salt=salt, info=context
+        ).derive(key)
+    except UnsupportedAlgorithm:
+        pass
+    if derived is None:
+        raise UnsupportedProtection()
+    return derived
+
+
+def decrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
+    """Authenticate AES-256-GCM ciphertext and associated data before returning bytes."""
+    if (
+        type(key) is not bytes
+        or len(key) != AES256_KEY_BYTES
+        or type(nonce) is not bytes
         or len(nonce) != GCM_NONCE_BYTES
+        or type(data) is not bytes
+        or type(aad) is not bytes
     ):
         raise InvalidStore()
     plaintext = None
@@ -209,21 +207,14 @@ def decrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
 
 
 def encrypt(key: bytes, nonce: bytes, data: bytes, aad: bytes) -> bytes:
-    """Encrypt bytes with AES-256-GCM.
-
-    Args:
-        key: The 32-byte encryption key.
-        nonce: A 12-byte nonce that has not been used with this key.
-        data: Bytes to encrypt.
-        aad: Extra data to check during decryption. It is not encrypted.
-
-    Returns:
-        Encrypted bytes followed by their authentication tag.
-    """
+    """Encrypt with a caller-owned, never-repeated nonce; append the GCM tag."""
     if (
         type(key) is not bytes
         or len(key) != AES256_KEY_BYTES
+        or type(nonce) is not bytes
         or len(nonce) != GCM_NONCE_BYTES
+        or type(data) is not bytes
+        or type(aad) is not bytes
     ):
         raise InvalidStore()
     ciphertext = None
