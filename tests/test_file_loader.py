@@ -12,7 +12,7 @@ from eth_account import Account as EthAccount
 from w3ext import Account
 
 from w3plex.security.errors import PermissionDenied, SecurityError
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 from w3plex.utils.loader import (
     FileLoader,
     accounts_loader,

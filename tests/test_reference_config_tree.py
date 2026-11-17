@@ -12,7 +12,7 @@ from w3plex.config import config_loader
 from w3plex.config.reading import load_reference_config
 from w3plex.security import ISecretRef
 from w3plex.security.errors import PermissionDenied
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 from w3plex.utils.loader import using_file_opener
 
 

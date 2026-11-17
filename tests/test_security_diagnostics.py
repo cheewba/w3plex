@@ -15,8 +15,8 @@ from w3plex.security.errors import (
     SecurityError,
     UnsupportedProtection,
 )
-from w3plex.security.storage import StoreChanged, UnsafeStorage, WriterBusy
-from w3plex.security.vault import private_call
+from w3plex.security.stores.file import StoreChanged, UnsafeStorage, WriterBusy
+from w3plex.security.stores.vault import private_call
 
 ERRORS = (
     SecurityError,

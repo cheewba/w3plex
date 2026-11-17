@@ -22,7 +22,7 @@ from w3plex.security.errors import (
     PermissionDenied,
     SecurityError,
 )
-from w3plex.security.storage import StoreChanged
+from w3plex.security.stores.file import StoreChanged
 
 FIXTURES = Path(__file__).parent / "fixtures/legacy-security"
 MODERN = Path(__file__).parent / "fixtures/file-v1"

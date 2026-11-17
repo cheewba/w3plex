@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from w3plex.security import vault_format as codec
-from w3plex.security.storage import (
+from w3plex.security.stores.file import (
     CiphertextFile,
     StoreChanged,
     UnsafeStorage,

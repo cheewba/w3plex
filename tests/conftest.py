@@ -4,8 +4,8 @@ import pytest
 
 from w3plex.security.memory import ProcessProtection
 from w3plex.security.refs import SecretStore
-from w3plex.security.storage import CiphertextFile
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile
+from w3plex.security.stores.vault import Vault
 
 
 @pytest.fixture

@@ -8,8 +8,8 @@ import pytest
 
 from w3plex.security import SecretStore, vault_format as codec
 from w3plex.security.errors import InvalidStore, PermissionDenied
-from w3plex.security.storage import CiphertextFile, StoreChanged
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile, StoreChanged
+from w3plex.security.stores.vault import Vault
 
 FIXTURES = Path(__file__).parent / "fixtures/security"
 

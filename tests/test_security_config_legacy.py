@@ -16,7 +16,7 @@ from w3plex.security.errors import (
     InteractionRequired,
     InvalidStore,
 )
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 
 FIXTURES = Path(__file__).parent / "fixtures" / "legacy-security"
 

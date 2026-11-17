@@ -17,8 +17,10 @@ New code can import `Vault` from `w3plex.security.stores.vault`, file contexts
 from `w3plex.security.files.encrypted_io` and helpers from
 `w3plex.security.files.io`. Existing module paths, including
 `w3plex.security.vault`, `storage`, `encrypted_io` and `file_format`, remain
-compatibility imports of the same implementations. The public `crypto` API and
-top-level exports keep their existing paths. No import activates encrypted I/O.
+runtime aliases of the same implementations, registered in `security/__init__.py`
+without separate forwarding files. Use canonical package paths in new source
+for static type checking. The public `crypto` API and top-level exports keep
+their existing paths. No import activates encrypted I/O.
 
 ## Encrypt a block
 

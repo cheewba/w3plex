@@ -7,7 +7,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from w3plex.security.errors import PermissionDenied
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 
 FILE_PASSWORD = "PUBLIC-TEST-file-password"
 

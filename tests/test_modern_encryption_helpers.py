@@ -13,7 +13,7 @@ from w3plex.security.errors import (
     PermissionDenied,
     UnsupportedProtection,
 )
-from w3plex.security.storage import StoreChanged, UnsafeStorage
+from w3plex.security.stores.file import StoreChanged, UnsafeStorage
 
 PASSWORD = "PUBLIC-TEST-file-password"
 MASTER = "PUBLIC-TEST-modern-master"

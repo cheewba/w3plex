@@ -19,8 +19,8 @@ from w3plex.security.errors import (
     SecurityError,
     UnsupportedProtection,
 )
-from w3plex.security.storage import CiphertextFile, StoreChanged, WriterBusy
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile, StoreChanged, WriterBusy
+from w3plex.security.stores.vault import Vault
 
 
 @pytest.fixture

@@ -15,7 +15,7 @@ from w3plex.config.reading import load_config
 from w3plex.runner import Runner
 from w3plex.security import ISecretRef, SecretStore
 from w3plex.security.errors import PermissionDenied, SecurityError
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 from w3plex.utils.loader import accounts_loader, using_file_opener
 from w3plex.w3 import Account
 

@@ -12,8 +12,8 @@ from w3plex.core.objects import application
 from w3plex.runner import Runner
 from w3plex.security import ISecretRef, SecretStore
 from w3plex.security.errors import PermissionDenied
-from w3plex.security.storage import CiphertextFile
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile
+from w3plex.security.stores.vault import Vault
 from w3plex.utils.loader import FileLoader, get_file_opener, using_file_opener
 
 

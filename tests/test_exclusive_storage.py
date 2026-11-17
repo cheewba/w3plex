@@ -10,8 +10,8 @@ import pytest
 
 from w3plex.security import EncryptedIOContext
 from w3plex.security.memory import ProcessProtection
-from w3plex.security.storage import CiphertextFile, StoreChanged, UnsafeStorage
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile, StoreChanged, UnsafeStorage
+from w3plex.security.stores.vault import Vault
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MASTER = "PUBLIC-TEST-vault-create-password"

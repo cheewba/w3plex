@@ -9,8 +9,8 @@ import pytest
 from w3plex.security.adapters import SecretJson, SecretString
 from w3plex.security.errors import InvalidStore, PermissionDenied, SecurityError
 from w3plex.security.refs import SecretStore
-from w3plex.security.storage import CiphertextFile
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile
+from w3plex.security.stores.vault import Vault
 
 VALUE = b"PUBLIC-TEST-snapshot-value-19041"
 

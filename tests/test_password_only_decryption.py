@@ -9,8 +9,8 @@ import pytest
 from w3plex.security import EncryptedIOContext, file_format, io as encryption_io
 from w3plex.security.errors import AuthenticationFailed
 from w3plex.security.memory import ProcessProtection
-from w3plex.security.storage import CiphertextFile
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile
+from w3plex.security.stores.vault import Vault
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

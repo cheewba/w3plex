@@ -11,7 +11,7 @@ from w3ext import Account
 from w3plex.config import Lazy, config_loader
 from w3plex.config.reading import load_config
 from w3plex.runner import Runner
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 from w3plex.utils.loader import FileLoader
 
 KEY = "11" * 32

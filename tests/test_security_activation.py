@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from w3plex.security.errors import ActivationConflict
-from w3plex.security.legacy import LegacyContext
+from w3plex.security.files.legacy import LegacyContext
 
 
 def test_grouped_modules_preserve_existing_imports_without_activation(tmp_path):
