@@ -13,16 +13,18 @@ from typing import (
     runtime_checkable,
 )
 
-from . import file_format
 from .constants import GCM_TAG_BYTES, MAX_RECORD_BYTES
 from .diagnostics import private_call
-from .encrypted_io import EncryptedIOContext, detect_format
 from .errors import InteractionRequired, InvalidStore, PermissionDenied
-from .legacy import LegacyContext
-from .snapshots import snapshot_file
+from .files import format as file_format
+from .files.encrypted_io import EncryptedIOContext, detect_format
+from .files.legacy import LegacyContext
+from .files.snapshots import snapshot_file
 
 # Captured input must fit in one immutable vault record.
 MAX_SNAPSHOT_SIZE = MAX_RECORD_BYTES
+# None may itself be a backend session token; distinguish an omitted checkpoint.
+_UNSET_CHECKPOINT = object()
 
 
 @runtime_checkable
@@ -146,13 +148,17 @@ class SecretStore:
             A StoredSecret reference to the saved value.
         """
 
-        def operation():
-            if type(value) is not bytes or len(value) > MAX_SNAPSHOT_SIZE:
-                raise InvalidStore()
-            with self._vault.guard(self._vault.checkpoint()):
-                return StoredSecret(self, self._vault.save(value))
+        return private_call(lambda: self._save(value))
 
-        return private_call(operation)
+    def _save(
+        self, value: bytes, checkpoint: object = _UNSET_CHECKPOINT
+    ) -> StoredSecret:
+        if type(value) is not bytes or len(value) > MAX_SNAPSHOT_SIZE:
+            raise InvalidStore()
+        if checkpoint is _UNSET_CHECKPOINT:
+            checkpoint = self._vault.checkpoint()
+        with self._vault.guard(checkpoint):
+            return StoredSecret(self, self._vault.save(value))
 
     def capture_file(
         self,
@@ -194,8 +200,7 @@ class SecretStore:
                 raw = context.decrypt_bytes(raw, source=path)
 
             # The vault may have been locked and reopened while asking for a password.
-            with self._vault.guard(checkpoint):
-                return self.capture(raw)
+            return self._save(raw, checkpoint)
 
         return private_call(operation)
 

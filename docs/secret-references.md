@@ -17,8 +17,8 @@ In this example, `master_password` is bytes received through private input.
 from pathlib import Path
 from w3plex.security import SecretJson, SecretStore, SecretString
 from w3plex.security.memory import ProcessProtection
-from w3plex.security.storage import CiphertextFile
-from w3plex.security.vault import Vault
+from w3plex.security.stores.file import CiphertextFile
+from w3plex.security.stores.vault import Vault
 
 protection = ProcessProtection()
 protection.activate()

@@ -2,11 +2,11 @@
 
 from . import crypto as crypto
 from .adapters import SecretJson as SecretJson, SecretString as SecretString
-from .encrypted_io import (
+from .files.encrypted_io import (
     EncryptedIOContext as EncryptedIOContext,
     PasswordRequest as PasswordRequest,
 )
-from .io import (
+from .files.io import (
     decrypt_data as decrypt_data,
     decrypt_file as decrypt_file,
     disable_encrypted_io as disable_encrypted_io,
@@ -15,7 +15,7 @@ from .io import (
     encrypt_file as encrypt_file,
     unlock_keystore as unlock_keystore,
 )
-from .legacy import (
+from .files.legacy import (
     LegacyContext as LegacyContext,
     LegacyPasswordRequest as LegacyPasswordRequest,
 )

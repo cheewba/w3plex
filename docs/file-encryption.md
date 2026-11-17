@@ -64,7 +64,7 @@ Use `context.open()` when you do not want to replace `builtins.open`:
 
 ```python
 from w3plex.security import EncryptedIOContext
-from w3plex.security.io import request_password
+from w3plex.security.files.io import request_password
 
 
 def ask_password(request):

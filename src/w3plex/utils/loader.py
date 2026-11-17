@@ -16,7 +16,7 @@ from web3 import Web3
 from ..security import ISecretRef, SecretString
 from ..security.diagnostics import private_async, private_call
 from ..security.errors import PermissionDenied
-from ..security.file_opener import PlainFile
+from ..security.files.opener import PlainFile
 from ..w3.account import Account as ReferenceAccount
 from .filter import TemplateFilter
 

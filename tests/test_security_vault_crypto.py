@@ -36,29 +36,6 @@ def test_missing_aes_backend_returns_safe_capability_error(monkeypatch, operatio
     assert "private" not in str(raised.value)
 
 
-def test_missing_argon_at_derive_has_no_weaker_retry(monkeypatch):
-    calls = []
-
-    class Missing:
-        def __init__(self, **kwargs):
-            calls.append(kwargs)
-
-        def derive(self, password):
-            raise UnsupportedAlgorithm("PUBLIC-TEST-private-backend-details")
-
-    monkeypatch.setattr(crypto, "Argon2id", Missing)
-    envelope = codec.parse((FIXTURES / "sample.vault").read_bytes())
-    with pytest.raises(UnsupportedProtection) as raised:
-        codec.unwrap(envelope, b"PUBLIC-TEST-v1-password")
-    assert len(calls) == 1
-    assert (calls[0]["memory_cost"], calls[0]["iterations"], calls[0]["lanes"]) == (
-        65536,
-        3,
-        4,
-    )
-    assert raised.value.__context__ is None
-
-
 def test_repeated_initial_nonces_stop_before_kdf(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("Repeated nonces must not start derivation")
@@ -156,11 +133,14 @@ def test_work_bounds_before_kdf_and_no_missing_backend_fallback(monkeypatch):
     document = json.loads(envelope.serialize()[len(codec.MAGIC) :])
     attempts = []
 
-    def missing(**kwargs):
-        attempts.append(kwargs)
-        raise UnsupportedAlgorithm("PRIVATE dependency details")
+    class Missing:
+        def __init__(self, **kwargs):
+            attempts.append(kwargs)
 
-    monkeypatch.setattr(crypto, "Argon2id", missing)
+        def derive(self, password):
+            raise UnsupportedAlgorithm("PUBLIC-TEST-private-backend-details")
+
+    monkeypatch.setattr(crypto, "Argon2id", Missing)
     for field, value in [
         ("memory_kib", 10**9),
         ("iterations", 10000),
@@ -175,8 +155,17 @@ def test_work_bounds_before_kdf_and_no_missing_backend_fallback(monkeypatch):
     with pytest.raises(UnsupportedProtection) as caught:
         codec.unwrap(envelope, PASSWORD)
     assert len(attempts) == 1
+    assert (
+        attempts[0]["memory_cost"],
+        attempts[0]["iterations"],
+        attempts[0]["lanes"],
+    ) == (
+        65536,
+        3,
+        4,
+    )
     assert caught.value.__context__ is None
-    assert "PRIVATE" not in str(caught.value)
+    assert "private" not in str(caught.value)
 
 
 def test_store_size_and_duplicate_header_fields_rejected():

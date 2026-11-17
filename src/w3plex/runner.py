@@ -20,7 +20,7 @@ from .constants import (
     VARS_COLLECTION,
 )
 from .log import logger
-from .security.file_opener import DefaultFileOpener
+from .security.files.opener import DefaultFileOpener
 from .utils import load_path
 from .utils.loader import FileOpener, get_file_opener, using_file_opener
 

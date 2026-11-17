@@ -5,7 +5,7 @@ save, read and remove records; see [secret references](secret-references.md)
 for setup and examples.
 
 This page describes the bytes read and written by
-`w3plex.security.vault_format`.
+`w3plex.security.stores.format`.
 
 ## File layout
 

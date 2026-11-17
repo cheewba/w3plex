@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Never, Self, SupportsIndex, cast
 
-from ._crypto import reject_json_constant, unique_fields
+from .crypto.primitives import reject_json_constant, unique_fields
 from .diagnostics import private_call
 from .errors import InvalidStore, PermissionDenied
 from .refs import ISecretRef

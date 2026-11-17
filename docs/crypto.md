@@ -5,6 +5,21 @@ keys and HKDF-SHA256 subkeys. These operations have no file paths, record schema
 password prompts or global I/O changes. Existing W3FILE1 and W3VAULT1 formats use
 the same encryption and password-key operations, preserving their byte layouts.
 
+## Package layout
+
+- `crypto`: byte encryption, encoded blocks and key derivation.
+- `files`: encrypted-file contexts, formats, snapshots and standalone I/O.
+- `stores`: encrypted record vaults, their format and checked file persistence.
+- `refs`, `adapters`, `memory`, `errors` and `diagnostics`: shared reference and
+  protection contracts.
+
+New code can import `Vault` from `w3plex.security.stores.vault`, file contexts
+from `w3plex.security.files.encrypted_io` and helpers from
+`w3plex.security.files.io`. Existing module paths, including
+`w3plex.security.vault`, `storage`, `encrypted_io` and `file_format`, remain
+compatibility imports of the same implementations. The public `crypto` API and
+top-level exports keep their existing paths. No import activates encrypted I/O.
+
 ## Encrypt a block
 
 The application supplies bytes and an authenticated public context. Text, JSON
@@ -74,7 +89,7 @@ protocol. Existing `SecretStore(vault)` calls remain supported, including the
 
 - `checkpoint()`: an opaque session token; reject access when locked.
 - `guard(checkpoint)`: validate the token on entry and exit, and serialize the
-  enclosed work against lock/unlock. Nested guards must work.
+  enclosed work against lock/unlock. Each operation enters it once.
 - `validate_identifier(identifier)`: validate its own opaque string IDs.
 - `save(value)` and `read(identifier)`: save immutable bytes and read them later.
 

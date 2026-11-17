@@ -5,18 +5,19 @@ import secrets
 from collections.abc import Callable
 from pathlib import Path
 
-from . import file_format, vault_format
-from .constants import (
+from ..constants import (
     IDENTIFIER_BYTES,
     LEGACY_SALT_BYTES,
     LEGACY_STORE_MAGIC,
     MAX_LEGACY_STORE_BYTES,
 )
-from .errors import AuthenticationFailed, InvalidStore
+from ..errors import AuthenticationFailed, InvalidStore
+from ..memory import LockedBuffer, ProcessProtection
+from ..stores import format as vault_format
+from ..stores.file import CiphertextFile, StoreChanged
+from ..stores.vault import Vault
+from . import format as file_format
 from .legacy import decode_keystore
-from .memory import LockedBuffer, ProcessProtection
-from .storage import CiphertextFile, StoreChanged
-from .vault import Vault
 
 
 def migrate_keystore(

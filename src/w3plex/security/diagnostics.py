@@ -17,7 +17,7 @@ from .errors import (
     SecurityError,
     UnsupportedProtection,
 )
-from .storage import StoreChanged, UnsafeStorage, WriterBusy
+from .stores.file import StoreChanged, UnsafeStorage, WriterBusy
 
 _SAFE_ERRORS = {
     SecurityError,

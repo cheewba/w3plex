@@ -9,7 +9,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Self
 
-from ._crypto import (
+from ..constants import GCM_NONCE_BYTES, GCM_TAG_BYTES
+from ..errors import InvalidStore
+from .primitives import (
     DEFAULT_KDF,
     KdfSettings,
     decode_bytes,
@@ -21,8 +23,6 @@ from ._crypto import (
     generate_key,
     generate_salt,
 )
-from .constants import GCM_NONCE_BYTES, GCM_TAG_BYTES
-from .errors import InvalidStore
 
 __all__ = [
     "DEFAULT_KDF",

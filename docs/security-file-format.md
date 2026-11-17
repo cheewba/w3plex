@@ -4,10 +4,10 @@ W3FILE1 stores the encrypted content of one text or binary file. Most
 applications use `encrypt_file()` and `decrypt_file()` from `w3plex.security`.
 See [file encryption](file-encryption.md) for examples.
 
-Use `w3plex.security.file_format` when working directly with the container:
+Use `w3plex.security.files.format` when working directly with the container:
 
 ```python
-from w3plex.security import file_format
+from w3plex.security.files import format as file_format
 
 envelope, key = file_format.seal(data, password)
 encoded = envelope.serialize()

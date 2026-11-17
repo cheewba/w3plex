@@ -89,7 +89,7 @@ any required private input when it runs, rather than saving a password or sessio
 number when creating the config tree.
 
 Custom openers normally return `ISecretRef[bytes]`. An opener that also supports
-ordinary reads can return `w3plex.security.file_opener.PlainFile(raw_bytes)` for
+ordinary reads can return `w3plex.security.files.opener.PlainFile(raw_bytes)` for
 that case. These bytes are decoded as ordinary text and are not cached. Returning
 raw bytes directly is refused, and a failed encrypted read never falls back to
 ordinary reading.

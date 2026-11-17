@@ -5,7 +5,7 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from .errors import ActivationConflict
+from ..errors import ActivationConflict
 
 _LOCK = threading.RLock()
 _ACTIVE: tuple[object, Callable[..., Any], Callable[..., Any]] | None = None

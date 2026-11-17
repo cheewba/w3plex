@@ -4,7 +4,7 @@ import io
 import os
 from collections.abc import Callable
 
-from .errors import AuthenticationFailed, InvalidStore
+from ..errors import AuthenticationFailed, InvalidStore
 
 # Sample enough header bytes to identify current and known encrypted formats.
 _FORMAT_PROBE_BYTES = 16
