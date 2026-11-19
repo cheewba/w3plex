@@ -28,7 +28,8 @@ w3plex --help
 ```
 
 On Windows, activate with `.venv\Scripts\Activate.ps1`. Installation fetches
-the pinned Git dependencies: w3ext **0.0.5** and lazyplex **0.0.4**.
+the pinned Git dependencies: w3ext **0.0.6** and lazyplex **0.0.4**.
+w3ext 0.0.6 uses Web3.py 8.0.0 and aiohttp 3.14.5.
 
 ## Your first balance check
 
